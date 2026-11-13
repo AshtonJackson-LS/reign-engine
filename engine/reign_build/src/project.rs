@@ -25,7 +25,20 @@ pub fn engine_root() -> PathBuf {
         return PathBuf::from(dir);
     }
     let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    here.canonicalize().unwrap_or(here)
+    here.canonicalize().map(strip_verbatim).unwrap_or(here)
+}
+
+/// Drops the `\\?\` prefix `canonicalize` adds on Windows, which Cargo
+/// can't read as a dependency path (`\\?\UNC\server\share` → `\\server\share`).
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
 }
 
 /// Whether the project has code (a `Cargo.toml`).
@@ -485,6 +498,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn engine_paths_have_no_verbatim_prefix() {
+        assert_eq!(strip_verbatim(r"\\?\C:\x\y".into()), PathBuf::from(r"C:\x\y"));
+        assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\x".into()), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(strip_verbatim("/home/x".into()), PathBuf::from("/home/x"));
+        assert!(!engine_root().to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
     fn rename_only_touches_whole_words() {
         assert_eq!(
             rename("MyData MyDataX xMyData MyData::new", "MyData", "Hp"),
@@ -555,7 +576,8 @@ mod tests {
         );
         let game = std::fs::read_to_string(root.join("src/game.rs")).unwrap();
         assert!(game.contains("reign_engine::play(space_rocks::scripts())"), "{game}");
-        assert!(game_path(&root, &name).ends_with("target/release/space_rocks-game"));
+        let exe = if cfg!(windows) { ".exe" } else { "" };
+        assert!(game_path(&root, &name).ends_with(format!("target/release/space_rocks-game{exe}")));
         assert!(!ensure_game_bin(&root, "Space Rocks").unwrap(), "already there");
         let _ = std::fs::remove_dir_all(&root);
     }

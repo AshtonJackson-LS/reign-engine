@@ -86,6 +86,9 @@ pub struct Code {
     /// Export Game just made this project a crate: once the game is out,
     /// build its editor and switch to it, as New Component does.
     switch_after_export: bool,
+    /// Windows: this editor's .exe, moved aside so a build can replace it
+    /// (where it went, where it was).
+    moved_aside: Option<(PathBuf, PathBuf)>,
     mode: PlayMode,
 }
 
@@ -110,6 +113,7 @@ impl Code {
             export_dialog: None,
             export_dir: None,
             switch_after_export: false,
+            moved_aside: None,
             mode: PlayMode::Edit,
         };
         // Opened in an editor without this project's code (the stock one):
@@ -143,6 +147,7 @@ impl Code {
             return;
         }
         let Some(name) = self.crate_name() else { return };
+        self.moved_aside = move_running_editor_aside(&project::editor_path(&self.root, &name));
         let mut command = project::build_command(&self.root, &name);
         command.stdout(Stdio::null()).stderr(Stdio::piped());
         let (tx, rx) = channel();
@@ -166,7 +171,21 @@ impl Code {
                 });
                 self.failed = false;
             }
-            Err(e) => log::error!("can't run cargo: {e}"),
+            Err(e) => {
+                log::error!("can't run cargo: {e}");
+                self.put_editor_back();
+            }
+        }
+    }
+
+    /// After a build that made no new editor: the running one goes back
+    /// where it was, so the Hub can still open it.
+    fn put_editor_back(&mut self) {
+        let Some((aside, original)) = self.moved_aside.take() else { return };
+        if !original.exists()
+            && let Err(e) = std::fs::rename(&aside, &original)
+        {
+            log::warn!("couldn't put {} back: {e}", original.display());
         }
     }
 
@@ -270,6 +289,7 @@ impl Code {
             let secs = build.started.elapsed().as_secs();
             self.build = None;
             if ok {
+                self.moved_aside = None;
                 let exe = self.crate_name().map(|n| project::editor_path(&self.root, &n));
                 let built = exe.and_then(|p| p.metadata().ok()?.modified().ok());
                 let same_editor = self.compiled_for.is_some()
@@ -287,6 +307,7 @@ impl Code {
                 log::error!(
                     "the build failed: fix the errors above, then Scripts → Recompile (Ctrl+R)"
                 );
+                self.put_editor_back();
                 self.failed = true;
             }
         }
@@ -634,6 +655,38 @@ impl Code {
 }
 
 /// The newest modification time among the project's code files.
+/// Windows won't let cargo replace a running program's file, but it will
+/// let it be renamed. When `target` is this editor, it's moved to
+/// `<name>.old-<pid>.exe` (cleared up by a later build, once nothing runs
+/// it) so the build can write a new one. Returns (moved to, moved from).
+fn move_running_editor_aside(target: &Path) -> Option<(PathBuf, PathBuf)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let dir = target.parent()?;
+    let stem = target.file_stem()?.to_string_lossy().into_owned();
+    // Old ones from earlier reloads: their editors have closed by now
+    // (one still running stays locked and is left for next time).
+    let prefix = format!("{stem}.old-");
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let running = std::env::current_exe().ok()?.canonicalize().ok()?;
+    if target.canonicalize().ok()? != running {
+        return None;
+    }
+    let aside = dir.join(format!("{prefix}{}.exe", std::process::id()));
+    match std::fs::rename(target, &aside) {
+        Ok(()) => Some((aside, target.to_owned())),
+        Err(e) => {
+            log::warn!("couldn't move the running editor aside: {e}");
+            None
+        }
+    }
+}
+
 fn newest_source(root: &Path) -> Option<SystemTime> {
     let mut newest: Option<SystemTime> = None;
     let mut consider = |path: &Path| {
@@ -675,4 +728,26 @@ fn reveal(path: &Path) {
 /// The typed name, or the template's suggestion when it's left empty.
 fn effective_name(typed: &str, template: Template) -> String {
     if typed.trim().is_empty() { template.suggested_name().to_owned() } else { typed.to_owned() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_running_editor_is_moved_aside() {
+        let dir = std::env::temp_dir().join(format!("reign-aside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("game-editor.exe");
+        let stale = dir.join("game-editor.old-1.exe");
+        std::fs::write(&target, "").unwrap();
+        std::fs::write(&stale, "").unwrap();
+        // Not this process's exe: left where it is.
+        assert_eq!(move_running_editor_aside(&target), None);
+        assert!(target.exists());
+        if cfg!(windows) {
+            assert!(!stale.exists(), "leftovers from earlier reloads are cleared");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
