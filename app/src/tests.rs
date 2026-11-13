@@ -216,7 +216,8 @@ mod templates {
     /// the player lands on the ground and runs right.
     #[test]
     fn the_agent_guides_scene_loads_and_plays() {
-        let guide = reign_build::project::agent_guide("Test");
+        // A Windows checkout may have turned the template's line endings into CRLF.
+        let guide = reign_build::project::agent_guide("Test").replace("\r\n", "\n");
         let start = guide.find("```ron\n").expect("a ron block") + "```ron\n".len();
         let text = &guide[start..start + guide[start..].find("```").expect("its end")];
 
