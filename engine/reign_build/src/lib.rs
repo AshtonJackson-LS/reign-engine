@@ -26,6 +26,7 @@
 
 pub mod ide;
 pub mod project;
+pub mod release;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

@@ -4,6 +4,19 @@ A deterministic 2D engine in Rust (wgpu + winit), with a Unity-style editor:
 scenes of game objects and components, reflection-driven Inspector, Project
 browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
 
+## Download
+
+- **Windows:** [ReignSetup.exe](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/ReignSetup.exe)
+  installs Reign Hub for your user (Start menu, Desktop, and Uninstall in
+  Settings → Apps; no administrator rights). Windows may say "Windows
+  protected your PC": click **More info → Run anyway**.
+- **macOS and Linux:** on the [Releases page](https://github.com/AshtonJackson-LS/reign-engine/releases/latest).
+
+Reign Hub updates itself: a green arrow appears in its top bar when a new
+version is out. Writing your own components needs [Rust](https://rustup.rs).
+
+Making releases: see [RELEASING.md](RELEASING.md).
+
 ## Layout
 
 | Path | What it is |
@@ -18,7 +31,8 @@ browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
 | `engine/reign_physics`, `reign_combat`, `reign_audio`, `reign_net` | Platformer physics, frame-data combat, audio mixing, rollback netcode. |
 | `engine/reign_editor` | The editor shell (egui). |
 | `app` | `reign-engine`: the editor around a project folder, with no game attached. |
-| `hub` | `reign-hub`: Reign Hub, the launcher that creates, lists and opens projects. |
+| `hub` | `reign-hub`: Reign Hub, the launcher that creates, lists and opens projects. Also `reign-release`, which signs releases. |
+| `installer` | `ReignSetup.exe`, the Windows installer, and the install/uninstall steps the hub shares. |
 | `engine/reign_build` | Project tooling with no dependencies: registers `src/components/` from a project's `build.rs`, writes project and component templates, finds code editors. |
 
 See [docs/ENGINE.md](docs/ENGINE.md) for the scene/component/asset model.
@@ -32,9 +46,30 @@ in `~/Library/Application Support/Reign Engine/hub.ron`. A project folder is
 marked by `ReignProject.ron` (name and engine version).
 
 For UI checks without a screen, `REIGN_HUB_SNAPSHOTS=<dir> reign-hub` plays a
-fixed script (intro frames, each page, the New project dialog), saves PNGs of
-the hub's window into `<dir>` and quits. Fonts are Bebas Neue and Inter, both
-under the SIL Open Font License (`hub/assets/fonts/`).
+fixed script (intro frames, each page, the New project and Engine version
+dialogs), saves PNGs of the hub's window into `<dir>` and quits. Fonts are
+Bebas Neue and Inter, both under the SIL Open Font License
+(`hub/assets/fonts/`).
+
+### Installing, updates and engine versions
+
+On Windows, `ReignSetup.exe` (the `installer` crate) installs the hub and
+editor to `%LOCALAPPDATA%\Programs\Reign Engine`, with shortcuts and a
+Settings → Apps entry whose Uninstall runs `reign-hub.exe --uninstall`.
+`update-reign.bat` builds it from your checkout and installs it.
+
+The hub shows a green arrow when its repository has a newer release. On
+Windows the arrow downloads the release's zip, installs it only if its
+signature matches the public key built into the hub (`hub/src/signing.rs`),
+and restarts; elsewhere it opens the release page. `REIGN_NO_UPDATE_CHECK=1`
+turns the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI
+checks. Making releases, approvals and forks: [RELEASING.md](RELEASING.md).
+
+Each project records its engine version (••• → **Engine version…** changes
+it, from the repository's releases). A project without code opens in that
+version's editor, downloaded into `versions/` beside the hub when it isn't
+the hub's own. A project with code builds its editor against what its
+Cargo.toml names: a release's git tag, or a local engine checkout.
 
 ## Running the editor directly
 
@@ -138,7 +173,9 @@ Ctrl/Cmd+R does it by hand. Reign Hub builds a project with code before
 opening it; the first build compiles the engine and takes a few minutes.
 Pick the code editor (VS Code, RustRover, Cursor, Zed, Sublime Text) in the
 hub's About page or Scripts → Code editor. Projects build against this
-checkout (`REIGN_ENGINE_SOURCE` overrides it).
+checkout (`REIGN_ENGINE_SOURCE` overrides it). Where there's no checkout (a
+downloaded release), new projects fetch the engine from GitHub at the
+release's tag instead (`reign = { git = "…", tag = "v0.2.0" }`).
 
 Physics: add a `Rigidbody` (Dynamic falls and collides, Kinematic moves by
 its velocity through everything, Static never moves; gravity scale, velocity

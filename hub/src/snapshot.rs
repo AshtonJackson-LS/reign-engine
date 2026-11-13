@@ -11,6 +11,12 @@ pub enum Step {
     About,
     Projects,
     NewProject,
+    /// Closes any dialog.
+    CloseDialogs,
+    /// The Engine version dialog, for the first project listed.
+    EngineVersion,
+    /// What opening a project made with an engine that isn't here asks.
+    OpenChoice,
     Quit,
 }
 
@@ -26,7 +32,13 @@ const SCRIPT: &[(f64, Step)] = &[
     (4.10, Step::Projects),
     (4.20, Step::NewProject),
     (4.80, Step::Shot("new-project")),
-    (5.20, Step::Quit),
+    (5.00, Step::CloseDialogs),
+    (5.10, Step::EngineVersion),
+    (7.00, Step::Shot("engine-version")),
+    (7.20, Step::CloseDialogs),
+    (7.30, Step::OpenChoice),
+    (7.80, Step::Shot("open-choice")),
+    (8.20, Step::Quit),
 ];
 
 pub struct Snapshots {

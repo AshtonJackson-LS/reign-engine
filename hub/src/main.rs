@@ -5,6 +5,7 @@
 //! `reign-engine` editor, which it finds next to its own executable (or at
 //! `$REIGN_EDITOR`). The list lives in `hub.ron` in the platform's config
 //! folder.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,12 +13,16 @@ use std::process::{Child, Command};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod intro;
+mod signing;
 mod snapshot;
 mod theme;
+mod update;
+mod versions;
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Sense, Stroke, Vec2,
 };
+use reign_setup::no_console;
 use serde::{Deserialize, Serialize};
 
 use intro::Intro;
@@ -147,10 +152,46 @@ fn editor_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("REIGN_EDITOR") {
         return Some(PathBuf::from(path));
     }
-    let name = if cfg!(windows) { "reign-engine.exe" } else { "reign-engine" };
     let exe = std::env::current_exe().ok()?;
-    let beside = exe.parent()?.join(name);
+    let beside = exe.parent()?.join(editor_name());
     beside.is_file().then_some(beside)
+}
+
+fn editor_name() -> &'static str {
+    if cfg!(windows) { "reign-engine.exe" } else { "reign-engine" }
+}
+
+/// "engine 0.2.0", or "the local engine source" for a checkout.
+fn engine_label(version: &Option<String>) -> String {
+    match version {
+        Some(v) => format!("engine {v}"),
+        None => "the local engine source".to_owned(),
+    }
+}
+
+/// Records the engine version a project uses in its `ReignProject.ron`.
+fn set_project_version(path: &Path, version: &str) -> Result<(), String> {
+    let mut file = read_project(path)
+        .unwrap_or_else(|| ProjectFile { name: project_name(path), engine_version: String::new() });
+    file.engine_version = version.to_owned();
+    let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(path.join(PROJECT_FILE), text).map_err(|e| e.to_string())
+}
+
+/// The engine version a project uses: for a project with code, what its
+/// Cargo.toml builds against (`None`: a local checkout); otherwise what its
+/// project file records (the hub's version if it records none).
+fn project_version(path: &Path) -> Option<String> {
+    if project::has_code(path) {
+        return match project::project_engine(path) {
+            Some(project::EngineSource::Local(_)) => None,
+            Some(source) => source.version().map(str::to_owned),
+            None => Some(VERSION.to_owned()),
+        };
+    }
+    let recorded = read_project(path).map(|p| p.engine_version).unwrap_or_default();
+    Some(if recorded.is_empty() { VERSION.to_owned() } else { recorded })
 }
 
 fn reveal(path: &Path) {
@@ -218,6 +259,29 @@ struct Hub {
     intro: Intro,
     grain: egui::TextureHandle,
     snapshots: Option<snapshot::Snapshots>,
+    updater: update::Updater,
+    versions: versions::Versions,
+    /// The Engine version dialog, for one project.
+    version_dialog: Option<VersionDialog>,
+    /// A project made with an engine version that isn't here: how to open it.
+    open_choice: Option<OpenChoice>,
+    /// A project to open once its engine version has downloaded.
+    open_after_download: Option<(PathBuf, String)>,
+}
+
+struct VersionDialog {
+    path: PathBuf,
+    code: bool,
+    /// What it uses now; `None` is a local engine checkout.
+    current: Option<String>,
+    /// What's picked; `None` is a local engine checkout.
+    choice: Option<String>,
+    error: Option<String>,
+}
+
+struct OpenChoice {
+    path: PathBuf,
+    version: String,
 }
 
 impl Hub {
@@ -238,6 +302,11 @@ impl Hub {
             intro,
             grain: theme::grain_texture(&cc.egui_ctx),
             snapshots: snapshot::Snapshots::from_env(),
+            updater: update::Updater::new(),
+            versions: versions::Versions::new(),
+            version_dialog: None,
+            open_choice: None,
+            open_after_download: None,
         }
     }
 
@@ -278,11 +347,22 @@ impl Hub {
             let Some(editor) = cached.filter(|p| p.is_file()) else {
                 return self.build(path);
             };
-            let mut command = Command::new(editor);
+            let mut command = no_console(Command::new(editor));
             command.env("REIGN_CHECK_BUILD_ON_OPEN", "1");
             command
+        } else if let Some(version) = project_version(path).filter(|v| v != VERSION) {
+            if self.versions.installing.as_deref() == Some(version.as_str()) {
+                return self.info(format!("Engine {version} is still downloading…"));
+            }
+            match versions::editor_for(&version) {
+                Some(editor) => no_console(Command::new(editor)),
+                None => {
+                    self.open_choice = Some(OpenChoice { path: path.to_owned(), version });
+                    return;
+                }
+            }
         } else if let Some(editor) = editor_path() {
-            Command::new(editor)
+            no_console(Command::new(editor))
         } else {
             return self.error(
                 "Can't find the reign-engine editor next to the hub (set REIGN_EDITOR to its path)",
@@ -372,7 +452,7 @@ impl Hub {
             }
             let Some(name) = project::read_crate_name(&path) else { continue };
             let exe = project::editor_path(&path, &name);
-            match Command::new(&exe).arg(&path).spawn() {
+            match no_console(Command::new(&exe)).arg(&path).spawn() {
                 Ok(child) => {
                     let secs = build.started.elapsed().as_secs();
                     self.running.insert(path.clone(), child);
@@ -488,6 +568,51 @@ impl Hub {
         let at =
             Pos2::new(rect.right() - GUTTER - v.size().x, rect.center().y - v.size().y / 2.0 + 2.0);
         ui.painter().galley(at, v, FAINT);
+
+        // A green arrow beside the version when a newer release is out.
+        let busy = matches!(self.updater.state, update::State::Installing(_));
+        if let update::State::Available(version) | update::State::Installing(version) =
+            self.updater.state.clone()
+        {
+            let center = Pos2::new(at.x - 28.0, rect.center().y);
+            let hit = Rect::from_center_size(center, Vec2::splat(30.0));
+            let response = ui.interact(hit, Id::new("update"), Sense::click());
+            let tip = if busy {
+                format!("Installing {version}…")
+            } else {
+                format!("Update to {version}")
+            };
+            let response =
+                response.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let fill = if busy {
+                GOOD.gamma_multiply(0.45)
+            } else if response.hovered() {
+                Color32::from_rgb(150, 232, 176)
+            } else {
+                GOOD
+            };
+            let painter = ui.painter();
+            painter.circle_filled(center, 13.0, fill);
+            let stroke = Stroke::new(2.2, BG);
+            painter.line_segment(
+                [center + Vec2::new(0.0, -6.0), center + Vec2::new(0.0, 5.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(-5.0, 0.5), center + Vec2::new(0.0, 5.5)],
+                stroke,
+            );
+            painter
+                .line_segment([center + Vec2::new(5.0, 0.5), center + Vec2::new(0.0, 5.5)], stroke);
+            if response.clicked() && !busy {
+                if !self.running.is_empty() {
+                    self.info("Close open editors before updating");
+                } else {
+                    self.info(format!("Updating to {version}…"));
+                    self.updater.install(ui.ctx());
+                }
+            }
+        }
     }
 
     /// The grainy red band at the top of a page, with a huge title cropped
@@ -626,6 +751,7 @@ impl Hub {
 
         let mut open = None;
         let mut code = None;
+        let mut version = None;
         let mut remove = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (i, (entry, name)) in rows.iter().enumerate() {
@@ -633,6 +759,7 @@ impl Hub {
                     match action {
                         RowAction::Open => open = Some(entry.path.clone()),
                         RowAction::Code => code = Some(entry.path.clone()),
+                        RowAction::Version => version = Some(entry.path.clone()),
                         RowAction::Remove => remove = Some(entry.path.clone()),
                     }
                 }
@@ -643,6 +770,9 @@ impl Hub {
         }
         if let Some(path) = code {
             self.open_code(&path);
+        }
+        if let Some(path) = version {
+            self.start_version_dialog(path);
         }
         if let Some(path) = remove {
             self.settings.projects.retain(|e| e.path != path);
@@ -744,6 +874,10 @@ impl Hub {
             if ui.add_enabled(!missing, egui::Button::new(format!("Open in {ide_name}"))).clicked()
             {
                 action = Some(RowAction::Code);
+                ui.close();
+            }
+            if ui.add_enabled(!missing, egui::Button::new("Engine version…")).clicked() {
+                action = Some(RowAction::Version);
                 ui.close();
             }
             if ui.add_enabled(!missing, egui::Button::new("Show in folder")).clicked() {
@@ -889,119 +1023,378 @@ impl Hub {
         });
     }
 
+    // -------------------------------------------------------- engine versions
+
+    fn start_version_dialog(&mut self, path: PathBuf) {
+        let current = project_version(&path);
+        self.version_dialog = Some(VersionDialog {
+            code: project::has_code(&path),
+            choice: current.clone(),
+            current,
+            path,
+            error: None,
+        });
+    }
+
+    fn poll_versions(&mut self) {
+        let Some((version, result)) = self.versions.poll() else { return };
+        match result {
+            Ok(()) => {
+                self.info(format!("Engine {version} is ready"));
+                let waiting = self.open_after_download.take().filter(|(_, v)| *v == version);
+                if let Some((path, _)) = waiting {
+                    self.open(&path);
+                }
+            }
+            Err(e) => {
+                self.open_after_download = None;
+                self.error(format!("Couldn't get engine {version}: {e}"));
+            }
+        }
+    }
+
+    /// The hub's dialog: a dark card over a dimmed window.
+    fn modal(id: &str) -> egui::Modal {
+        egui::Modal::new(Id::new(id))
+            .frame(
+                egui::Frame::new()
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0, HAIRLINE))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(Margin::same(28)),
+            )
+            .backdrop_color(Color32::from_black_alpha(170))
+    }
+
+    /// Picks the engine version one project uses.
+    fn version_dialog(&mut self, ctx: &egui::Context) {
+        if self.version_dialog.is_none() {
+            return;
+        }
+        self.versions.fetch(ctx);
+        let (releases, status) = match &self.versions.releases {
+            Some(Ok(r)) => (r.clone(), None),
+            None => (Vec::new(), Some(("Looking up releases on GitHub…".to_owned(), MUTED))),
+            Some(Err(e)) => (
+                Vec::new(),
+                Some((format!("Couldn't reach GitHub ({e}). Showing what's here."), RED_HOT)),
+            ),
+        };
+        let installed = versions::installed();
+        let all = self.versions.all();
+        let Some(dialog) = &mut self.version_dialog else { return };
+
+        // What can be picked: a local checkout (projects with code, on a
+        // machine that has one) and versions.
+        let mut options: Vec<Option<String>> = Vec::new();
+        if dialog.code {
+            if project::EngineSource::local().is_some() {
+                options.push(None);
+            }
+            let mut list = releases.clone();
+            list.extend(dialog.current.clone());
+            update::sort_newest_first(&mut list);
+            options.extend(list.into_iter().map(Some));
+        } else {
+            options.extend(all.into_iter().map(Some));
+        }
+
+        let mut apply = false;
+        let mut cancel = false;
+        let modal = Self::modal("engine version").show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(eyebrow("↳ Engine version", RED_HOT));
+            ui.label(text("ENGINE VERSION", Face::Display, 48.0, TEXT, 0.8));
+            ui.add_space(4.0);
+            ui.label(text(
+                format!("{} uses {}.", project_name(&dialog.path), engine_label(&dialog.current)),
+                Face::Medium,
+                14.0,
+                TEXT,
+                -0.2,
+            ));
+            ui.add_space(10.0);
+            if let Some((words, color)) = &status {
+                ui.label(text(words, Face::Regular, 12.5, *color, -0.1));
+            }
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for option in &options {
+                    let in_use = *option == dialog.current;
+                    let (note, available) = match option {
+                        None => ("your engine checkout", true),
+                        Some(v) if dialog.code && releases.contains(v) => ("GitHub release", true),
+                        Some(_) if dialog.code => ("no release on GitHub", in_use),
+                        Some(v) if v == VERSION => ("this hub's editor", true),
+                        Some(v) if installed.contains(v) => ("downloaded", true),
+                        Some(v) if versions::can_download() && releases.contains(v) => {
+                            ("downloads when picked", true)
+                        }
+                        Some(_) => ("not available here", false),
+                    };
+                    let in_use = if in_use { "in use · " } else { "" };
+                    let name = option
+                        .as_ref()
+                        .map_or("Local engine source".into(), |v| format!("Engine {v}"));
+                    let label = format!("{name}    {in_use}{note}");
+                    let picked = dialog.choice == *option;
+                    let clicked = ui
+                        .add_enabled_ui(available, |ui| ui.selectable_label(picked, label))
+                        .inner
+                        .clicked();
+                    if clicked {
+                        dialog.choice = option.clone();
+                    }
+                }
+            });
+            ui.add_space(10.0);
+            let mut note = String::from(
+                "Going back to an older engine can fail to load scenes saved by a newer \
+                     one. Back up the project (or commit it to git) before switching.",
+            );
+            if dialog.code {
+                note.push_str(
+                    " The project's editor rebuilds with the new engine the next time you \
+                         open it; a version's first build takes a few minutes.",
+                );
+            }
+            let mut note = text(note, Face::Regular, 12.0, FAINT, -0.1);
+            note.wrap.max_width = ui.available_width();
+            ui.label(note);
+            if let Some(e) = &dialog.error {
+                ui.add_space(4.0);
+                ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
+            }
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let changed = dialog.choice != dialog.current;
+                if ui.add_enabled(changed, theme::primary("Use this version")).clicked() {
+                    apply = true;
+                }
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if modal.should_close() {
+            cancel = true;
+        }
+        if apply {
+            self.apply_version(ctx);
+        } else if cancel {
+            self.version_dialog = None;
+        }
+    }
+
+    /// Switches the dialog's project to the picked version.
+    fn apply_version(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.version_dialog else { return };
+        let path = dialog.path.clone();
+        let name = project_name(&path);
+        if self.running.contains_key(&path) {
+            dialog.error = Some(format!("Close {name}'s editor first."));
+            return;
+        }
+        let version = dialog.choice.clone().unwrap_or_else(|| VERSION.to_owned());
+        let result = if dialog.code {
+            let source = match &dialog.choice {
+                Some(v) => Some(project::EngineSource::release(v)),
+                None => project::EngineSource::local(),
+            };
+            match source {
+                None => Err("there's no engine checkout on this computer".to_owned()),
+                Some(source) => project::set_project_engine(&path, &source)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| set_project_version(&path, &version)),
+            }
+        } else {
+            set_project_version(&path, &version)
+        };
+        if let Err(e) = result {
+            dialog.error = Some(e);
+            return;
+        }
+        let code = dialog.code;
+        let label = engine_label(&dialog.choice);
+        self.version_dialog = None;
+        if code {
+            // The old editor was built with the old engine: build a new one.
+            if let Some(crate_name) = project::read_crate_name(&path) {
+                let _ = std::fs::remove_file(project::editor_path(&path, &crate_name));
+            }
+            self.failed.remove(&path);
+            self.info(format!("{name} now uses {label}. Its editor rebuilds when you open it."));
+        } else if versions::editor_for(&version).is_none() {
+            self.versions.install(ctx, &version);
+            self.info(format!("{name} now uses {label}. Downloading it…"));
+        } else {
+            self.info(format!("{name} now uses {label}."));
+        }
+    }
+
+    /// A project set to an engine version that isn't on this computer.
+    fn open_choice_dialog(&mut self, ctx: &egui::Context) {
+        let Some(choice) = &self.open_choice else { return };
+        let (path, version) = (choice.path.clone(), choice.version.clone());
+        let name = project_name(&path);
+        let newer = update::is_newer(&version, VERSION);
+        let can_download = versions::can_download();
+        let mut upgrade = false;
+        let mut download = false;
+        let mut cancel = false;
+        let modal = Self::modal("open with").show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(eyebrow("↳ Engine version", RED_HOT));
+            ui.label(text("WHICH ENGINE?", Face::Display, 48.0, TEXT, 0.8));
+            ui.add_space(4.0);
+            let body = if newer {
+                format!(
+                    "{name} uses engine {version}, which is newer than this hub \
+                         ({VERSION}). Update the hub with the green arrow at the top, or \
+                         download {version} just for this project."
+                )
+            } else {
+                format!(
+                    "{name} uses engine {version}, which isn't on this computer. Open it \
+                         with this hub's engine to move it up to {VERSION}, or download \
+                         {version} to keep it as it is."
+                )
+            };
+            let mut body = text(body, Face::Regular, 13.5, MUTED, -0.1);
+            body.wrap.max_width = ui.available_width();
+            ui.label(body);
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(theme::primary(&format!("Open with {VERSION}"))).clicked() {
+                    upgrade = true;
+                }
+                if can_download
+                    && ui.add(theme::secondary(&format!("Download {version}"))).clicked()
+                {
+                    download = true;
+                }
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if modal.should_close() {
+            cancel = true;
+        }
+        if upgrade {
+            self.open_choice = None;
+            match set_project_version(&path, VERSION) {
+                Ok(()) => self.open(&path),
+                Err(e) => self.error(format!("Can't update {name}'s project file: {e}")),
+            }
+        } else if download {
+            self.open_choice = None;
+            self.open_after_download = Some((path, version.clone()));
+            self.versions.install(ctx, &version);
+            self.info(format!("Downloading engine {version}… {name} opens when it's ready."));
+        } else if cancel {
+            self.open_choice = None;
+        }
+    }
+
     // ------------------------------------------------------------ new project
 
     fn new_project_dialog(&mut self, ctx: &egui::Context) {
         let Some(np) = &mut self.new_project else { return };
         let mut create = false;
         let mut cancel = false;
-        let frame = egui::Frame::new()
-            .fill(SURFACE)
-            .stroke(Stroke::new(1.0, HAIRLINE))
-            .corner_radius(CornerRadius::same(18))
-            .inner_margin(Margin::same(28));
-        let modal = egui::Modal::new(Id::new("new project"))
-            .frame(frame)
-            .backdrop_color(Color32::from_black_alpha(170))
-            .show(ctx, |ui| {
-                ui.set_width(500.0);
-                ui.label(eyebrow("↳ Create", RED_HOT));
-                ui.label(text("NEW PROJECT", Face::Display, 56.0, TEXT, 0.8));
-                ui.add_space(10.0);
+        let modal = Self::modal("new project").show(ctx, |ui| {
+            ui.set_width(500.0);
+            ui.label(eyebrow("↳ Create", RED_HOT));
+            ui.label(text("NEW PROJECT", Face::Display, 56.0, TEXT, 0.8));
+            ui.add_space(10.0);
 
-                egui::Frame::new()
-                    .fill(SURFACE_2)
-                    .stroke(Stroke::new(1.5, RED))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(Margin::symmetric(16, 12))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(text("EMPTY 2D", Face::Display, 24.0, TEXT, 0.6));
-                                ui.label(text(
-                                    "A scene with a camera. Drag art in from the Project panel.",
-                                    Face::Regular,
-                                    12.5,
-                                    MUTED,
-                                    -0.1,
-                                ));
-                            });
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(text("●", Face::Bold, 14.0, RED, 0.0));
-                            });
+            egui::Frame::new()
+                .fill(SURFACE_2)
+                .stroke(Stroke::new(1.5, RED))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(text("EMPTY 2D", Face::Display, 24.0, TEXT, 0.6));
+                            ui.label(text(
+                                "A scene with a camera. Drag art in from the Project panel.",
+                                Face::Regular,
+                                12.5,
+                                MUTED,
+                                -0.1,
+                            ));
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(text("●", Face::Bold, 14.0, RED, 0.0));
                         });
                     });
-
-                ui.add_space(10.0);
-                ui.add_enabled_ui(self.cargo, |ui| {
-                    ui.checkbox(
-                        &mut np.scripts,
-                        text(
-                            "Rust scripts: write your own components",
-                            Face::Medium,
-                            13.5,
-                            TEXT,
-                            -0.2,
-                        ),
-                    )
-                    .on_hover_text(
-                        "Makes the project a Rust crate. Its first build takes a few minutes.",
-                    );
                 });
-                if !self.cargo {
-                    ui.label(text(
-                        "Install Rust (rustup.rs) to write components.",
-                        Face::Regular,
-                        12.0,
-                        FAINT,
-                        -0.1,
-                    ));
+
+            ui.add_space(10.0);
+            ui.add_enabled_ui(self.cargo, |ui| {
+                ui.checkbox(
+                    &mut np.scripts,
+                    text("Rust scripts: write your own components", Face::Medium, 13.5, TEXT, -0.2),
+                )
+                .on_hover_text(
+                    "Makes the project a Rust crate. Its first build takes a few minutes.",
+                );
+            });
+            if !self.cargo {
+                ui.label(text(
+                    "Install Rust (rustup.rs) to write components.",
+                    Face::Regular,
+                    12.0,
+                    FAINT,
+                    -0.1,
+                ));
+            }
+            ui.add_space(12.0);
+            ui.label(eyebrow("Project name", MUTED));
+            let name = text_field(ui, &mut np.name, "My Project", f32::INFINITY);
+            if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                create = true;
+            }
+            ui.add_space(10.0);
+            ui.label(eyebrow("Location", MUTED));
+            ui.horizontal(|ui| {
+                let browse = ui.add(theme::secondary("Browse…"));
+                text_field(ui, &mut np.location, "", f32::INFINITY);
+                if browse.clicked()
+                    && let Some(dir) =
+                        rfd::FileDialog::new().set_directory(&np.location).pick_folder()
+                {
+                    np.location = dir.display().to_string();
                 }
-                ui.add_space(12.0);
-                ui.label(eyebrow("Project name", MUTED));
-                let name = text_field(ui, &mut np.name, "My Project", f32::INFINITY);
-                if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            });
+            let target = PathBuf::from(&np.location).join(np.name.trim());
+            ui.add_space(2.0);
+            let mut preview =
+                text(format!("→ {}", target.display()), Face::Regular, 12.0, FAINT, -0.1);
+            preview.wrap.max_width = ui.available_width();
+            preview.wrap.max_rows = 1;
+            preview.wrap.break_anywhere = true;
+            preview.wrap.overflow_character = Some('…');
+            ui.label(preview);
+            if let Some(e) = &np.error {
+                ui.add_space(4.0);
+                ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
+            }
+            ui.add_space(20.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_enabled(!np.name.trim().is_empty(), theme::primary("Create project"))
+                    .clicked()
+                {
                     create = true;
                 }
-                ui.add_space(10.0);
-                ui.label(eyebrow("Location", MUTED));
-                ui.horizontal(|ui| {
-                    let browse = ui.add(theme::secondary("Browse…"));
-                    text_field(ui, &mut np.location, "", f32::INFINITY);
-                    if browse.clicked()
-                        && let Some(dir) =
-                            rfd::FileDialog::new().set_directory(&np.location).pick_folder()
-                    {
-                        np.location = dir.display().to_string();
-                    }
-                });
-                let target = PathBuf::from(&np.location).join(np.name.trim());
-                ui.add_space(2.0);
-                let mut preview =
-                    text(format!("→ {}", target.display()), Face::Regular, 12.0, FAINT, -0.1);
-                preview.wrap.max_width = ui.available_width();
-                preview.wrap.max_rows = 1;
-                preview.wrap.break_anywhere = true;
-                preview.wrap.overflow_character = Some('…');
-                ui.label(preview);
-                if let Some(e) = &np.error {
-                    ui.add_space(4.0);
-                    ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
                 }
-                ui.add_space(20.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!np.name.trim().is_empty(), theme::primary("Create project"))
-                        .clicked()
-                    {
-                        create = true;
-                    }
-                    if ui.add(theme::secondary("Cancel")).clicked() {
-                        cancel = true;
-                    }
-                });
             });
+        });
         if modal.should_close() {
             cancel = true;
         }
@@ -1035,6 +1428,7 @@ impl Hub {
 enum RowAction {
     Open,
     Code,
+    Version,
     Remove,
 }
 
@@ -1092,6 +1486,19 @@ impl eframe::App for Hub {
         self.reap();
         self.poll_builds();
         let ctx = ui.ctx().clone();
+        if self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some() {
+            self.updater.check(&ctx);
+        }
+        if let Some(error) = self.updater.poll() {
+            self.error(error);
+        }
+        self.poll_versions();
+        if let Some(hub) = self.updater.restart.take() {
+            match Command::new(&hub).spawn() {
+                Ok(_) => return ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.error(format!("Updated, but can't restart {}: {e}", hub.display())),
+            }
+        }
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
@@ -1132,6 +1539,21 @@ impl eframe::App for Hub {
                 Step::About => self.page = Page::About,
                 Step::Projects => self.page = Page::Projects,
                 Step::NewProject => self.start_new_project(),
+                Step::CloseDialogs => {
+                    self.new_project = None;
+                    self.version_dialog = None;
+                    self.open_choice = None;
+                }
+                Step::EngineVersion => {
+                    if let Some(path) = self.settings.projects.first().map(|e| e.path.clone()) {
+                        self.start_version_dialog(path);
+                    }
+                }
+                Step::OpenChoice => {
+                    if let Some(path) = self.settings.projects.first().map(|e| e.path.clone()) {
+                        self.open_choice = Some(OpenChoice { path, version: "0.0.9".into() });
+                    }
+                }
                 Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
@@ -1169,15 +1591,75 @@ impl eframe::App for Hub {
             }
         });
         self.new_project_dialog(&ctx);
+        self.version_dialog(&ctx);
+        self.open_choice_dialog(&ctx);
         self.intro.show(&ctx, &self.grain, VERSION);
     }
 }
 
+/// `silent`: no questions (Settings → Apps' QuietUninstallString).
+fn uninstall(silent: bool) {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+    let dir = reign_setup::install_dir();
+    let sure = silent
+        || MessageDialog::new()
+            .set_title("Uninstall Reign Engine")
+            .set_description(format!(
+                "Remove Reign Engine from this computer?\n\n\
+             This deletes {} and the Reign Hub shortcuts. \
+             Your projects are kept.",
+                dir.display()
+            ))
+            .set_buttons(MessageButtons::YesNo)
+            .show()
+            == MessageDialogResult::Yes;
+    if !sure {
+        return;
+    }
+    if let Err(e) = reign_setup::uninstall(&dir) {
+        if silent {
+            eprintln!("{e}");
+            return;
+        }
+        MessageDialog::new()
+            .set_title("Uninstall Reign Engine")
+            .set_level(MessageLevel::Error)
+            .set_description(format!("Reign Engine couldn't be fully removed:\n\n{e}"))
+            .set_buttons(MessageButtons::Ok)
+            .show();
+    }
+}
+
+/// The window and taskbar icon (the same artwork as the .exe's icon).
+fn window_icon() -> egui::IconData {
+    let decoder =
+        png::Decoder::new(std::io::Cursor::new(include_bytes!("../../assets/icon/reign-256.png")));
+    let decoded = decoder.read_info().and_then(|mut reader| {
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap_or(0)];
+        let info = reader.next_frame(&mut rgba)?;
+        rgba.truncate(info.buffer_size());
+        Ok((rgba, info.width, info.height))
+    });
+    match decoded {
+        Ok((rgba, width, height)) => egui::IconData { rgba, width, height },
+        Err(_) => egui::IconData::default(),
+    }
+}
+
 fn main() -> eframe::Result {
+    // Settings → Apps → Uninstall runs `reign-hub.exe --uninstall`.
+    if std::env::args().any(|a| a == "--uninstall") {
+        uninstall(std::env::args().any(|a| a == "--silent"));
+        return Ok(());
+    }
+    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(Path::parent) {
+        reign_setup::clean_old_files(dir);
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Reign Hub")
+            .with_icon(window_icon())
             .with_inner_size([1080.0, 680.0])
             .with_min_inner_size([820.0, 520.0]),
         renderer: eframe::Renderer::Wgpu,

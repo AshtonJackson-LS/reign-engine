@@ -1,0 +1,171 @@
+name: Release
+
+# Runs when a version tag like v0.2.0 is pushed (release.bat does that).
+# build tests and packages with no access to the key; publish waits for the
+# `release` environment's approval, then signs and publishes; macos and
+# linux add their builds afterwards. Hubs are built with this repository's
+# name and REIGN_UPDATE_PUBKEY variable, so a fork's hubs trust only the
+# fork's releases. Keep the zip's name in sync with ASSET in
+# hub/src/update.rs. Setup and troubleshooting: RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Built into the hub: where it looks for updates and which key it trusts.
+  # An unset variable means the official key (hub/src/signing.rs).
+  REIGN_UPDATE_REPO: ${{ github.repository }}
+  REIGN_UPDATE_PUBKEY: ${{ vars.REIGN_UPDATE_PUBKEY }}
+
+jobs:
+  build:
+    name: Test and build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: The tag matches the version in Cargo.toml
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='reign_hub'))")
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} doesn't match the version in Cargo.toml (v$version). Use release.bat, which keeps them in step."
+            exit 1
+          fi
+      # The same checks CI runs: a release never ships what CI would reject.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - name: Build the hub, the editor and ReignSetup.exe
+        shell: pwsh
+        run: ./scripts/build-setup.ps1
+      - name: Package the update zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory pack | Out-Null
+          Copy-Item target/release/reign-hub.exe, target/release/reign-engine.exe, LICENSE pack/
+          # The hub has Bebas Neue and Inter built in; their licence travels with them.
+          Copy-Item hub/assets/fonts/*-OFL.txt pack/
+          Compress-Archive -Path pack/* -DestinationPath reign-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          if-no-files-found: error
+          path: |
+            dist/ReignSetup.exe
+            reign-windows-x64.zip
+            target/release/reign-release.exe
+
+  publish:
+    name: Sign and publish
+    needs: build
+    runs-on: windows-latest
+    # Approval happens here when the environment has required reviewers.
+    environment: release
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+      - name: The release key is set
+        shell: bash
+        env:
+          REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
+        run: |
+          if [ -n "$REIGN_RELEASE_KEY" ]; then exit 0; fi
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## No release key
+
+          This repository has no \`REIGN_RELEASE_KEY\` secret, so the release can't be signed.
+
+          1. Make a key on your computer, outside the repository:
+             \`cargo run -p reign_hub --bin reign-release -- keygen C:\\somewhere\\reign-release.key\`
+          2. In ${GITHUB_REPOSITORY} → **Settings → Environments → release**, add an
+             environment secret \`REIGN_RELEASE_KEY\`: the line in that file.
+          3. If this is a fork: in **Settings → Secrets and variables → Actions → Variables**,
+             add \`REIGN_UPDATE_PUBKEY\`: the public key \`keygen\` printed.
+          4. Delete the tag and run release.bat again, or re-run this workflow.
+
+          See RELEASING.md.
+          EOF
+          echo "::error::No REIGN_RELEASE_KEY secret. The run summary has the steps."
+          exit 1
+      - name: Sign
+        shell: bash
+        env:
+          REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
+        run: |
+          signer=target/release/reign-release.exe
+          "$signer" sign reign-windows-x64.zip "${GITHUB_REF_NAME}"
+          # The secret must be the partner of the public key built into the hub.
+          if ! "$signer" verify reign-windows-x64.zip "${GITHUB_REF_NAME}"; then
+            echo "::error::REIGN_RELEASE_KEY doesn't match the public key built into the hub. A fork sets its public key in the REIGN_UPDATE_PUBKEY repository variable (RELEASING.md)."
+            exit 1
+          fi
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          ## Install
+
+          - **Windows:** download **ReignSetup.exe** below and run it. If Windows says
+            "Windows protected your PC", click **More info → Run anyway** (the installer
+            isn't code-signed yet). Already installed? The hub shows a green arrow; click it.
+          - **macOS:** download **reign-macos.zip**, unzip, move **Reign Hub** to Applications,
+            then right-click it → **Open** the first time.
+          - **Linux:** download **reign-linux-x64.tar.gz**, unpack, run \`./reign-hub\`.
+
+          Writing your own components needs Rust: https://rustup.rs
+          EOF
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/ReignSetup.exe reign-windows-x64.zip reign-windows-x64.zip.sig \
+            --title "Reign ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes
+
+  macos:
+    name: macOS build
+    needs: publish
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/bundle-macos.sh
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp LICENSE "dist/Reign Hub.app/Contents/Resources/"
+          ditto -c -k --keepParent "dist/Reign Hub.app" reign-macos.zip
+          gh release upload "${GITHUB_REF_NAME}" reign-macos.zip
+
+  linux:
+    name: Linux build
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install gamepad and audio headers
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q pkg-config libudev-dev libasound2-dev
+      - run: cargo build --release -p reign_hub -p reign_engine
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pack
+          cp target/release/reign-hub target/release/reign-engine LICENSE hub/assets/fonts/*-OFL.txt pack/
+          tar -czf reign-linux-x64.tar.gz -C pack .
+          gh release upload "${GITHUB_REF_NAME}" reign-linux-x64.tar.gz

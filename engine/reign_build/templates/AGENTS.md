@@ -39,7 +39,7 @@ cargo run --bin <crate>-editor -- . --simulate 240    # play 2 seconds, print ev
 Without code, use the engine's editor instead:
 
 ```bash
-cargo run --manifest-path "{engine}/Cargo.toml" -p reign_engine -- . --check
+{engine_cli} . --check
 ```
 
 `--simulate TICKS` runs at 120 ticks a second. Options:

@@ -18,8 +18,110 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The engine source the project builds against: `$REIGN_ENGINE_SOURCE`,
-/// or the checkout these tools were built from.
+/// Where a project with code gets the engine's crates from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineSource {
+    /// A checkout on this machine: `$REIGN_ENGINE_SOURCE`, or the one these
+    /// tools were built from.
+    Local(PathBuf),
+    /// No checkout here (a downloaded release, built on another machine): the
+    /// release's tag in the GitHub repository, which Cargo fetches itself.
+    Git { url: String, tag: String },
+}
+
+impl EngineSource {
+    /// A Cargo.toml dependency on the engine crate in `dir` (like
+    /// `engine/reign`), as the inline table after `name = `.
+    pub fn dependency(&self, dir: &str) -> String {
+        match self {
+            EngineSource::Local(root) => {
+                let path = root.join(dir).display().to_string().replace('\\', "/");
+                format!("{{ path = \"{path}\" }}")
+            }
+            EngineSource::Git { url, tag } => format!("{{ git = \"{url}\", tag = \"{tag}\" }}"),
+        }
+    }
+
+    /// Release `version` (like `0.2.0`) from this build's GitHub repository.
+    pub fn release(version: &str) -> EngineSource {
+        EngineSource::Git {
+            url: crate::release::git_url(),
+            tag: format!("v{}", version.trim_start_matches('v')),
+        }
+    }
+
+    /// The engine checkout on this machine, if there is one.
+    pub fn local() -> Option<EngineSource> {
+        let root = engine_root();
+        root.join("engine/reign/Cargo.toml").is_file().then_some(EngineSource::Local(root))
+    }
+
+    /// The release version this source is, like `0.2.0`; `None` for a checkout.
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            EngineSource::Local(_) => None,
+            EngineSource::Git { tag, .. } => Some(tag.trim_start_matches('v')),
+        }
+    }
+}
+
+/// The engine crates a project depends on, and where each lives in the
+/// engine's repository.
+const ENGINE_CRATES: [(&str, &str); 3] =
+    [("reign_engine", "app"), ("reign", "engine/reign"), ("reign_build", "engine/reign_build")];
+
+/// Where a project with code gets its engine, read from its Cargo.toml.
+pub fn project_engine(root: &Path) -> Option<EngineSource> {
+    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let line =
+        text.lines().find(|l| l.split_once('=').is_some_and(|(k, _)| k.trim() == "reign"))?;
+    let value = |key: &str| -> Option<String> {
+        let rest = line.split(&format!("{key} = \"")[..]).nth(1)?;
+        Some(rest.split('"').next()?.to_owned())
+    };
+    if let Some(path) = value("path") {
+        let path = PathBuf::from(path);
+        let root = path.parent().and_then(Path::parent).map(Path::to_owned).unwrap_or(path);
+        return Some(EngineSource::Local(root));
+    }
+    Some(EngineSource::Git { url: value("git")?, tag: value("tag")? })
+}
+
+/// Points a project's engine dependencies at `source`. Rebuilding the
+/// project's editor afterwards uses that engine.
+pub fn set_project_engine(root: &Path, source: &EngineSource) -> std::io::Result<()> {
+    let file = root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&file)?;
+    let mut changed = 0;
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let key = line.split_once('=').map(|(k, _)| k.trim());
+            match ENGINE_CRATES.iter().find(|(name, _)| Some(*name) == key) {
+                Some((name, dir)) => {
+                    changed += 1;
+                    let end = if line.ends_with('\r') { "\r" } else { "" };
+                    format!("{name} = {}{end}", source.dependency(dir))
+                }
+                None => line.to_owned(),
+            }
+        })
+        .collect();
+    if changed == 0 {
+        return Err(std::io::Error::other("Cargo.toml has no Reign engine dependencies"));
+    }
+    std::fs::write(file, lines.join("\n"))
+}
+
+/// The engine source a new project builds against: the local checkout when
+/// there is one, else this version's release on GitHub.
+pub fn engine_source() -> EngineSource {
+    EngineSource::local().unwrap_or_else(|| EngineSource::release(crate::release::VERSION))
+}
+
+/// The engine checkout the project builds against: `$REIGN_ENGINE_SOURCE`,
+/// or the checkout these tools were built from. On a downloaded release it
+/// may not exist; [`engine_source`] says what to use then.
 pub fn engine_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("REIGN_ENGINE_SOURCE") {
         return PathBuf::from(dir);
@@ -79,6 +181,11 @@ pub fn cargo_path() -> PathBuf {
 pub fn cargo() -> Command {
     let cargo = cargo_path();
     let mut c = Command::new(&cargo);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no black window from a GUI host
+    }
     if let Some(dir) = cargo.parent().filter(|d| !d.as_os_str().is_empty()) {
         let mut paths = vec![dir.to_path_buf()];
         if let Some(existing) = std::env::var_os("PATH") {
@@ -238,8 +345,7 @@ pub fn init(root: &Path, project_name: &str) -> std::io::Result<String> {
         return Ok(name);
     }
     let name = crate_name(project_name);
-    let engine = engine_root();
-    let path = |p: &str| engine.join(p).display().to_string().replace('\\', "/");
+    let source = engine_source();
     let write = |rel: &str, text: String| -> std::io::Result<()> {
         let file = root.join(rel);
         if file.exists() {
@@ -269,12 +375,12 @@ path = "src/main.rs"
 
 {game}
 [dependencies]
-reign_engine = {{ path = "{app}" }}
-reign = {{ path = "{reign}" }}
+reign_engine = {app}
+reign = {reign}
 serde = {{ version = "1", features = ["derive"] }}
 
 [build-dependencies]
-reign_build = {{ path = "{build}" }}
+reign_build = {build}
 
 [profile.dev]
 opt-level = 1
@@ -287,9 +393,9 @@ opt-level = 3
 "#,
             bin = editor_bin(&name),
             game = game_bin_table(&name),
-            app = path("app"),
-            reign = path("engine/reign"),
-            build = path("engine/reign_build"),
+            app = source.dependency("app"),
+            reign = source.dependency("engine/reign"),
+            build = source.dependency("engine/reign_build"),
         ),
     )?;
     write(
@@ -327,10 +433,12 @@ opt-level = 3
     )?;
     // Same toolchain and dependency versions as the engine, so the first
     // build resolves the way the engine does.
-    for file in ["rust-toolchain.toml", "Cargo.lock"] {
-        let from = engine.join(file);
-        if from.is_file() && !root.join(file).exists() {
-            std::fs::copy(from, root.join(file))?;
+    if let EngineSource::Local(engine) = &source {
+        for file in ["rust-toolchain.toml", "Cargo.lock"] {
+            let from = engine.join(file);
+            if from.is_file() && !root.join(file).exists() {
+                std::fs::copy(from, root.join(file))?;
+            }
         }
     }
     Ok(name)
@@ -343,10 +451,28 @@ pub const AGENT_GUIDE: &str = "AGENTS.md";
 /// that check and play it without a window, and how to write scenes and
 /// components.
 pub fn agent_guide(project_name: &str) -> String {
-    let engine = engine_root().display().to_string().replace('\\', "/");
+    let (engine, cli) = match engine_source() {
+        EngineSource::Local(root) => {
+            let root = root.display().to_string().replace('\\', "/");
+            let cli = format!("cargo run --manifest-path \"{root}/Cargo.toml\" -p reign_engine --");
+            (root, cli)
+        }
+        // A downloaded release: the source is on GitHub, and the editor is
+        // the installed one beside the program writing this guide.
+        EngineSource::Git { url, tag } => {
+            let name = if cfg!(windows) { "reign-engine.exe" } else { "reign-engine" };
+            let exe = std::env::current_exe()
+                .ok()
+                .and_then(|exe| Some(exe.parent()?.join(name)))
+                .filter(|exe| exe.is_file())
+                .map_or_else(|| name.to_owned(), |exe| exe.display().to_string());
+            (format!("{url}/tree/{tag}"), format!("\"{}\"", exe.replace('\\', "/")))
+        }
+    };
     include_str!("../templates/AGENTS.md")
         .replace("{example}", include_str!("../templates/agents_example.rs"))
         .replace("{project}", project_name)
+        .replace("{engine_cli}", &cli)
         .replace("{engine}", &engine)
 }
 
@@ -531,6 +657,19 @@ mod tests {
     }
 
     #[test]
+    fn a_project_without_a_local_engine_fetches_the_release_tag() {
+        // These tests run inside the checkout, so it's the local one.
+        assert!(matches!(engine_source(), EngineSource::Local(_)));
+        let local = EngineSource::Local(PathBuf::from(r"C:\src\reign"));
+        assert_eq!(local.dependency("engine/reign"), r#"{ path = "C:/src/reign/engine/reign" }"#);
+        let git = EngineSource::Git { url: "https://github.com/o/r".into(), tag: "v1.2.3".into() };
+        assert_eq!(
+            git.dependency("engine/reign"),
+            r#"{ git = "https://github.com/o/r", tag = "v1.2.3" }"#
+        );
+    }
+
+    #[test]
     fn the_agent_guide_is_filled_in_and_never_overwritten() {
         let guide = agent_guide("Space Rocks");
         assert!(guide.starts_with("# Space Rocks: a Reign Engine project"));
@@ -601,6 +740,30 @@ mod tests {
             assert_eq!(rename(&text, original, "Gone"), text, "{template:?} still says {original}");
             assert_eq!(scan.behaviours.is_empty(), template == Template::Data, "{template:?}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_projects_engine_version_can_be_read_and_changed() {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-version-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        init(&root, "Versions").unwrap();
+        // Made inside the checkout, so it builds against the checkout.
+        let local = project_engine(&root).unwrap();
+        assert_eq!(Some(&local), EngineSource::local().as_ref());
+
+        let release = EngineSource::release("0.3.1");
+        set_project_engine(&root, &release).unwrap();
+        assert_eq!(project_engine(&root), Some(release.clone()));
+        assert_eq!(release.version(), Some("0.3.1"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert_eq!(manifest.matches("tag = \"v0.3.1\"").count(), 3, "{manifest}");
+        assert!(manifest.contains("serde = { version = \"1\""), "other lines are kept");
+
+        set_project_engine(&root, &local).unwrap();
+        assert_eq!(project_engine(&root), Some(local));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -17,6 +17,7 @@ members = [
     "engine/reign_build",
     "app",
     "hub",
+    "installer",
 ]
 default-members = ["app", "hub"]
 
