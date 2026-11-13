@@ -3595,6 +3595,7 @@ dependencies = [
  "log",
  "png",
  "reign_build",
+ "reign_setup",
  "rfd",
  "ron",
  "serde",
@@ -3639,6 +3640,15 @@ dependencies = [
  "reign_derive",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "reign_setup"
+version = "0.1.0"
+dependencies = [
+ "reign_build",
+ "rfd",
+ "winresource",
 ]
 
 [[package]]

@@ -4,6 +4,19 @@ A deterministic 2D engine in Rust (wgpu + winit), with a Unity-style editor:
 scenes of game objects and components, reflection-driven Inspector, Project
 browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
 
+## Download
+
+- **Windows:** [ReignSetup.exe](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/ReignSetup.exe)
+  installs Reign Hub for your user (Start menu, Desktop, and Uninstall in
+  Settings → Apps; no administrator rights). Windows may say "Windows
+  protected your PC": click **More info → Run anyway**.
+- **macOS and Linux:** on the [Releases page](https://github.com/AshtonJackson-LS/reign-engine/releases/latest).
+
+Reign Hub updates itself: a green arrow appears in its top bar when a new
+version is out. Writing your own components needs [Rust](https://rustup.rs).
+
+Making releases: see [RELEASING.md](RELEASING.md).
+
 ## Layout
 
 | Path | What it is |
@@ -18,7 +31,8 @@ browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
 | `engine/reign_physics`, `reign_combat`, `reign_audio`, `reign_net` | Platformer physics, frame-data combat, audio mixing, rollback netcode. |
 | `engine/reign_editor` | The editor shell (egui). |
 | `app` | `reign-engine`: the editor around a project folder, with no game attached. |
-| `hub` | `reign-hub`: Reign Hub, the launcher that creates, lists and opens projects. |
+| `hub` | `reign-hub`: Reign Hub, the launcher that creates, lists and opens projects. Also `reign-release`, which signs releases. |
+| `installer` | `ReignSetup.exe`, the Windows installer, and the install/uninstall steps the hub shares. |
 | `engine/reign_build` | Project tooling with no dependencies: registers `src/components/` from a project's `build.rs`, writes project and component templates, finds code editors. |
 
 See [docs/ENGINE.md](docs/ENGINE.md) for the scene/component/asset model.
@@ -32,44 +46,56 @@ in `~/Library/Application Support/Reign Engine/hub.ron`. A project folder is
 marked by `ReignProject.ron` (name and engine version).
 
 For UI checks without a screen, `REIGN_HUB_SNAPSHOTS=<dir> reign-hub` plays a
-fixed script (intro frames, each page, the New project dialog), saves PNGs of
-the hub's window into `<dir>` and quits. Fonts are Bebas Neue and Inter, both
-under the SIL Open Font License (`hub/assets/fonts/`).
+fixed script (intro frames, each page, the New project and Engine version
+dialogs), saves PNGs of the hub's window into `<dir>` and quits. Fonts are
+Bebas Neue and Inter, both under the SIL Open Font License
+(`hub/assets/fonts/`).
 
-### Updates
+### Installing and updates
+
+On Windows, `ReignSetup.exe` (the `installer` crate) holds the release hub
+and editor. It installs them to `%LOCALAPPDATA%\Programs\Reign Engine` with
+Start menu and Desktop shortcuts and a Settings → Apps entry, whose Uninstall
+runs `reign-hub.exe --uninstall`. `--silent` installs without questions.
+`scripts/build-setup.ps1` builds it into `dist/`; `update-reign.bat` builds it
+from your checkout and installs it.
 
 The hub checks the GitHub repository it was built from for a newer release
-and, when there is one, shows a green arrow beside the engine version. On
+and shows a green arrow beside the engine version when there is one. On
 Windows the arrow downloads `reign-windows-x64.zip` and its signature
-`reign-windows-x64.zip.sig` from that release, checks the signature against
-the release key's public half built into the hub (`hub/src/signing.rs`),
-and only then swaps the programs in place and restarts. A download that
-isn't signed by that key is refused. Elsewhere the arrow opens the release
-page. Release tags are versions like `v0.2.0`. `REIGN_NO_UPDATE_CHECK=1`
-turns the check off, and `REIGN_UPDATE_FAKE=9.9.9` shows the arrow without a
-release, for UI checks.
+`reign-windows-x64.zip.sig`, checks the signature against the release key's
+public half built into the hub (`hub/src/signing.rs`), and only then swaps
+the programs in place and restarts. A download that isn't signed by that
+key is refused. Elsewhere the arrow opens the release page.
+`REIGN_NO_UPDATE_CHECK=1` turns the check off, and `REIGN_UPDATE_FAKE=9.9.9`
+shows the arrow without a release, for UI checks.
 
-To ship an update, bump `version` in `Cargo.toml`, commit, then push a tag
-that matches it (`git tag v0.2.0 && git push origin v0.2.0`).
-`.github/workflows/release.yml` runs clippy and every test, builds the
-Windows zip, signs it and publishes the release; it refuses a tag that
-doesn't match the crate version and publishes nothing if a check fails.
-
-The workflow signs with the repository secret `REIGN_RELEASE_KEY`. Whoever
-holds that secret can ship updates to every hub, so keep it out of the
-repository and back it up somewhere safe: a lost key means building and
-shipping a hub with a new public key by hand. To make a key pair:
-
-```bash
-cargo run -p reign_hub --bin reign-release -- keygen PATH_OUTSIDE_THE_REPO
-```
-
-It writes the secret to that file and prints the public key, which goes in
-`PUBLIC_KEY` in `hub/src/signing.rs`.
-
+Releases are made with `release.bat` and published by
+`.github/workflows/release.yml`; [RELEASING.md](RELEASING.md) has the steps.
 A fork that ships its own releases builds with `REIGN_UPDATE_REPO=owner/name`
-and `REIGN_UPDATE_PUBKEY=<its public key>`: its hub then follows and trusts
-only its own releases, and its projects fetch the engine from it.
+and `REIGN_UPDATE_PUBKEY=<its public key>` (from `reign-release keygen`): its
+hub then follows and trusts only its own releases, and its projects fetch
+the engine from it.
+
+### Engine versions
+
+Each project records the engine version it uses, shown on its row in the
+hub. To change it: ••• → **Engine version…**, which lists this repository's
+GitHub releases.
+
+- **A project without code** opens in the editor of its version. The hub's
+  own editor is its version; others are downloaded (and signature-checked)
+  into `versions/<version>/` beside the hub, on Windows. Opening a project
+  whose version isn't here asks whether to move it up to the hub's version or
+  download its own.
+- **A project with code** builds its own editor, against whatever its
+  Cargo.toml names: a release's git tag (`reign = { git = "…", tag =
+  "v0.2.0" }`), or, on a machine with an engine checkout, that checkout
+  (`path = "…"`). Changing the version rewrites those lines; the editor
+  rebuilds the next time the project opens.
+
+New projects use the hub's version, or the local checkout when the hub was
+built from one.
 
 ## Running the editor directly
 

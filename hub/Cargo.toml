@@ -26,6 +26,8 @@ log.workspace = true
 env_logger.workspace = true
 png.workspace = true
 reign_build.workspace = true
+# Install, uninstall and the Settings → Apps entry (shared with ReignSetup).
+reign_setup = { path = "../installer" }
 # Checks that an update was signed with the release key.
 ed25519-dalek = "2"
 getrandom = "0.3"

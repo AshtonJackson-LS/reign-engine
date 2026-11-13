@@ -1,11 +1,9 @@
 @echo off
-rem Rebuilds Reign Hub and the editor from this folder and reinstalls them
-rem (Start Menu + Desktop shortcuts). Double-click to run.
+rem Rebuilds Reign from this folder and installs it on this computer, the
+rem same way ReignSetup.exe installs it for users. Double-click to run.
+rem Close Reign Hub and any editors first.
 cd /d "%~dp0"
-echo Building Reign (release)...
-cargo build --release -p reign_hub -p reign_engine
-if errorlevel 1 goto failed
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-windows.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build-setup.ps1" -Install
 if errorlevel 1 goto failed
 echo.
 echo Done. Reign Hub is up to date.

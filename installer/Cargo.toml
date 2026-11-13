@@ -1,0 +1,26 @@
+[package]
+name = "reign_setup"
+description = "ReignSetup.exe: installs Reign Engine for the current user on Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The install/uninstall steps, shared with the hub (its --uninstall and the
+# updater use them).
+[lib]
+path = "src/lib.rs"
+
+# The setup program. Its payload (the hub and editor) is built in by
+# build.rs from $REIGN_SETUP_PAYLOAD; without it, it's an empty dev build.
+[[bin]]
+name = "reign-setup"
+path = "src/main.rs"
+
+[dependencies]
+rfd = "0.15"
+reign_build.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

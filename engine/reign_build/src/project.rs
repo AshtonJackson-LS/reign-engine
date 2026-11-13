@@ -41,17 +41,82 @@ impl EngineSource {
             EngineSource::Git { url, tag } => format!("{{ git = \"{url}\", tag = \"{tag}\" }}"),
         }
     }
+
+    /// Release `version` (like `0.2.0`) from this build's GitHub repository.
+    pub fn release(version: &str) -> EngineSource {
+        EngineSource::Git {
+            url: crate::release::git_url(),
+            tag: format!("v{}", version.trim_start_matches('v')),
+        }
+    }
+
+    /// The engine checkout on this machine, if there is one.
+    pub fn local() -> Option<EngineSource> {
+        let root = engine_root();
+        root.join("engine/reign/Cargo.toml").is_file().then_some(EngineSource::Local(root))
+    }
+
+    /// The release version this source is, like `0.2.0`; `None` for a checkout.
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            EngineSource::Local(_) => None,
+            EngineSource::Git { tag, .. } => Some(tag.trim_start_matches('v')),
+        }
+    }
+}
+
+/// The engine crates a project depends on, and where each lives in the
+/// engine's repository.
+const ENGINE_CRATES: [(&str, &str); 3] =
+    [("reign_engine", "app"), ("reign", "engine/reign"), ("reign_build", "engine/reign_build")];
+
+/// Where a project with code gets its engine, read from its Cargo.toml.
+pub fn project_engine(root: &Path) -> Option<EngineSource> {
+    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let line =
+        text.lines().find(|l| l.split_once('=').is_some_and(|(k, _)| k.trim() == "reign"))?;
+    let value = |key: &str| -> Option<String> {
+        let rest = line.split(&format!("{key} = \"")[..]).nth(1)?;
+        Some(rest.split('"').next()?.to_owned())
+    };
+    if let Some(path) = value("path") {
+        let path = PathBuf::from(path);
+        let root = path.parent().and_then(Path::parent).map(Path::to_owned).unwrap_or(path);
+        return Some(EngineSource::Local(root));
+    }
+    Some(EngineSource::Git { url: value("git")?, tag: value("tag")? })
+}
+
+/// Points a project's engine dependencies at `source`. Rebuilding the
+/// project's editor afterwards uses that engine.
+pub fn set_project_engine(root: &Path, source: &EngineSource) -> std::io::Result<()> {
+    let file = root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&file)?;
+    let mut changed = 0;
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let key = line.split_once('=').map(|(k, _)| k.trim());
+            match ENGINE_CRATES.iter().find(|(name, _)| Some(*name) == key) {
+                Some((name, dir)) => {
+                    changed += 1;
+                    let end = if line.ends_with('\r') { "\r" } else { "" };
+                    format!("{name} = {}{end}", source.dependency(dir))
+                }
+                None => line.to_owned(),
+            }
+        })
+        .collect();
+    if changed == 0 {
+        return Err(std::io::Error::other("Cargo.toml has no Reign engine dependencies"));
+    }
+    std::fs::write(file, lines.join("\n"))
 }
 
 /// The engine source a new project builds against: the local checkout when
 /// there is one, else this version's release on GitHub.
 pub fn engine_source() -> EngineSource {
-    let root = engine_root();
-    if root.join("engine/reign/Cargo.toml").is_file() {
-        EngineSource::Local(root)
-    } else {
-        EngineSource::Git { url: crate::release::git_url(), tag: crate::release::tag() }
-    }
+    EngineSource::local().unwrap_or_else(|| EngineSource::release(crate::release::VERSION))
 }
 
 /// The engine checkout the project builds against: `$REIGN_ENGINE_SOURCE`,
@@ -675,6 +740,30 @@ mod tests {
             assert_eq!(rename(&text, original, "Gone"), text, "{template:?} still says {original}");
             assert_eq!(scan.behaviours.is_empty(), template == Template::Data, "{template:?}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_projects_engine_version_can_be_read_and_changed() {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-version-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        init(&root, "Versions").unwrap();
+        // Made inside the checkout, so it builds against the checkout.
+        let local = project_engine(&root).unwrap();
+        assert_eq!(Some(&local), EngineSource::local().as_ref());
+
+        let release = EngineSource::release("0.3.1");
+        set_project_engine(&root, &release).unwrap();
+        assert_eq!(project_engine(&root), Some(release.clone()));
+        assert_eq!(release.version(), Some("0.3.1"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert_eq!(manifest.matches("tag = \"v0.3.1\"").count(), 3, "{manifest}");
+        assert!(manifest.contains("serde = { version = \"1\""), "other lines are kept");
+
+        set_project_engine(&root, &local).unwrap();
+        assert_eq!(project_engine(&root), Some(local));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -33,8 +33,8 @@ pub use reign_build::release::REPO;
 /// The release file a Windows install is replaced from.
 pub const ASSET: &str = "reign-windows-x64.zip";
 
-/// The programs an update replaces, beside the hub.
-const PROGRAMS: [&str; 2] = ["reign-hub.exe", "reign-engine.exe"];
+// The programs an update replaces, beside the hub.
+use reign_setup::PROGRAMS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
@@ -165,6 +165,19 @@ fn curl() -> Command {
     system_tool("curl")
 }
 
+/// The body of a GitHub API URL.
+pub fn curl_json(url: &str) -> Result<String, String> {
+    let output = curl()
+        .args(["-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json"])
+        .arg(url)
+        .output()
+        .map_err(|e| format!("can't run curl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("couldn't reach GitHub ({})", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// The newest release's version, `None` when the repository has none.
 fn latest_version() -> Result<Option<String>, String> {
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
@@ -188,11 +201,11 @@ fn tag_from_url(url: &str) -> Option<String> {
 
 /// Numeric parts of `1.2.3`; a pre-release suffix like `-beta` makes it `None`
 /// so a pre-release never offers itself as an update.
-fn parse_version(v: &str) -> Option<Vec<u64>> {
+pub fn parse_version(v: &str) -> Option<Vec<u64>> {
     v.split('.').map(|part| part.parse().ok()).collect()
 }
 
-fn is_newer(candidate: &str, current: &str) -> bool {
+pub fn is_newer(candidate: &str, current: &str) -> bool {
     let (Some(mut a), Some(mut b)) = (parse_version(candidate), parse_version(current)) else {
         return false;
     };
@@ -202,16 +215,23 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     a > b
 }
 
-/// Downloads `ASSET` for `version`, unpacks it and swaps it in beside the
-/// running hub. Returns the path of the new hub to start.
-fn install_windows(version: &str) -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or("the hub has no folder")?.to_owned();
-    let work = std::env::temp_dir().join(format!("reign-update-{version}"));
+/// Downloads release `version`'s [`ASSET`] and its signature, checks the
+/// signature, and unpacks it. Returns the temporary folder it's in (remove
+/// it when done) and the folder with the unpacked programs. Nothing is
+/// unpacked unless the signature matches the release key.
+pub fn fetch_release(version: &str) -> Result<(PathBuf, PathBuf), String> {
+    let work = std::env::temp_dir().join(format!("reign-release-{version}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let stage = work.join("new");
     std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    let result = download_and_unpack(version, &work, &stage);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&work);
+    }
+    result.map(|()| (work, stage))
+}
 
+fn download_and_unpack(version: &str, work: &Path, stage: &Path) -> Result<(), String> {
     let tag = format!("v{version}");
     let zip = work.join(ASSET);
     let sig = work.join(format!("{ASSET}.sig"));
@@ -230,7 +250,6 @@ fn install_windows(version: &str) -> Result<PathBuf, String> {
     let bytes = std::fs::read(&zip).map_err(|e| e.to_string())?;
     let signature = std::fs::read_to_string(&sig).map_err(|e| e.to_string())?;
     if let Err(e) = signing::verify(signing::PUBLIC_KEY, &tag, &bytes, &signature) {
-        let _ = std::fs::remove_dir_all(&work);
         return Err(format!("the download isn't signed by the Reign release key ({e})"));
     }
     // Windows 10+ ships bsdtar as tar.exe, which reads zips.
@@ -238,7 +257,7 @@ fn install_windows(version: &str) -> Result<PathBuf, String> {
         .arg("-xf")
         .arg(&zip)
         .arg("-C")
-        .arg(&stage)
+        .arg(stage)
         .status()
         .map_err(|e| format!("can't run tar: {e}"))?;
     if !status.success() {
@@ -249,9 +268,19 @@ fn install_windows(version: &str) -> Result<PathBuf, String> {
             return Err(format!("the download has no {name}"));
         }
     }
+    Ok(())
+}
 
-    swap_in(&stage, &dir)?;
+/// Downloads release `version` and swaps it in beside the running hub.
+/// Returns the path of the new hub to start.
+fn install_windows(version: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or("the hub has no folder")?.to_owned();
+    let (work, stage) = fetch_release(version)?;
+    let swapped = swap_in(&stage, &dir);
     let _ = std::fs::remove_dir_all(&work);
+    swapped?;
+    reign_setup::set_registered_version(version);
     Ok(dir.join(PROGRAMS[0]))
 }
 
