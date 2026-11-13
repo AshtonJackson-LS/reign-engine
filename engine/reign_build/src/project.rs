@@ -336,6 +336,31 @@ opt-level = 3
     Ok(name)
 }
 
+/// The guide for AI agents that every project gets.
+pub const AGENT_GUIDE: &str = "AGENTS.md";
+
+/// [`AGENT_GUIDE`]'s text for a project: how it's laid out, the commands
+/// that check and play it without a window, and how to write scenes and
+/// components.
+pub fn agent_guide(project_name: &str) -> String {
+    let engine = engine_root().display().to_string().replace('\\', "/");
+    include_str!("../templates/AGENTS.md")
+        .replace("{example}", include_str!("../templates/agents_example.rs"))
+        .replace("{project}", project_name)
+        .replace("{engine}", &engine)
+}
+
+/// Writes [`AGENT_GUIDE`] into a project that has none. One the project
+/// already has (edited, perhaps) is left alone. Returns whether it wrote.
+pub fn write_agent_guide(root: &Path, project_name: &str) -> std::io::Result<bool> {
+    let file = root.join(AGENT_GUIDE);
+    if file.exists() {
+        return Ok(false);
+    }
+    std::fs::write(file, agent_guide(project_name))?;
+    Ok(true)
+}
+
 /// What kind of component to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Template {
@@ -503,6 +528,24 @@ mod tests {
         assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\x".into()), PathBuf::from(r"\\srv\share\x"));
         assert_eq!(strip_verbatim("/home/x".into()), PathBuf::from("/home/x"));
         assert!(!engine_root().to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn the_agent_guide_is_filled_in_and_never_overwritten() {
+        let guide = agent_guide("Space Rocks");
+        assert!(guide.starts_with("# Space Rocks: a Reign Engine project"));
+        assert!(guide.contains("impl Behaviour<World> for Coin"));
+        assert!(!guide.contains("{example}") && !guide.contains("{engine}"));
+        assert!(!guide.contains(r"\\?\"), "engine path Cargo can read");
+
+        let root = std::env::temp_dir().join(format!("reign-guide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(write_agent_guide(&root, "Space Rocks").unwrap());
+        std::fs::write(root.join(AGENT_GUIDE), "mine").unwrap();
+        assert!(!write_agent_guide(&root, "Space Rocks").unwrap());
+        assert_eq!(std::fs::read_to_string(root.join(AGENT_GUIDE)).unwrap(), "mine");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

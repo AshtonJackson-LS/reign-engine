@@ -21,9 +21,10 @@ use reign::scene::{ComponentRegistry, Scene};
 use serde::{Deserialize, Serialize};
 
 use crate::DB;
+use crate::audio::Audio;
 use crate::components::register_builtins;
 use crate::editor::{PROJECT_FILE, Project};
-use crate::runtime::{Keyboard, Scripts, World, schedule};
+use crate::runtime::{self, Keyboard, Scripts, World, schedule};
 use crate::view::Sprites;
 
 /// The packed assets an exported game ships with.
@@ -68,6 +69,7 @@ pub(crate) fn registry(scripts: &Scripts) -> ComponentRegistry {
 /// The project's Behaviours.
 pub(crate) fn behaviours(scripts: &Scripts) -> Behaviours<World> {
     let mut behaviours = Behaviours::new();
+    crate::runtime::register_builtin_behaviours(&mut behaviours);
     (scripts.behaviours)(&mut behaviours);
     behaviours
 }
@@ -128,9 +130,11 @@ fn project_around(exe: &Path) -> Option<PathBuf> {
 /// The running game.
 pub struct Player {
     world: World,
+    registry: ComponentRegistry,
     behaviours: Behaviours<World>,
     schedule: Schedule<World>,
     keyboard: Keyboard,
+    audio: Audio,
     sprites: Sprites,
 }
 
@@ -138,9 +142,11 @@ impl Player {
     pub fn new(scripts: &Scripts, scene: Scene) -> Self {
         Player {
             world: World::new(scene),
+            registry: registry(scripts),
             behaviours: behaviours(scripts),
             schedule: schedule(),
             keyboard: Keyboard::default(),
+            audio: Audio::default(),
             sprites: Sprites::default(),
         }
     }
@@ -149,7 +155,15 @@ impl Player {
 impl App for Player {
     fn tick(&mut self, ctx: &mut TickCtx) {
         let input = self.keyboard.frame(Some(ctx.pads()));
-        self.world.step(input, &self.behaviours, &self.schedule);
+        let events = runtime::tick(
+            &mut self.world,
+            input,
+            &self.behaviours,
+            &self.schedule,
+            &self.registry,
+            DB.get(),
+        );
+        self.audio.play(events, DB.get());
     }
 
     fn draw(&mut self, r: &mut Renderer, _alpha: f32) {

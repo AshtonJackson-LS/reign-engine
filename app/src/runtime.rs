@@ -3,10 +3,14 @@
 
 use reign::app::winit::event::{ElementState, WindowEvent};
 use reign::app::winit::keyboard::{KeyCode, PhysicalKey};
-use reign::behaviour::{BehaviourState, Behaviours, Flow, Game, Schedule, Stage, System};
+use reign::assets::{AssetDb, AssetKind, Guid};
+use reign::behaviour::{
+    Behaviour, BehaviourState, Behaviours, Flow, Game, Schedule, Stage, System,
+};
 use reign::core::{Button, FxVec2, InputBuffer, InputFrame, Rng};
 use reign::scene::{Component, ComponentRegistry, ObjectId, Scene};
 
+use crate::components::{Animator, AudioSource, Text};
 use crate::{components, physics};
 
 /// Fixed ticks per second: divide a per-second speed by this for one tick.
@@ -112,6 +116,23 @@ impl Message {
     }
 }
 
+/// What a tick asks the outside world to do: sounds and music. Never read
+/// back by the simulation, so replaying a tick only replays the noise.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// Play a sound once. `volume` is a percentage.
+    Sound {
+        clip: Guid,
+        volume: u8,
+    },
+    /// Switch the music to this, looping.
+    Music {
+        clip: Guid,
+        volume: u8,
+    },
+    StopMusic,
+}
+
 /// Everything the simulation is: the scene, player input and the random
 /// number stream. Cloned for Play/Stop and compared for determinism.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -124,6 +145,9 @@ pub struct World {
     /// Who touched whom at the end of the last tick, for enter and exit
     /// events.
     contacts: Vec<physics::Contact>,
+    /// The scene a script asked for with `ctx.load_scene`, entered when
+    /// the tick ends.
+    next_scene: Option<String>,
 }
 
 impl World {
@@ -135,26 +159,61 @@ impl World {
             tick: 0,
             behaviours: BehaviourState::default(),
             contacts: Vec::new(),
+            next_scene: None,
         }
     }
 
-    /// One fixed tick: input, then the schedule.
+    /// Replaces the scene, as `ctx.load_scene` does once its scene is
+    /// loaded: Behaviours start again, nothing is touching yet. Input, the
+    /// tick count and the random numbers carry on.
+    pub fn enter(&mut self, scene: Scene) {
+        self.scene = scene;
+        self.behaviours = BehaviourState::default();
+        self.contacts.clear();
+    }
+
+    /// The scene a script asked for this tick, if any; asking clears it.
+    pub fn take_scene_request(&mut self) -> Option<String> {
+        self.next_scene.take()
+    }
+
+    /// What `id` is touching right now: solid contacts and trigger overlaps.
+    pub fn touching(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.contacts.iter().filter_map(|c| c.other(id)).collect()
+    }
+
+    /// One fixed tick: input, then the schedule. Returns the sounds it
+    /// made. A scene change a script asked for waits in
+    /// [`World::take_scene_request`]; [`tick`] does both.
     pub fn step(
         &mut self,
         input: InputFrame,
         behaviours: &Behaviours<World>,
         schedule: &Schedule<World>,
-    ) {
+    ) -> Vec<Event> {
+        self.step_with(input, behaviours, schedule, crate::DB.get())
+    }
+
+    /// [`World::step`] with the assets to use, instead of the open
+    /// project's.
+    pub fn step_with(
+        &mut self,
+        input: InputFrame,
+        behaviours: &Behaviours<World>,
+        schedule: &Schedule<World>,
+        assets: Option<&AssetDb>,
+    ) -> Vec<Event> {
         self.input.push(input);
-        let assets = crate::DB.get();
-        schedule.run(behaviours, self, assets);
+        let events = schedule.run(behaviours, self, assets);
+        crate::components::update_cameras(&mut self.scene);
         self.tick += 1;
+        events
     }
 }
 
 impl Game for World {
     type Message = Message;
-    type Event = ();
+    type Event = Event;
 
     fn scene(&self) -> &Scene {
         &self.scene
@@ -185,7 +244,7 @@ impl Game for World {
 pub type Ctx<'a> = reign::behaviour::Ctx<'a, World>;
 
 /// The tick: Behaviours' `start` and `fixed_update`, physics, messages,
-/// `late_update`, then spawns and despawns.
+/// `late_update`, animation, then spawns and despawns.
 pub fn schedule() -> Schedule<World> {
     Schedule::new()
         .then(Stage::Start)
@@ -193,9 +252,107 @@ pub fn schedule() -> Schedule<World> {
         .then(Stage::Systems("physics"))
         .then(Stage::Messages)
         .then(Stage::LateUpdate)
+        .then(Stage::Systems("animation"))
         .then(Stage::Messages)
         .then(Stage::Commands)
         .system(System::new("physics", "physics", 0, physics_system))
+        .system(System::new("animation", "animation", 0, animation_system))
+}
+
+/// One tick of a game as every host plays it (the editor's Play, the
+/// exported game, `--simulate`): [`World::step`], then the scene a script
+/// asked for with `ctx.load_scene`, loaded from `assets`. Returns the
+/// tick's sounds.
+pub fn tick(
+    world: &mut World,
+    input: InputFrame,
+    behaviours: &Behaviours<World>,
+    schedule: &Schedule<World>,
+    registry: &ComponentRegistry,
+    assets: Option<&AssetDb>,
+) -> Vec<Event> {
+    let events = world.step_with(input, behaviours, schedule, assets);
+    if let Some(path) = world.take_scene_request() {
+        let loaded = match assets {
+            Some(db) => crate::player::load_scene(db, registry, &path),
+            None => Err("the project's assets aren't loaded".to_owned()),
+        };
+        match loaded {
+            Ok(scene) => {
+                log::info!("entering {path}");
+                world.enter(scene);
+            }
+            Err(e) => log::error!("load_scene({path:?}): {e}"),
+        }
+    }
+    events
+}
+
+/// Says something once, however many ticks ask.
+fn warn_once(message: String) {
+    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut said = SAID.lock().expect("warnings");
+    if !said.contains(&message) {
+        log::warn!("{message}");
+        said.push(message);
+    }
+}
+
+/// Advances every playing [`Animator`], and tells its object about the
+/// frame events it reaches and the end of a clip that doesn't loop.
+fn animation_system(ctx: &mut Ctx) -> Flow {
+    let playing: Vec<(ObjectId, Animator)> = ctx
+        .game
+        .scene
+        .iter::<Animator>()
+        .filter(|(_, a)| a.playing && a.speed > 0 && !a.clip.is_none())
+        .map(|(id, a)| (id, a.clone()))
+        .collect();
+    for (id, animator) in playing {
+        let before = animator.time;
+        let mut after = before.saturating_add(u32::from(animator.speed));
+        let clip = ctx.assets().and_then(|db| db.load(animator.clip).ok());
+        if let Some(clip) = clip.filter(|c| !c.frames.is_empty()) {
+            let frame = |time: u32| clip.frame_at_tick(time / 100);
+            let event = |f: u32| clip.frames.get(f as usize).and_then(|fr| fr.event.clone());
+            if before == 0
+                && let Some(name) = event(frame(0))
+            {
+                ctx.send(id, Message::with(name, 0));
+            }
+            let end = u32::from(clip.ticks());
+            if !clip.looping() {
+                // Holds the last frame; the clock stops there too.
+                after = after.min(end * 100);
+            }
+            if frame(after) != frame(before)
+                && let Some(name) = event(frame(after))
+            {
+                ctx.send(id, Message::with(name, i64::from(frame(after))));
+            }
+            if !clip.looping() && before / 100 < end && after / 100 >= end {
+                ctx.send(id, Message::new("AnimationFinished"));
+            }
+        }
+        if let Some(a) = ctx.game.scene.get_mut::<Animator>(id) {
+            a.time = after;
+        }
+    }
+    Flow::Continue
+}
+
+/// An [`AudioSource`] with `play_on_start` plays when its object appears.
+impl Behaviour<World> for AudioSource {
+    fn start(ctx: &mut Ctx, me: ObjectId) {
+        if ctx.get::<AudioSource>(me).is_some_and(|s| s.play_on_start) {
+            ctx.play(me);
+        }
+    }
+}
+
+/// The built-in Behaviours, before a project's own.
+pub fn register_builtin_behaviours(behaviours: &mut Behaviours<World>) {
+    behaviours.behaviour::<AudioSource>();
 }
 
 /// Moves the bodies, then tells both objects in each contact that began or
@@ -260,6 +417,39 @@ pub trait CtxExt {
     fn axis_x(&self) -> i32;
     /// -1 (up), 0 or 1 (down): world y grows downwards.
     fn axis_y(&self) -> i32;
+    /// Switches an object's [`Animator`] to the clip it lists under `name`,
+    /// from the start. Asking for the clip that's already playing leaves it
+    /// running, so it's safe to call every tick. False if the object has no
+    /// Animator or no clip by that name.
+    fn play_animation(&mut self, id: ObjectId, name: &str) -> bool;
+    /// Whether an object's animation has played to its end. Always false
+    /// for a looping clip.
+    fn animation_finished(&self, id: ObjectId) -> bool;
+    /// Changes what an object's [`Text`] says.
+    fn set_text(&mut self, id: ObjectId, text: impl Into<String>);
+    /// Plays a sound once, by its path in `assets/`:
+    /// `ctx.play_sound("sounds/jump.wav")`.
+    fn play_sound(&mut self, path: &str);
+    /// Plays an object's [`AudioSource`].
+    fn play(&mut self, id: ObjectId);
+    /// Switches the music to a `.wav` by its path in `assets/`, looping.
+    fn play_music(&mut self, path: &str);
+    fn stop_music(&mut self);
+    /// Leaves this scene for another when the tick ends, by its path in
+    /// `assets/`: `ctx.load_scene("scenes/level2.scene.ron")`.
+    fn load_scene(&mut self, path: &str);
+}
+
+/// The sound file at `path`, if the project has one.
+fn sound(ctx: &Ctx, path: &str) -> Option<Guid> {
+    let db = ctx.assets()?;
+    let found = db
+        .guid(path)
+        .filter(|g| matches!(db.kind(*g), Some(AssetKind::AudioClip | AssetKind::Music)));
+    if found.is_none() {
+        warn_once(format!("no sound at {path:?}: paths start in assets/, such as sounds/jump.wav"));
+    }
+    found
 }
 
 impl CtxExt for Ctx<'_> {
@@ -285,7 +475,7 @@ impl CtxExt for Ctx<'_> {
     }
 
     fn touching(&self, id: ObjectId) -> Vec<ObjectId> {
-        self.game.contacts.iter().filter_map(|c| c.other(id)).collect()
+        self.game.touching(id)
     }
 
     fn held(&self, button: Button) -> bool {
@@ -330,6 +520,67 @@ impl CtxExt for Ctx<'_> {
         let f = self.game.input.frame();
         f.held(Button::Down) as i32 - f.held(Button::Up) as i32
     }
+
+    fn play_animation(&mut self, id: ObjectId, name: &str) -> bool {
+        let Some(animator) = self.game.scene.get::<Animator>(id) else { return false };
+        let Some(clip) = animator.named(name) else {
+            warn_once(format!("play_animation: no clip called {name:?} in the Animator's clips"));
+            return false;
+        };
+        // Only touch the component when something changes, so asking every
+        // tick doesn't copy the scene's animators.
+        if (animator.clip != clip || !animator.playing)
+            && let Some(animator) = self.game.scene.get_mut::<Animator>(id)
+        {
+            animator.play(clip);
+        }
+        true
+    }
+
+    fn animation_finished(&self, id: ObjectId) -> bool {
+        let Some(animator) = self.game.scene.get::<Animator>(id) else { return false };
+        self.assets()
+            .and_then(|db| db.load(animator.clip).ok())
+            .is_some_and(|clip| animator.finished(&clip))
+    }
+
+    fn set_text(&mut self, id: ObjectId, text: impl Into<String>) {
+        let text = text.into();
+        if self.game.scene.get::<Text>(id).is_some_and(|t| t.text != text)
+            && let Some(t) = self.game.scene.get_mut::<Text>(id)
+        {
+            t.text = text;
+        }
+    }
+
+    fn play_sound(&mut self, path: &str) {
+        if let Some(clip) = sound(self, path) {
+            self.emit(Event::Sound { clip, volume: 100 });
+        }
+    }
+
+    fn play(&mut self, id: ObjectId) {
+        if let Some(source) = self.game.scene.get::<AudioSource>(id)
+            && !source.clip.is_none()
+        {
+            let event = Event::Sound { clip: source.clip.guid, volume: source.volume };
+            self.emit(event);
+        }
+    }
+
+    fn play_music(&mut self, path: &str) {
+        if let Some(clip) = sound(self, path) {
+            self.emit(Event::Music { clip, volume: 100 });
+        }
+    }
+
+    fn stop_music(&mut self) {
+        self.emit(Event::StopMusic);
+    }
+
+    fn load_scene(&mut self, path: &str) {
+        self.game.next_scene = Some(path.to_owned());
+    }
 }
 
 /// Keys held on the keyboard, turned into each tick's buttons.
@@ -373,5 +624,5 @@ impl Keyboard {
 /// [`CtxExt::touching`] without a running tick.
 #[cfg(test)]
 pub fn touching_for_tests(world: &World, id: ObjectId) -> Vec<ObjectId> {
-    world.contacts.iter().filter_map(|c| c.other(id)).collect()
+    world.touching(id)
 }

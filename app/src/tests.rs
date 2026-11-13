@@ -200,6 +200,10 @@ mod templates {
     mod data {
         include!("../../engine/reign_build/templates/data.rs");
     }
+    /// The example component in every project's AGENTS.md.
+    pub mod agents_example {
+        include!("../../engine/reign_build/templates/agents_example.rs");
+    }
 
     use crate::prelude::*;
     use crate::runtime::schedule;
@@ -207,6 +211,36 @@ mod templates {
     use reign::behaviour::{Behaviours, Schedule};
     use reign::core::InputFrame;
     use top_down::TopDownMovement;
+
+    /// The scene in every project's AGENTS.md loads as written, and plays:
+    /// the player lands on the ground and runs right.
+    #[test]
+    fn the_agent_guides_scene_loads_and_plays() {
+        let guide = reign_build::project::agent_guide("Test");
+        let start = guide.find("```ron\n").expect("a ron block") + "```ron\n".len();
+        let text = &guide[start..start + guide[start..].find("```").expect("its end")];
+
+        let mut registry = reign::scene::ComponentRegistry::new();
+        crate::components::register_builtins(&mut registry);
+        registry.register::<PlatformerMovement>().register::<agents_example::Coin>();
+        let scene = Scene::from_ron(text, &registry).expect("the guide's scene loads");
+        let player = scene.walk().into_iter().find(|id| scene.name(*id) == Some("Player"));
+
+        let mut behaviours = Behaviours::new();
+        behaviours.behaviour::<PlatformerMovement>();
+        let mut sim = Sim {
+            world: World::new(scene),
+            behaviours,
+            schedule: schedule(),
+            player: player.expect("a Player"),
+        };
+        sim.run(240, &[]);
+        // Ground top at 100 - 8; the player is 24 tall, centred.
+        assert_eq!(sim.pos(), FxVec2::from_px(0, 80));
+        assert!(sim.body().grounded);
+        sim.run(120, &[Button::Right]);
+        assert!(sim.pos().x > Fx::from_px(60), "ran right: {:?}", sim.pos());
+    }
 
     fn frame(buttons: &[Button]) -> InputFrame {
         let mut f = InputFrame::default();

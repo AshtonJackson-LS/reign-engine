@@ -454,9 +454,16 @@ fn folder_cell(
     }
     let icon = Rect::from_center_size(
         rect.center_top() + Vec2::new(0.0, 6.0 + THUMB / 2.0),
-        Vec2::splat(THUMB * 0.7),
+        Vec2::new(THUMB * 0.84, THUMB * 0.64),
     );
-    painter.rect_filled(icon, 6.0, Color32::from_rgb(190, 160, 90));
+    let back = Color32::from_rgb(189, 136, 62);
+    let tab = Rect::from_min_size(icon.min, Vec2::new(icon.width() * 0.43, icon.height() * 0.42));
+    painter.rect_filled(tab, 3.0, back);
+    let panel = |top| {
+        Rect::from_min_max(egui::pos2(icon.left(), icon.top() + icon.height() * top), icon.max)
+    };
+    painter.rect_filled(panel(0.16), 3.0, back);
+    painter.rect_filled(panel(0.33), 3.0, Color32::from_rgb(237, 190, 104));
     name_label(ui, db, state, rect, Target::Folder(path.to_owned()), &file_label(path));
     if response.double_clicked() {
         state.folder = path.to_owned();

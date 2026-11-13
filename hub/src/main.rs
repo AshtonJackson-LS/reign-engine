@@ -192,6 +192,7 @@ struct HubBuild {
     rx: std::sync::mpsc::Receiver<BuildEvent>,
     started: std::time::Instant,
     first_error: Option<String>,
+    hide_progress: bool,
 }
 
 enum BuildEvent {
@@ -272,21 +273,29 @@ impl Hub {
         if !path.is_dir() {
             return self.error(format!("{} is missing", path.display()));
         }
-        if project::has_code(path) {
-            return self.build(path);
-        }
-        let Some(editor) = editor_path() else {
+        let mut command = if project::has_code(path) {
+            let cached = project::read_crate_name(path).map(|n| project::editor_path(path, &n));
+            let Some(editor) = cached.filter(|p| p.is_file()) else {
+                return self.build(path);
+            };
+            let mut command = Command::new(editor);
+            command.env("REIGN_CHECK_BUILD_ON_OPEN", "1");
+            command
+        } else if let Some(editor) = editor_path() {
+            Command::new(editor)
+        } else {
             return self.error(
                 "Can't find the reign-engine editor next to the hub (set REIGN_EDITOR to its path)",
             );
         };
-        match Command::new(&editor).arg(path).spawn() {
+        match command.arg(path).spawn() {
             Ok(child) => {
                 self.running.insert(path.to_owned(), child);
                 self.remember(path, true);
                 self.info(format!("Opened {}", project_name(path)));
             }
-            Err(e) => self.error(format!("Can't start {}: {e}", editor.display())),
+            Err(_) if project::has_code(path) => self.build(path),
+            Err(e) => self.error(format!("Can't start the editor: {e}")),
         }
     }
 
@@ -321,7 +330,12 @@ impl Hub {
                 self.failed.remove(path);
                 self.building.insert(
                     path.to_owned(),
-                    HubBuild { rx, started: std::time::Instant::now(), first_error: None },
+                    HubBuild {
+                        rx,
+                        started: std::time::Instant::now(),
+                        first_error: None,
+                        hide_progress: false,
+                    },
                 );
                 self.info(format!("Compiling {}…", project_name(path)));
             }
@@ -1080,6 +1094,36 @@ impl eframe::App for Hub {
         let ctx = ui.ctx().clone();
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        for (path, build) in &mut self.building {
+            if build.hide_progress {
+                continue;
+            }
+            let name = project_name(path);
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of(("opening", path)),
+                egui::ViewportBuilder::default()
+                    .with_title(format!("{name} - Reign Engine"))
+                    .with_inner_size([480.0, 180.0])
+                    .with_resizable(false),
+                |ui, _| {
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        build.hide_progress = true;
+                    }
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(24.0);
+                            ui.heading(&name);
+                            ui.spinner();
+                            ui.label(format!(
+                                "Building project scripts… {}s",
+                                build.started.elapsed().as_secs()
+                            ));
+                            ui.weak("The editor will open when the first build finishes.");
+                        });
+                    });
+                },
+            );
         }
         if let Some(step) = self.snapshots.as_mut().and_then(|s| s.poll(&ctx)) {
             use snapshot::Step;

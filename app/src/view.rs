@@ -4,11 +4,12 @@
 
 use std::collections::HashMap;
 
-use reign::assets::{AssetDb, Guid, Handle, Texture};
+use reign::assets::{AssetDb, Guid, Handle, SpriteSheet, Texture};
 use reign::render::{Color, Renderer, TextureId, VIEW_HEIGHT, VIEW_WIDTH};
 use reign::scene::{ObjectId, Scene, Transform};
 
-use crate::components::{Camera, Image, SpriteRenderer, TilemapRenderer};
+use crate::components::{Animator, Camera, Image, SpriteRenderer, Text, TilemapRenderer};
+use crate::font::glyph_rect;
 use crate::physics::TILE;
 
 /// The colour behind everything.
@@ -18,12 +19,54 @@ pub const CLEAR: Color = Color::rgb8(24, 24, 32);
 pub fn camera_origin(scene: &Scene) -> (f32, f32) {
     scene
         .iter::<Camera>()
-        .next()
+        .min_by_key(|(id, camera)| (std::cmp::Reverse(camera.priority), *id))
         .map(|(id, _)| {
             let p = scene.world_position(id);
             (p.x.to_f32() - VIEW_WIDTH as f32 / 2.0, p.y.to_f32() - VIEW_HEIGHT as f32 / 2.0)
         })
         .unwrap_or((0.0, 0.0))
+}
+
+/// What a [`SpriteRenderer`] draws: the sheet, the rectangle of its texture
+/// (x, y, w, h in texels) and the pivot in that rectangle.
+pub struct Frame {
+    pub sheet: std::sync::Arc<SpriteSheet>,
+    pub rect: [u32; 4],
+    pub pivot: [i32; 2],
+}
+
+/// The sprite an object shows right now: the frame its [`Animator`] is on,
+/// else the sprite its renderer names. An animation's frames come from
+/// the clip's own sheet: cell `n` of the clip's row in a sheet with a grid,
+/// else the sheet's `n`th sprite.
+pub fn current_frame(
+    db: &AssetDb,
+    sr: &SpriteRenderer,
+    animator: Option<&Animator>,
+) -> Option<Frame> {
+    if let Some(animator) = animator
+        && let Ok(clip) = db.load(animator.clip)
+        && let Some(frame) = clip.frames.get(animator.frame(&clip) as usize)
+    {
+        let handle = if clip.sheet.is_none() { sr.sheet } else { clip.sheet };
+        if let Ok(sheet) = db.load(handle) {
+            let found = match sheet.grid {
+                Some(grid) if frame.cell < grid.columns && clip.row < grid.rows => {
+                    Some((grid.cell_rect(frame.cell, clip.row), sheet.cell_pivot))
+                }
+                Some(_) => None,
+                None => sheet.sprites.get(frame.cell as usize).map(|s| (s.rect, s.pivot)),
+            };
+            if let Some((rect, pivot)) = found {
+                return Some(Frame { sheet, rect, pivot });
+            }
+        }
+    }
+    let sheet = db.load(sr.sheet).ok()?;
+    let sprite =
+        if sr.sprite.is_empty() { sheet.sprites.first() } else { sheet.sprite(&sr.sprite) }?;
+    let (rect, pivot) = (sprite.rect, sprite.pivot);
+    Some(Frame { sheet, rect, pivot })
 }
 
 /// Textures uploaded to the renderer, kept across frames and replaced when
@@ -106,7 +149,30 @@ impl Sprites {
         }
     }
 
-    /// Queues every sprite, image and tilemap, back to front. `view` is
+    /// Queues a [`Text`], one glyph at a time, from `(x, y)`: the top of its
+    /// first line, at the side its alignment says.
+    fn draw_text(&mut self, r: &mut Renderer, db: &AssetDb, text: &Text, (x, y): (f32, f32)) {
+        let Ok(font) = db.load(text.font) else { return };
+        let Some((tex, _)) = self.texture(r, db, font.texture) else { return };
+        let scale = f32::from(text.scale.max(1));
+        let (w, h) = (font.cell[0] as f32 * scale, font.cell[1] as f32 * scale);
+        let c = text.color;
+        let tint = Color::rgba8(c.r, c.g, c.b, c.a);
+        for (row, line) in text.text.split('\n').enumerate() {
+            let width = line.chars().count() as i32 * w as i32;
+            let left = x - text.align_offset(width) as f32;
+            for (column, ch) in line.chars().enumerate() {
+                let Some(src) = glyph_rect(&font, ch) else { continue };
+                if ch == ' ' {
+                    continue;
+                }
+                let (gx, gy) = (left + column as f32 * w, y + row as f32 * h);
+                r.sprite(tex, src.map(|v| v as f32), gx, gy, w, h, false, tint);
+            }
+        }
+    }
+
+    /// Queues every sprite, image, tilemap and text, back to front. `view` is
     /// the world rectangle on screen (x, y, w, h): tilemaps draw only the
     /// cells inside it.
     pub fn draw_objects(&mut self, r: &mut Renderer, scene: &Scene, db: &AssetDb, view: [f32; 4]) {
@@ -118,6 +184,9 @@ impl Sprites {
             items.push((scene.transform(id).map_or(0, |t| t.z), id));
         }
         for (id, _) in scene.iter::<Image>() {
+            items.push((scene.transform(id).map_or(0, |t| t.z), id));
+        }
+        for (id, _) in scene.iter::<Text>() {
             items.push((scene.transform(id).map_or(0, |t| t.z), id));
         }
         items.sort();
@@ -138,26 +207,29 @@ impl Sprites {
                 let d = d as f32;
                 r.sprite(tex, [0.0, 0.0, w, h], x, y, w / d, h / d, t.flip_x, Color::WHITE);
             }
-            if let Some(sr) = scene.get::<SpriteRenderer>(id) {
-                let Ok(sheet) = db.load(sr.sheet) else { continue };
-                let sprite = if sr.sprite.is_empty() {
-                    sheet.sprites.first()
-                } else {
-                    sheet.sprite(&sr.sprite)
-                };
-                let Some(sprite) = sprite else { continue };
-                let Some((tex, _)) = self.texture(r, db, sheet.texture) else { continue };
-                let d = sheet.density.max(1) as f32;
-                let [sx, sy, sw, sh] = sprite.rect.map(|v| v as f32);
+            if let Some(sr) = scene.get::<SpriteRenderer>(id)
+                && let Some(frame) = current_frame(db, sr, scene.get::<Animator>(id))
+                && let Some((tex, _)) = self.texture(r, db, frame.sheet.texture)
+                && frame.rect[2] > 0
+                && frame.rect[3] > 0
+            {
+                let d = frame.sheet.density.max(1) as f32;
+                let [sx, sy, sw, sh] = frame.rect.map(|v| v as f32);
                 // Drawn size in world pixels, and how much that stretches it.
                 let w = if sr.size[0] > 0 { sr.size[0] as f32 } else { sw / d };
                 let h = if sr.size[1] > 0 { sr.size[1] as f32 } else { sh / d };
                 let (kx, ky) = (w / sw, h / sh);
-                let (px, py) = (sprite.pivot[0] as f32 * kx, sprite.pivot[1] as f32 * ky);
+                let (px, py) = (frame.pivot[0] as f32 * kx, frame.pivot[1] as f32 * ky);
                 let left = if t.flip_x { x - (w - px) } else { x - px };
                 let c = sr.color;
                 let tint = Color::rgba8(c.r, c.g, c.b, c.a);
                 r.sprite(tex, [sx, sy, sw, sh], left, y - py, w, h, t.flip_x, tint);
+            }
+            if let Some(text) = scene.get::<Text>(id) {
+                // Screen text counts from the view's corner, wherever the
+                // camera is.
+                let at = if text.screen { (view[0] + x, view[1] + y) } else { (x, y) };
+                self.draw_text(r, db, text, (at.0.round(), at.1.round()));
             }
         }
     }

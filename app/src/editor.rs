@@ -12,9 +12,10 @@ use reign::render::{Color, Renderer};
 use reign::scene::{ComponentRegistry, ObjectId, Rgba8, Scene, Transform};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::Audio;
 use crate::code::Code;
 use crate::components::{Camera, Image, SpriteRenderer, TilemapRenderer, sprite_size};
-use crate::runtime::{Keyboard, Scripts, World, schedule};
+use crate::runtime::{self, Keyboard, Scripts, World, schedule};
 use crate::view::{CLEAR, Sprites};
 use crate::{DB, physics, player, starter};
 
@@ -61,11 +62,15 @@ impl Project {
         if let Err(e) = starter::install(&project.assets()) {
             log::warn!("couldn't add the built-in assets: {e}");
         }
+        // How to work on the project without the window, for AI agents.
+        if let Err(e) = reign_build::project::write_agent_guide(&project.root, &project.title()) {
+            log::warn!("couldn't write {}: {e}", reign_build::project::AGENT_GUIDE);
+        }
         let main = project.scenes().join("main.scene.ron");
         if !main.exists() {
             let mut scene = Scene::new();
             let camera = scene.spawn("Main Camera");
-            scene.insert(camera, Camera {});
+            scene.insert(camera, Camera::default());
             let text = scene.to_ron().map_err(|e| std::io::Error::other(e.to_string()))?;
             std::fs::write(&main, text)?;
         }
@@ -91,6 +96,9 @@ pub struct ReignEngine {
     behaviours: Behaviours<World>,
     schedule: Schedule<World>,
     keyboard: Keyboard,
+    audio: Audio,
+    /// Whether the last frame was in Play, to hear it stop.
+    was_playing: bool,
     code: Code,
     scene_file: Option<PathBuf>,
     sprites: Sprites,
@@ -110,6 +118,8 @@ impl ReignEngine {
             behaviours,
             schedule: schedule(),
             keyboard: Keyboard::default(),
+            audio: Audio::default(),
+            was_playing: false,
             code,
             scene_file: None,
             sprites: Sprites::default(),
@@ -187,7 +197,15 @@ impl ReignEngine {
 impl App for ReignEngine {
     fn tick(&mut self, ctx: &mut TickCtx) {
         let input = self.keyboard.frame(Some(ctx.pads()));
-        self.world.step(input, &self.behaviours, &self.schedule);
+        let events = runtime::tick(
+            &mut self.world,
+            input,
+            &self.behaviours,
+            &self.schedule,
+            &self.registry,
+            DB.get(),
+        );
+        self.audio.play(events, DB.get());
     }
 
     fn draw(&mut self, r: &mut Renderer, _alpha: f32) {
@@ -214,6 +232,13 @@ impl EditorApp for ReignEngine {
         if mode != PlayMode::Playing {
             self.keyboard.clear();
         }
+        // Called every frame: silence only when Play ends (pausing lets
+        // sounds finish).
+        let playing = mode != PlayMode::Edit;
+        if self.was_playing && !playing {
+            self.audio.stop();
+        }
+        self.was_playing = playing;
         self.code.set_mode(mode);
     }
 
@@ -293,12 +318,23 @@ impl EditorApp for ReignEngine {
         items.push("2D Object/Physics/Dynamic Box".to_owned());
         items.push("2D Object/Physics/Static Platform".to_owned());
         items.push("2D Object/Tilemap".to_owned());
+        items.push("2D Object/Text".to_owned());
         items
     }
 
     fn create(&mut self, item: &str, parent: Option<ObjectId>, at: (i32, i32)) -> Option<ObjectId> {
         if item == "2D Object/Tilemap" {
             return Some(self.create_tilemap(parent, at));
+        }
+        if item == "2D Object/Text" {
+            let scene = &mut self.world.scene;
+            let id = match parent {
+                Some(p) => scene.spawn_child(p, "Text"),
+                None => scene.spawn("Text"),
+            };
+            scene.set_world_position(id, FxVec2::from_px(at.0, at.1));
+            scene.insert(id, crate::components::Text::default());
+            return Some(id);
         }
         let shape_renderer =
             |shape: &starter::Shape, size: [u16; 2], color: Rgba8| SpriteRenderer {
@@ -338,7 +374,7 @@ impl EditorApp for ReignEngine {
                 scene.insert(id, sr);
             }
             None => {
-                scene.insert(id, Camera {});
+                scene.insert(id, Camera::default());
             }
         }
         if collider {

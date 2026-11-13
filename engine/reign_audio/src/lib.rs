@@ -233,6 +233,13 @@ impl Mixer {
         }
     }
 
+    /// Silence, at once: every sound, the theme and the score.
+    pub fn stop_all(&mut self) {
+        self.voices.clear();
+        self.theme = None;
+        self.adaptive = None;
+    }
+
     pub fn play(&mut self, clip: &Clip, bus: Bus, gain: f32, pan: f32, pitch: f32, looping: bool) {
         if self.voices.len() >= 32 {
             if let Some(i) = self.voices.iter().position(|v| !v.looping) {
@@ -386,6 +393,12 @@ impl Output {
     pub fn theme_playing(&self, on: bool) {
         if let Ok(mut mixer) = self.mixer.lock() {
             mixer.theme_playing(on);
+        }
+    }
+
+    pub fn stop_all(&self) {
+        if let Ok(mut mixer) = self.mixer.lock() {
+            mixer.stop_all();
         }
     }
 

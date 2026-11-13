@@ -3,6 +3,7 @@
 //! ```text
 //! reign-engine [PROJECT_DIR] [--scene FILE] [--play] [--exit-after SECONDS]
 //! reign-engine [PROJECT_DIR] --export OUT_DIR
+//! reign-engine [PROJECT_DIR] --check | --describe | --simulate TICKS
 //! ```
 //!
 //! A project is a folder with an `assets/` directory. Scenes live in
@@ -10,6 +11,8 @@
 //! (making an empty one if needed) unless `--scene` names another. Without
 //! `PROJECT_DIR` it uses `~/ReignProjects/Default`. `--export` builds the
 //! game into `OUT_DIR` as Scripts → Export Game does, with no window.
+//! `--check`, `--describe` and `--simulate` also open no window and print
+//! JSON: see [`headless`].
 //!
 //! A project with code is a Rust crate whose binary is its own editor: it
 //! calls [`run`] with the [`Scripts`] that `reign_build` generates from
@@ -21,10 +24,13 @@
 // `use reign_engine::prelude::*;` as a project's code does.
 extern crate self as reign_engine;
 
+mod audio;
 mod code;
 mod components;
 mod editor;
 mod export;
+mod font;
+pub mod headless;
 mod input;
 pub mod physics;
 mod player;
@@ -41,9 +47,12 @@ use reign::app::AppConfig;
 use reign::assets::AssetDb;
 use reign::editor::{EditorConfig, init_logger, run_editor};
 
-pub use components::{Camera, Image, SpriteRenderer, TilemapRenderer};
+pub use components::{
+    Animator, AudioSource, Camera, Image, NamedClip, SpriteRenderer, Text, TextAlign,
+    TilemapRenderer,
+};
 pub use player::{GAME_FILE, GameInfo, PACK_FILE};
-pub use runtime::{Ctx, CtxExt, Message, Scripts, TICKS_PER_SECOND, World};
+pub use runtime::{Ctx, CtxExt, Event, Message, Scripts, TICKS_PER_SECOND, World};
 
 use editor::{Project, ReignEngine};
 
@@ -52,7 +61,9 @@ pub(crate) static DB: OnceLock<AssetDb> = OnceLock::new();
 
 /// Everything a component file needs: `use reign_engine::prelude::*;`.
 pub mod prelude {
-    pub use reign::assets::{Handle, SpriteSheet, Texture, Tilemap};
+    pub use reign::assets::{
+        AnimationClip, AudioClip, Font, Handle, SpriteSheet, Texture, Tilemap,
+    };
     pub use reign::behaviour::{Behaviour, Envelope, To};
     pub use reign::core::{Button, Fx, FxVec2};
     pub use reign::scene::{Component, ObjectId, Reflect, Rgba8, Scene, Transform};
@@ -60,12 +71,22 @@ pub mod prelude {
 
     pub use crate::physics::{BodyType, BoxCollider, Rigidbody, TilemapCollider};
     pub use crate::{
-        Camera, Ctx, CtxExt, Image, Message, SpriteRenderer, TICKS_PER_SECOND, TilemapRenderer,
-        World,
+        Animator, AudioSource, Camera, Ctx, CtxExt, Image, Message, NamedClip, SpriteRenderer,
+        TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, World,
     };
 }
 
-const USAGE: &str = "usage: reign-engine [PROJECT_DIR] [--scene FILE] [--play] [--exit-after SECONDS] | [PROJECT_DIR] --export OUT_DIR";
+const USAGE: &str = "usage: reign-engine [PROJECT_DIR] [--scene FILE] [--play] [--exit-after SECONDS]
+       reign-engine [PROJECT_DIR] --export OUT_DIR
+       reign-engine [PROJECT_DIR] --check
+       reign-engine [PROJECT_DIR] --describe
+       reign-engine [PROJECT_DIR] --simulate TICKS [--scene ASSET_PATH] [--input SPEC] [--every TICKS] [--watch NAMES]
+  --check     load every scene and prefab; print problems as JSON (exit 1 on errors)
+  --describe  print components, fields, input actions, scenes and assets as JSON
+  --simulate  play a scene for TICKS ticks (120 a second) with no window; print the objects as JSON
+  --input     held actions: Name, Name@TICK or Name@FROM-TO, comma separated (Right,Jump@30-45)
+  --every     also print the objects every that many ticks
+  --watch     only these objects, by name, comma separated";
 
 fn default_project() -> PathBuf {
     reign_build::ide::home().join("ReignProjects").join("Default")
@@ -81,6 +102,8 @@ pub fn run(scripts: Scripts) {
     let mut start_playing = false;
     let mut exit_after = None;
     let mut export_to = None;
+    let mut headless = None;
+    let (mut sim_input, mut sim_every, mut sim_watch) = (None, None, Vec::new());
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -106,6 +129,36 @@ pub fn run(scripts: Scripts) {
                     std::process::exit(2);
                 };
                 exit_after = Some(Duration::from_secs_f64(secs));
+            }
+            "--check" => headless = Some(Headless::Check),
+            "--describe" => headless = Some(Headless::Describe),
+            "--simulate" => {
+                let Some(ticks) = args.next().and_then(|s| s.parse::<u64>().ok()) else {
+                    eprintln!("--simulate needs a number of ticks (120 a second)\n{USAGE}");
+                    std::process::exit(2);
+                };
+                headless = Some(Headless::Simulate(ticks));
+            }
+            "--input" => {
+                let Some(spec) = args.next() else {
+                    eprintln!("--input needs actions, such as Right,Jump@30-45\n{USAGE}");
+                    std::process::exit(2);
+                };
+                sim_input = Some(spec);
+            }
+            "--every" => {
+                let Some(ticks) = args.next().and_then(|s| s.parse::<u64>().ok()) else {
+                    eprintln!("--every needs a number of ticks\n{USAGE}");
+                    std::process::exit(2);
+                };
+                sim_every = Some(ticks);
+            }
+            "--watch" => {
+                let Some(names) = args.next() else {
+                    eprintln!("--watch needs object names, comma separated\n{USAGE}");
+                    std::process::exit(2);
+                };
+                sim_watch = names.split(',').map(|n| n.trim().to_owned()).collect();
             }
             "-h" | "--help" => {
                 println!("Reign Engine {}\n{USAGE}", env!("CARGO_PKG_VERSION"));
@@ -154,6 +207,29 @@ pub fn run(scripts: Scripts) {
         return;
     }
 
+    if let Some(command) = headless {
+        let db = match AssetDb::loose(project.assets()) {
+            Ok(db) => DB.get_or_init(|| db),
+            Err(e) => {
+                log::error!("can't read the project's assets: {e}");
+                std::process::exit(1);
+            }
+        };
+        let command = match command {
+            Headless::Check => headless::Command::Check,
+            Headless::Describe => headless::Command::Describe,
+            Headless::Simulate(ticks) => headless::Command::Simulate {
+                ticks,
+                // An asset path (scenes/x.scene.ron), or a file under assets/.
+                scene: scene.map(|s| asset_path(&project, &s)),
+                input: sim_input,
+                every: sim_every,
+                watch: sim_watch,
+            },
+        };
+        std::process::exit(headless::run(command, db, &scripts, &project.title()));
+    }
+
     match AssetDb::loose(project.assets()) {
         Ok(db) => {
             let db = DB.get_or_init(|| db);
@@ -172,6 +248,22 @@ pub fn run(scripts: Scripts) {
     };
     config.start_playing = start_playing;
     run_editor(config, move |_ctx| ReignEngine::new(project, scripts, scene));
+}
+
+/// A headless command named on the command line.
+enum Headless {
+    Check,
+    Describe,
+    Simulate(u64),
+}
+
+/// `--scene` as an asset path: a file under the project's `assets/` loses
+/// that prefix; anything else is taken as an asset path already.
+fn asset_path(project: &Project, scene: &std::path::Path) -> String {
+    let full = std::path::absolute(scene).unwrap_or_else(|_| scene.to_owned());
+    let assets = std::path::absolute(project.assets()).unwrap_or_else(|_| project.assets());
+    let relative = full.strip_prefix(&assets).unwrap_or(scene);
+    relative.to_string_lossy().replace('\\', "/")
 }
 
 /// Plays the game with a project's code, no editor: the start scene, the
@@ -193,5 +285,7 @@ pub fn play(scripts: Scripts) {
 
 #[cfg(test)]
 mod export_tests;
+#[cfg(test)]
+mod feature_tests;
 #[cfg(test)]
 mod tests;

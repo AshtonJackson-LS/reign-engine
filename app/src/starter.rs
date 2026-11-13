@@ -5,6 +5,8 @@
 //! - `Shapes.png` / `Shapes.sheet.ron`: white shape sprites (Square, Circle,
 //!   Triangle, Diamond, Hexagon, Capsule, Rounded Square) with centred
 //!   pivots, drawn with hard pixel edges so they tint and stretch cleanly.
+//! - `Font.png` / `Font.font.ron`: the built-in pixel font (see
+//!   [`crate::font`]) that a new Text component uses.
 //!
 //! The GUIDs are fixed, so scenes and prefabs that use the shapes work in
 //! any project.
@@ -98,6 +100,7 @@ pub fn install(assets: &Path) -> std::io::Result<()> {
     }
     let dir = assets.join(FOLDER);
     std::fs::create_dir_all(&dir)?;
+    install_font(&dir)?;
     let png = dir.join("Shapes.png");
     let sheet = dir.join("Shapes.sheet.ron");
     if png.exists() || sheet.exists() {
@@ -145,6 +148,26 @@ pub fn install(assets: &Path) -> std::io::Result<()> {
     std::fs::write(&sheet, to_ron(&sheet_asset))?;
     std::fs::write(dir.join("Shapes.sheet.ron.meta"), meta(SHAPES_SHEET, Importer::SpriteSheet))?;
     log::info!("added the built-in shapes to {}", dir.display());
+    Ok(())
+}
+
+/// The built-in font, unless the project already has files by its names.
+fn install_font(dir: &Path) -> std::io::Result<()> {
+    let png = dir.join("Font.png");
+    let font = dir.join("Font.font.ron");
+    if png.exists() || font.exists() {
+        return Ok(());
+    }
+    let (width, height, rgba) = crate::font::atlas();
+    write_png(&png, width, height, &rgba)?;
+    let meta = |guid, importer| Meta { guid, importer }.to_ron();
+    std::fs::write(
+        dir.join("Font.png.meta"),
+        meta(crate::font::FONT_TEXTURE, Importer::Texture(TextureSettings::default())),
+    )?;
+    std::fs::write(&font, to_ron(&crate::font::asset()))?;
+    std::fs::write(dir.join("Font.font.ron.meta"), meta(crate::font::FONT, Importer::Font))?;
+    log::info!("added the built-in font to {}", dir.display());
     Ok(())
 }
 

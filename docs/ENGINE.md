@@ -697,3 +697,12 @@ The editor's Animation tool edits the boxes on its preview.
   set (or prefab) does not carry it yet.
 - The editor works on **one open scene at a time** (`EditorApp::scene`);
   there is no multi-scene editing.
+
+## Camera follow
+
+Set a Camera's `follow` to an object's exact name. It follows the first active
+match in object ID order. A `smoothing` of 1 snaps to the target, while 8
+closes one eighth of the gap each tick. Enable `bounded` and set `min` and
+`max` to limit the camera centre in world coordinates. The highest active
+`priority` supplies the Game view. Ties use the lowest object ID, and other
+active cameras keep following their targets.

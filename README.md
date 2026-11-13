@@ -53,12 +53,13 @@ A project is a folder with an `assets/` directory; scenes are
 one with a camera is made if missing). With no folder given, the editor uses
 `~/ReignProjects/Default`.
 
-The standalone editor has three built-in components: `Camera` (centres the
-Game view), `SpriteRenderer` (one sprite of a sprite sheet, with a tint colour
-and an optional stretched size) and `Image` (a whole texture). Every project
-gets `assets/Reign/Shapes` (Square, Circle, Triangle, Diamond, Hexagon,
-Capsule, Rounded Square) with fixed GUIDs, so shapes work the same in any
-project.
+The standalone editor's built-in components: `Camera` (centres the Game
+view), `SpriteRenderer` (one sprite of a sprite sheet, with a tint colour and
+an optional stretched size), `Image` (a whole texture), `Animator`, `Text`,
+`AudioSource`, `TilemapRenderer`, and the physics components below. Every
+project gets `assets/Reign/Shapes` (Square, Circle, Triangle, Diamond,
+Hexagon, Capsule, Rounded Square) and `assets/Reign/Font`, a 5 by 7 pixel
+font, with fixed GUIDs, so they work the same in any project.
 
 ## Writing components
 
@@ -104,6 +105,32 @@ and `TriggerEnter` / `TriggerExit` (a collider with `is_trigger` overlapping
 something); `ctx.touching(me)` lists current contacts. BoxCollider `layer`
 (0-31) and `mask` choose what interacts with what. One of each pair needs a
 Rigidbody.
+
+**Animation:** an `Animator` on an object with a `SpriteRenderer` plays an
+animation clip (`*.anim.ron`, made in the Animation tab): each frame replaces
+the sprite that's drawn. List clips by name in its `clips` and switch with
+`ctx.play_animation(me, "run")`, which is safe to call every tick.
+`speed` is a percentage. A frame's event arrives in `on_message` as a
+message with that name (`msg.body.is("step")`), and a clip that doesn't
+loop sends `"AnimationFinished"`; `ctx.animation_finished(me)` asks the
+same.
+
+**Text:** GameObject → 2D Object → Text. A `Text` draws with the built-in
+font (or any `*.font.ron`), with a colour, a whole-pixel `scale`, left,
+centre or right alignment, and `screen` to pin it to the view (a score)
+instead of the world. `ctx.set_text(me, format!("Score: {score}"))`
+changes it.
+
+**Sound:** `ctx.play_sound("sounds/jump.wav")` plays a 16-bit PCM `.wav`
+from `assets/`; `ctx.play_music("music/theme.wav")` loops one and
+`ctx.stop_music()` fades it out. An `AudioSource` gives an object a sound
+that plays when it appears (`play_on_start`) or on `ctx.play(me)`. Sounds
+are presentation: they never feed back into the simulation, and Stop
+silences them.
+
+**Scenes:** `ctx.load_scene("scenes/level2.scene.ron")` moves to another
+scene when the tick ends. Input, the tick count and the random numbers
+carry on; the new scene's Behaviours start fresh.
 
 When code changes and the editor is in front, it rebuilds in the
 background (output in the Console), saves the scene, and reopens on it.
@@ -163,6 +190,35 @@ beside it, `cargo run --bin <crate>-game` plays the project it was built
 in). Without the editor, `reign-engine PROJECT_DIR --export OUT_DIR` does
 the same export from the command line.
 
+## Without the window: tools and AI agents
+
+Three commands open no window and print one JSON document on stdout, so
+scripts, CI and AI coding agents can work on a project:
+
+```bash
+reign-engine PROJECT_DIR --check                 # do all scenes and prefabs load? exit 1 if not
+reign-engine PROJECT_DIR --describe              # components, fields, defaults, inputs, scenes, assets
+reign-engine PROJECT_DIR --simulate 240 --input "Right,Jump@30-45" --watch Player
+```
+
+`--simulate TICKS` plays the start scene (or `--scene scenes/x.scene.ron`)
+at 120 ticks a second, exactly as Play does, and prints every object's
+position and component values at the end. `--input` holds actions: `Name`
+for the whole run, `Name@TICK` for one tick, `Name@FROM-TO` for a range.
+`--every N` adds a snapshot every N ticks, `--watch A,B` keeps only those
+objects, `sounds` lists every sound played and on which tick, and
+`state_hash` is the same for the same scene, code and input every time.
+Animation frames and text show up as the `Animator`'s `time` and the
+`Text`'s `text` in each object's components.
+
+A project with code runs them through its own editor, which knows its
+components: `cargo run --bin <crate>-editor -- . --check`.
+
+Every project gets an `AGENTS.md` explaining its layout, these commands,
+the scene format and how to write a component.
+[AGENTS.md](AGENTS.md) here is the same for working on the engine, and
+[docs/ROADMAP.md](docs/ROADMAP.md) lists what's done and what's next.
+
 ## License
 
 Reign Engine is licensed under the [Mozilla Public License 2.0](LICENSE)
@@ -170,3 +226,12 @@ Reign Engine is licensed under the [Mozilla Public License 2.0](LICENSE)
 ship them, share those changes under MPL-2.0. Your game's own code and assets
 stay yours, under any license you like. The hub's fonts (Bebas Neue, Inter)
 are under the SIL Open Font License; see `hub/assets/fonts/`.
+
+## Camera follow
+
+Set a Camera's `follow` to an object's exact name. It follows the first active
+match in object ID order. A `smoothing` of 1 snaps to the target, while 8
+closes one eighth of the gap each tick. Enable `bounded` and set `min` and
+`max` to limit the camera centre in world coordinates. The highest active
+`priority` supplies the Game view. Ties use the lowest object ID, and other
+active cameras keep following their targets.

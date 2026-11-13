@@ -257,9 +257,12 @@ mod tests {
         let input = egui::RawInput { events, ..Default::default() };
         let mut edit = None;
         let mut create = None;
-        let _ = ctx.run_ui(input, |ui| {
+        let mut output = ctx.run_ui(input, |ui| {
             edit = hierarchy(ui, scene, selected, true, &[], &mut create, rename);
         });
+        // Nothing draws these frames; egui panics if the font texture it
+        // made is dropped without being uploaded or cleared.
+        output.textures_delta.clear();
         edit
     }
 
