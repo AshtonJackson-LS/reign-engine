@@ -40,18 +40,36 @@ under the SIL Open Font License (`hub/assets/fonts/`).
 
 The hub checks the GitHub repository it was built from for a newer release
 and, when there is one, shows a green arrow beside the engine version. On
-Windows the arrow downloads `reign-windows-x64.zip` from that release (it must
-hold `reign-hub.exe` and `reign-engine.exe` at its root), swaps the programs
-in place and restarts the hub; elsewhere it opens the release page. Release
-tags are versions like `v0.2.0`. A fork follows its own releases by building
-with `REIGN_UPDATE_REPO=owner/name` (or changing `DEFAULT_REPO` in
-`hub/src/update.rs`). `REIGN_NO_UPDATE_CHECK=1` turns the check off, and
-`REIGN_UPDATE_FAKE=9.9.9` shows the arrow without a release, for UI checks.
+Windows the arrow downloads `reign-windows-x64.zip` and its signature
+`reign-windows-x64.zip.sig` from that release, checks the signature against
+the release key's public half built into the hub (`hub/src/signing.rs`),
+and only then swaps the programs in place and restarts. A download that
+isn't signed by that key is refused. Elsewhere the arrow opens the release
+page. Release tags are versions like `v0.2.0`. `REIGN_NO_UPDATE_CHECK=1`
+turns the check off, and `REIGN_UPDATE_FAKE=9.9.9` shows the arrow without a
+release, for UI checks.
 
 To ship an update, bump `version` in `Cargo.toml`, commit, then push a tag
 that matches it (`git tag v0.2.0 && git push origin v0.2.0`).
-`.github/workflows/release.yml` builds the Windows zip and publishes the
-release; it refuses a tag that doesn't match the crate version.
+`.github/workflows/release.yml` runs clippy and every test, builds the
+Windows zip, signs it and publishes the release; it refuses a tag that
+doesn't match the crate version and publishes nothing if a check fails.
+
+The workflow signs with the repository secret `REIGN_RELEASE_KEY`. Whoever
+holds that secret can ship updates to every hub, so keep it out of the
+repository and back it up somewhere safe: a lost key means building and
+shipping a hub with a new public key by hand. To make a key pair:
+
+```bash
+cargo run -p reign_hub --bin reign-release -- keygen PATH_OUTSIDE_THE_REPO
+```
+
+It writes the secret to that file and prints the public key, which goes in
+`PUBLIC_KEY` in `hub/src/signing.rs`.
+
+A fork that ships its own releases builds with `REIGN_UPDATE_REPO=owner/name`
+and `REIGN_UPDATE_PUBKEY=<its public key>`: its hub then follows and trusts
+only its own releases, and its projects fetch the engine from it.
 
 ## Running the editor directly
 
@@ -155,7 +173,9 @@ Ctrl/Cmd+R does it by hand. Reign Hub builds a project with code before
 opening it; the first build compiles the engine and takes a few minutes.
 Pick the code editor (VS Code, RustRover, Cursor, Zed, Sublime Text) in the
 hub's About page or Scripts → Code editor. Projects build against this
-checkout (`REIGN_ENGINE_SOURCE` overrides it).
+checkout (`REIGN_ENGINE_SOURCE` overrides it). Where there's no checkout (a
+downloaded release), new projects fetch the engine from GitHub at the
+release's tag instead (`reign = { git = "…", tag = "v0.2.0" }`).
 
 Physics: add a `Rigidbody` (Dynamic falls and collides, Kinematic moves by
 its velocity through everything, Static never moves; gravity scale, velocity

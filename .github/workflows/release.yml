@@ -1,9 +1,14 @@
 name: Release
 
 # Push a tag like v0.2.0 (it must match `version` in Cargo.toml) and this
-# builds Reign for Windows and publishes it as a GitHub release. The hub's
-# green update arrow looks for that release and downloads the zip below, so
-# keep the file name in sync with `ASSET` in hub/src/update.rs.
+# tests Reign, builds it for Windows, signs the zip and publishes both as a
+# GitHub release. Nothing is published unless every test passes.
+#
+# The hub's green update arrow downloads the zip and its .sig, and installs
+# only if the signature matches the public key built into the hub
+# (hub/src/signing.rs). The secret half lives in the repository secret
+# REIGN_RELEASE_KEY. Keep the file name in sync with `ASSET` in
+# hub/src/update.rs.
 
 on:
   push:
@@ -21,6 +26,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: The tag matches the crate version
         shell: bash
         run: |
@@ -29,8 +38,19 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} doesn't match Cargo.toml version v$version" >&2
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: The release key is set
+        shell: bash
+        env:
+          REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
+        run: |
+          if [ -z "$REIGN_RELEASE_KEY" ]; then
+            echo "Add the REIGN_RELEASE_KEY repository secret (see README, Updates)" >&2
+            exit 1
+          fi
+      # The same checks CI runs: a release never ships what CI would reject.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      # reign_hub also builds reign-release, the signing tool used below.
       - run: cargo build --release -p reign_hub -p reign_engine
       - name: Package
         shell: pwsh
@@ -38,9 +58,22 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/reign-hub.exe, target/release/reign-engine.exe dist/
           Copy-Item LICENSE dist/
+          # The hub has Bebas Neue and Inter built in; their licence travels with them.
+          Copy-Item hub/assets/fonts/*-OFL.txt dist/
           Compress-Archive -Path dist/* -DestinationPath reign-windows-x64.zip
+      - name: Sign
+        shell: bash
+        env:
+          REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
+        run: |
+          target/release/reign-release sign reign-windows-x64.zip "${GITHUB_REF_NAME}"
+          # Fails if the secret isn't the partner of the hub's public key.
+          target/release/reign-release verify reign-windows-x64.zip "${GITHUB_REF_NAME}"
       - name: Publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" reign-windows-x64.zip --title "Reign ${GITHUB_REF_NAME}" --generate-notes
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          reign-windows-x64.zip reign-windows-x64.zip.sig
+          --title "Reign ${GITHUB_REF_NAME}" --generate-notes

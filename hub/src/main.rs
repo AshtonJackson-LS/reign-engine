@@ -13,6 +13,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod intro;
+mod signing;
 mod snapshot;
 mod theme;
 mod update;

@@ -18,8 +18,45 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The engine source the project builds against: `$REIGN_ENGINE_SOURCE`,
-/// or the checkout these tools were built from.
+/// Where a project with code gets the engine's crates from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineSource {
+    /// A checkout on this machine: `$REIGN_ENGINE_SOURCE`, or the one these
+    /// tools were built from.
+    Local(PathBuf),
+    /// No checkout here (a downloaded release, built on another machine): the
+    /// release's tag in the GitHub repository, which Cargo fetches itself.
+    Git { url: String, tag: String },
+}
+
+impl EngineSource {
+    /// A Cargo.toml dependency on the engine crate in `dir` (like
+    /// `engine/reign`), as the inline table after `name = `.
+    pub fn dependency(&self, dir: &str) -> String {
+        match self {
+            EngineSource::Local(root) => {
+                let path = root.join(dir).display().to_string().replace('\\', "/");
+                format!("{{ path = \"{path}\" }}")
+            }
+            EngineSource::Git { url, tag } => format!("{{ git = \"{url}\", tag = \"{tag}\" }}"),
+        }
+    }
+}
+
+/// The engine source a new project builds against: the local checkout when
+/// there is one, else this version's release on GitHub.
+pub fn engine_source() -> EngineSource {
+    let root = engine_root();
+    if root.join("engine/reign/Cargo.toml").is_file() {
+        EngineSource::Local(root)
+    } else {
+        EngineSource::Git { url: crate::release::git_url(), tag: crate::release::tag() }
+    }
+}
+
+/// The engine checkout the project builds against: `$REIGN_ENGINE_SOURCE`,
+/// or the checkout these tools were built from. On a downloaded release it
+/// may not exist; [`engine_source`] says what to use then.
 pub fn engine_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("REIGN_ENGINE_SOURCE") {
         return PathBuf::from(dir);
@@ -243,8 +280,7 @@ pub fn init(root: &Path, project_name: &str) -> std::io::Result<String> {
         return Ok(name);
     }
     let name = crate_name(project_name);
-    let engine = engine_root();
-    let path = |p: &str| engine.join(p).display().to_string().replace('\\', "/");
+    let source = engine_source();
     let write = |rel: &str, text: String| -> std::io::Result<()> {
         let file = root.join(rel);
         if file.exists() {
@@ -274,12 +310,12 @@ path = "src/main.rs"
 
 {game}
 [dependencies]
-reign_engine = {{ path = "{app}" }}
-reign = {{ path = "{reign}" }}
+reign_engine = {app}
+reign = {reign}
 serde = {{ version = "1", features = ["derive"] }}
 
 [build-dependencies]
-reign_build = {{ path = "{build}" }}
+reign_build = {build}
 
 [profile.dev]
 opt-level = 1
@@ -292,9 +328,9 @@ opt-level = 3
 "#,
             bin = editor_bin(&name),
             game = game_bin_table(&name),
-            app = path("app"),
-            reign = path("engine/reign"),
-            build = path("engine/reign_build"),
+            app = source.dependency("app"),
+            reign = source.dependency("engine/reign"),
+            build = source.dependency("engine/reign_build"),
         ),
     )?;
     write(
@@ -332,10 +368,12 @@ opt-level = 3
     )?;
     // Same toolchain and dependency versions as the engine, so the first
     // build resolves the way the engine does.
-    for file in ["rust-toolchain.toml", "Cargo.lock"] {
-        let from = engine.join(file);
-        if from.is_file() && !root.join(file).exists() {
-            std::fs::copy(from, root.join(file))?;
+    if let EngineSource::Local(engine) = &source {
+        for file in ["rust-toolchain.toml", "Cargo.lock"] {
+            let from = engine.join(file);
+            if from.is_file() && !root.join(file).exists() {
+                std::fs::copy(from, root.join(file))?;
+            }
         }
     }
     Ok(name)
@@ -348,10 +386,28 @@ pub const AGENT_GUIDE: &str = "AGENTS.md";
 /// that check and play it without a window, and how to write scenes and
 /// components.
 pub fn agent_guide(project_name: &str) -> String {
-    let engine = engine_root().display().to_string().replace('\\', "/");
+    let (engine, cli) = match engine_source() {
+        EngineSource::Local(root) => {
+            let root = root.display().to_string().replace('\\', "/");
+            let cli = format!("cargo run --manifest-path \"{root}/Cargo.toml\" -p reign_engine --");
+            (root, cli)
+        }
+        // A downloaded release: the source is on GitHub, and the editor is
+        // the installed one beside the program writing this guide.
+        EngineSource::Git { url, tag } => {
+            let name = if cfg!(windows) { "reign-engine.exe" } else { "reign-engine" };
+            let exe = std::env::current_exe()
+                .ok()
+                .and_then(|exe| Some(exe.parent()?.join(name)))
+                .filter(|exe| exe.is_file())
+                .map_or_else(|| name.to_owned(), |exe| exe.display().to_string());
+            (format!("{url}/tree/{tag}"), format!("\"{}\"", exe.replace('\\', "/")))
+        }
+    };
     include_str!("../templates/AGENTS.md")
         .replace("{example}", include_str!("../templates/agents_example.rs"))
         .replace("{project}", project_name)
+        .replace("{engine_cli}", &cli)
         .replace("{engine}", &engine)
 }
 
@@ -533,6 +589,19 @@ mod tests {
         assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\x".into()), PathBuf::from(r"\\srv\share\x"));
         assert_eq!(strip_verbatim("/home/x".into()), PathBuf::from("/home/x"));
         assert!(!engine_root().to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn a_project_without_a_local_engine_fetches_the_release_tag() {
+        // These tests run inside the checkout, so it's the local one.
+        assert!(matches!(engine_source(), EngineSource::Local(_)));
+        let local = EngineSource::Local(PathBuf::from(r"C:\src\reign"));
+        assert_eq!(local.dependency("engine/reign"), r#"{ path = "C:/src/reign/engine/reign" }"#);
+        let git = EngineSource::Git { url: "https://github.com/o/r".into(), tag: "v1.2.3".into() };
+        assert_eq!(
+            git.dependency("engine/reign"),
+            r#"{ git = "https://github.com/o/r", tag = "v1.2.3" }"#
+        );
     }
 
     #[test]

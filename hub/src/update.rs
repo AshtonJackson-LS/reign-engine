@@ -11,8 +11,10 @@
 //! and has no rate limit.
 //!
 //! A release is expected to carry [`ASSET`] on Windows: a zip with
-//! `reign-hub.exe` and `reign-engine.exe` at its root. Other platforms open
-//! the release page instead of replacing themselves.
+//! `reign-hub.exe` and `reign-engine.exe` at its root, and `ASSET.sig`, its
+//! signature by the release key (see `signing.rs`). An update whose
+//! signature doesn't check out is never unpacked. Other platforms open the
+//! release page instead of replacing themselves.
 //!
 //! Set `REIGN_NO_UPDATE_CHECK=1` to turn checking off, or
 //! `REIGN_UPDATE_FAKE=1.2.3` to show the arrow without a real release.
@@ -23,16 +25,10 @@ use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
 
-use super::no_console;
-
-/// The repository official builds follow.
-const DEFAULT_REPO: &str = "AshtonJackson-LS/reign-engine";
+use super::{no_console, signing};
 
 /// The repository this build follows for updates.
-pub const REPO: &str = match option_env!("REIGN_UPDATE_REPO") {
-    Some(repo) => repo,
-    None => DEFAULT_REPO,
-};
+pub use reign_build::release::REPO;
 
 /// The release file a Windows install is replaced from.
 pub const ASSET: &str = "reign-windows-x64.zip";
@@ -150,8 +146,23 @@ pub fn open_release_page() {
     super::reveal(Path::new(&format!("https://github.com/{REPO}/releases/latest")));
 }
 
+/// A program that ships with the system. On Windows, by its full path in
+/// System32, so a `curl.exe` or `tar.exe` lying elsewhere on `PATH` is never
+/// the one that runs.
+fn system_tool(name: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let exe = Path::new(&root).join("System32").join(format!("{name}.exe"));
+        if exe.is_file() {
+            return no_console(Command::new(exe));
+        }
+    }
+    no_console(Command::new(name))
+}
+
 fn curl() -> Command {
-    no_console(Command::new("curl"))
+    system_tool("curl")
 }
 
 /// The newest release's version, `None` when the repository has none.
@@ -201,19 +212,29 @@ fn install_windows(version: &str) -> Result<PathBuf, String> {
     let stage = work.join("new");
     std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
 
+    let tag = format!("v{version}");
     let zip = work.join(ASSET);
-    let url = format!("https://github.com/{REPO}/releases/download/v{version}/{ASSET}");
-    let status = curl()
-        .args(["-fsSL", "--max-time", "600", "-o"])
-        .arg(&zip)
-        .arg(&url)
-        .status()
-        .map_err(|e| format!("can't run curl: {e}"))?;
-    if !status.success() {
-        return Err(format!("couldn't download {url}"));
+    let sig = work.join(format!("{ASSET}.sig"));
+    for (file, name) in [(&zip, ASSET.to_owned()), (&sig, format!("{ASSET}.sig"))] {
+        let url = format!("https://github.com/{REPO}/releases/download/{tag}/{name}");
+        let status = curl()
+            .args(["-fsSL", "--max-time", "600", "-o"])
+            .arg(file)
+            .arg(&url)
+            .status()
+            .map_err(|e| format!("can't run curl: {e}"))?;
+        if !status.success() {
+            return Err(format!("couldn't download {url}"));
+        }
+    }
+    let bytes = std::fs::read(&zip).map_err(|e| e.to_string())?;
+    let signature = std::fs::read_to_string(&sig).map_err(|e| e.to_string())?;
+    if let Err(e) = signing::verify(signing::PUBLIC_KEY, &tag, &bytes, &signature) {
+        let _ = std::fs::remove_dir_all(&work);
+        return Err(format!("the download isn't signed by the Reign release key ({e})"));
     }
     // Windows 10+ ships bsdtar as tar.exe, which reads zips.
-    let status = no_console(Command::new("tar"))
+    let status = system_tool("tar")
         .arg("-xf")
         .arg(&zip)
         .arg("-C")

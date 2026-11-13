@@ -98,6 +98,8 @@ The editor can't yet (see the roadmap).
 | Script reload and Export Game | `app/src/code.rs`, `app/src/export.rs` |
 | Editor panels | `engine/reign_editor/src/` |
 | The project launcher | `hub/src/main.rs` |
+| Hub updates and release signing | `hub/src/update.rs`, `hub/src/signing.rs`, `.github/workflows/release.yml` |
+| Where projects get the engine (local path or git tag) | `engine/reign_build/src/project.rs` (`engine_source`), `engine/reign_build/src/release.rs` |
 
 ## Before you say it's done
 
