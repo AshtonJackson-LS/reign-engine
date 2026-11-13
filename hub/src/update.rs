@@ -1,56 +1,46 @@
-//! Update checks for the hub: a green arrow in the top bar when the GitHub
-//! repository this build comes from has a newer release.
+//! Talking to GitHub Releases: the hub's update arrow, the release list the
+//! Engine version dialog shows, and downloading a release.
 //!
-//! Which repository is baked in at build time, so a fork that ships its own
-//! releases only hears about its own: build with `REIGN_UPDATE_REPO=owner/name`
-//! (or change [`DEFAULT_REPO`]) and the hub follows that repository.
+//! Which repository is built in ([`REPO`]), so a fork that ships its own
+//! releases only hears about its own. No HTTP library: the hub runs the
+//! `curl` that ships with Windows 10+, macOS and most Linux distributions.
 //!
-//! No HTTP library: the hub asks the `curl` that ships with Windows 10+,
-//! macOS and most Linux distributions. The latest version comes from where
-//! `github.com/<repo>/releases/latest` redirects to, which needs no API key
-//! and has no rate limit.
+//! On Windows a release carries [`ASSET`], a zip with the hub and editor, and
+//! `ASSET.sig`, its signature by the release key (`signing.rs`). A download
+//! whose signature doesn't check out is never unpacked. Other platforms open
+//! the release page instead of replacing themselves.
 //!
-//! A release is expected to carry [`ASSET`] on Windows: a zip with
-//! `reign-hub.exe` and `reign-engine.exe` at its root, and `ASSET.sig`, its
-//! signature by the release key (see `signing.rs`). An update whose
-//! signature doesn't check out is never unpacked. Other platforms open the
-//! release page instead of replacing themselves.
-//!
-//! Set `REIGN_NO_UPDATE_CHECK=1` to turn checking off, or
-//! `REIGN_UPDATE_FAKE=1.2.3` to show the arrow without a real release.
+//! `REIGN_NO_UPDATE_CHECK=1` turns checking off; `REIGN_UPDATE_FAKE=1.2.3`
+//! shows the arrow without a real release.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 
 use eframe::egui;
+use reign_setup::{PROGRAMS, system_tool};
 
-use super::{no_console, signing};
+use super::signing;
 
-/// The repository this build follows for updates.
 pub use reign_build::release::REPO;
 
 /// The release file a Windows install is replaced from.
 pub const ASSET: &str = "reign-windows-x64.zip";
 
-// The programs an update replaces, beside the hub.
-use reign_setup::PROGRAMS;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
-    /// Not asked yet, or checking is off.
+    /// Not checked yet.
     Idle,
-    Checking,
-    UpToDate,
-    /// A newer release exists; the tag is its version, like `0.2.0`.
+    /// Checked (or checking is off): nothing to offer.
+    Checked,
+    /// A newer release exists, like `0.2.0`.
     Available(String),
     Installing(String),
-    Failed(String),
 }
 
 enum Message {
-    Latest(Result<Option<String>, String>),
-    Installed(Result<PathBuf, String>),
+    Latest(Result<Vec<String>, String>),
+    Installed(String, Result<PathBuf, String>),
 }
 
 pub struct Updater {
@@ -70,6 +60,7 @@ impl Updater {
         if self.state != State::Idle {
             return;
         }
+        self.state = State::Checked;
         if std::env::var_os("REIGN_NO_UPDATE_CHECK").is_some() {
             return;
         }
@@ -77,32 +68,25 @@ impl Updater {
             self.state = State::Available(fake);
             return;
         }
-        self.state = State::Checking;
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Message::Latest(latest_version()));
-            ctx.request_repaint();
-        });
+        self.run(ctx, || Message::Latest(releases()));
     }
 
     /// Downloads the release and swaps the programs in place. The result
-    /// arrives through [`Self::poll`]; on Windows `restart` is then set.
+    /// arrives through [`Self::poll`]; on success `restart` is set.
     pub fn install(&mut self, ctx: &egui::Context) {
         let State::Available(version) = self.state.clone() else { return };
         if !cfg!(windows) {
-            open_release_page();
-            return;
+            return super::reveal(Path::new(&format!("https://github.com/{REPO}/releases/latest")));
         }
         self.state = State::Installing(version.clone());
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Message::Installed(install_windows(&version)));
-            ctx.request_repaint();
+        self.run(ctx, move || {
+            let result = install_windows(&version);
+            Message::Installed(version, result)
         });
+    }
+
+    fn run(&mut self, ctx: &egui::Context, job: impl FnOnce() -> Message + Send + 'static) {
+        self.rx = Some(super::versions::background(ctx, job));
     }
 
     /// Takes in a finished background job. Returns an error to show, if any.
@@ -110,20 +94,16 @@ impl Updater {
         let message = self.rx.as_ref()?.try_recv().ok()?;
         self.rx = None;
         match message {
-            Message::Latest(Ok(Some(tag))) if is_newer(&tag, super::VERSION) => {
-                self.state = State::Available(tag);
+            Message::Latest(Ok(releases)) => {
+                if let Some(latest) = releases.first().filter(|v| is_newer(v, super::VERSION)) {
+                    self.state = State::Available(latest.clone());
+                }
             }
-            Message::Latest(Ok(_)) => self.state = State::UpToDate,
-            Message::Latest(Err(e)) => {
-                // Offline is normal; keep quiet and try again next launch.
-                log::info!("update check failed: {e}");
-                self.state = State::UpToDate;
-            }
-            Message::Installed(Ok(hub)) => {
-                self.restart = Some(hub);
-            }
-            Message::Installed(Err(e)) => {
-                self.state = State::Failed(e.clone());
+            // Offline is normal; keep quiet and try again next launch.
+            Message::Latest(Err(e)) => log::info!("update check failed: {e}"),
+            Message::Installed(_, Ok(hub)) => self.restart = Some(hub),
+            Message::Installed(version, Err(e)) => {
+                self.state = State::Available(version);
                 return Some(format!("Update failed: {e}"));
             }
         }
@@ -131,115 +111,69 @@ impl Updater {
     }
 }
 
-/// Removes programs an earlier update moved aside.
-pub fn clean_old_files() {
-    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_owned))
-    else {
-        return;
-    };
-    for name in PROGRAMS {
-        let _ = std::fs::remove_file(dir.join(format!("{name}.old")));
-    }
-}
-
-pub fn open_release_page() {
-    super::reveal(Path::new(&format!("https://github.com/{REPO}/releases/latest")));
-}
-
-/// A program that ships with the system. On Windows, by its full path in
-/// System32, so a `curl.exe` or `tar.exe` lying elsewhere on `PATH` is never
-/// the one that runs.
-fn system_tool(name: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-        let exe = Path::new(&root).join("System32").join(format!("{name}.exe"));
-        if exe.is_file() {
-            return no_console(Command::new(exe));
-        }
-    }
-    no_console(Command::new(name))
-}
-
-fn curl() -> Command {
-    system_tool("curl")
-}
-
-/// The body of a GitHub API URL.
-pub fn curl_json(url: &str) -> Result<String, String> {
-    let output = curl()
-        .args(["-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json"])
-        .arg(url)
-        .output()
-        .map_err(|e| format!("can't run curl: {e}"))?;
-    if !output.status.success() {
-        return Err(format!("couldn't reach GitHub ({})", output.status));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// The newest release's version, `None` when the repository has none.
-fn latest_version() -> Result<Option<String>, String> {
-    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let output = curl()
-        .args(["-sIL", "--max-time", "15", "-o", null, "-w", "%{url_effective}"])
-        .arg(format!("https://github.com/{REPO}/releases/latest"))
-        .output()
-        .map_err(|e| format!("can't run curl: {e}"))?;
-    if !output.status.success() {
-        return Err(format!("curl exited with {}", output.status));
-    }
-    Ok(tag_from_url(String::from_utf8_lossy(&output.stdout).trim()))
-}
-
-/// `https://github.com/o/r/releases/tag/v0.2.0` → `0.2.0`.
-fn tag_from_url(url: &str) -> Option<String> {
-    let tag = url.split_once("/releases/tag/")?.1;
-    let tag = tag.split(['?', '#', '/']).next()?;
-    Some(tag.trim_start_matches('v').to_owned()).filter(|t| !t.is_empty())
-}
-
 /// Numeric parts of `1.2.3`; a pre-release suffix like `-beta` makes it `None`
-/// so a pre-release never offers itself as an update.
+/// so a pre-release is never offered.
 pub fn parse_version(v: &str) -> Option<Vec<u64>> {
     v.split('.').map(|part| part.parse().ok()).collect()
 }
 
 pub fn is_newer(candidate: &str, current: &str) -> bool {
-    let (Some(mut a), Some(mut b)) = (parse_version(candidate), parse_version(current)) else {
-        return false;
-    };
-    let len = a.len().max(b.len());
-    a.resize(len, 0);
-    b.resize(len, 0);
-    a > b
+    matches!((parse_version(candidate), parse_version(current)), (Some(a), Some(b)) if a > b)
+}
+
+pub fn sort_newest_first(versions: &mut Vec<String>) {
+    versions.sort_by_key(|v| Reverse(parse_version(v)));
+    versions.dedup();
+}
+
+/// Release versions in [`REPO`], newest first, pre-releases left out.
+pub fn releases() -> Result<Vec<String>, String> {
+    let output = system_tool("curl")
+        .args(["-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json"])
+        .arg(format!("https://api.github.com/repos/{REPO}/releases?per_page=100"))
+        .output()
+        .map_err(|e| format!("can't run curl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("couldn't reach GitHub ({})", output.status));
+    }
+    let mut versions = tag_names(&String::from_utf8_lossy(&output.stdout));
+    sort_newest_first(&mut versions);
+    Ok(versions)
+}
+
+/// Every `"tag_name": "vX.Y.Z"` in GitHub's JSON, without the `v`.
+fn tag_names(json: &str) -> Vec<String> {
+    json.split("\"tag_name\"")
+        .skip(1)
+        .filter_map(|rest| {
+            let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+            let version = rest.split('"').next()?.trim_start_matches('v');
+            parse_version(version).map(|_| version.to_owned())
+        })
+        .collect()
 }
 
 /// Downloads release `version`'s [`ASSET`] and its signature, checks the
-/// signature, and unpacks it. Returns the temporary folder it's in (remove
-/// it when done) and the folder with the unpacked programs. Nothing is
-/// unpacked unless the signature matches the release key.
-pub fn fetch_release(version: &str) -> Result<(PathBuf, PathBuf), String> {
+/// signature, unpacks it and returns the programs' contents, in
+/// [`PROGRAMS`] order. Nothing is unpacked unless the signature matches.
+pub fn fetch_release(version: &str) -> Result<Vec<Vec<u8>>, String> {
     let work = std::env::temp_dir().join(format!("reign-release-{version}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
-    let stage = work.join("new");
-    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-    let result = download_and_unpack(version, &work, &stage);
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&work);
-    }
-    result.map(|()| (work, stage))
+    let result = download_and_unpack(version, &work);
+    let _ = std::fs::remove_dir_all(&work);
+    result
 }
 
-fn download_and_unpack(version: &str, work: &Path, stage: &Path) -> Result<(), String> {
+fn download_and_unpack(version: &str, work: &Path) -> Result<Vec<Vec<u8>>, String> {
+    let stage = work.join("new");
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
     let tag = format!("v{version}");
-    let zip = work.join(ASSET);
-    let sig = work.join(format!("{ASSET}.sig"));
-    for (file, name) in [(&zip, ASSET.to_owned()), (&sig, format!("{ASSET}.sig"))] {
+    let sig = format!("{ASSET}.sig");
+    for name in [ASSET, &sig] {
         let url = format!("https://github.com/{REPO}/releases/download/{tag}/{name}");
-        let status = curl()
+        let status = system_tool("curl")
             .args(["-fsSL", "--max-time", "600", "-o"])
-            .arg(file)
+            .arg(work.join(name))
             .arg(&url)
             .status()
             .map_err(|e| format!("can't run curl: {e}"))?;
@@ -247,72 +181,41 @@ fn download_and_unpack(version: &str, work: &Path, stage: &Path) -> Result<(), S
             return Err(format!("couldn't download {url}"));
         }
     }
+    let zip = work.join(ASSET);
     let bytes = std::fs::read(&zip).map_err(|e| e.to_string())?;
-    let signature = std::fs::read_to_string(&sig).map_err(|e| e.to_string())?;
-    if let Err(e) = signing::verify(signing::PUBLIC_KEY, &tag, &bytes, &signature) {
-        return Err(format!("the download isn't signed by the Reign release key ({e})"));
-    }
+    let signature = std::fs::read_to_string(work.join(&sig)).map_err(|e| e.to_string())?;
+    signing::verify(signing::PUBLIC_KEY, &tag, &bytes, &signature)
+        .map_err(|e| format!("the download isn't signed by the Reign release key ({e})"))?;
     // Windows 10+ ships bsdtar as tar.exe, which reads zips.
     let status = system_tool("tar")
         .arg("-xf")
         .arg(&zip)
         .arg("-C")
-        .arg(stage)
+        .arg(&stage)
         .status()
         .map_err(|e| format!("can't run tar: {e}"))?;
     if !status.success() {
         return Err("couldn't unpack the download".to_owned());
     }
-    for name in PROGRAMS {
-        if !stage.join(name).is_file() {
-            return Err(format!("the download has no {name}"));
-        }
-    }
-    Ok(())
+    PROGRAMS
+        .iter()
+        .map(|name| {
+            std::fs::read(stage.join(name)).map_err(|_| format!("the download has no {name}"))
+        })
+        .collect()
 }
 
 /// Downloads release `version` and swaps it in beside the running hub.
 /// Returns the path of the new hub to start.
 fn install_windows(version: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or("the hub has no folder")?.to_owned();
-    let (work, stage) = fetch_release(version)?;
-    let swapped = swap_in(&stage, &dir);
-    let _ = std::fs::remove_dir_all(&work);
-    swapped?;
+    let dir = exe.parent().ok_or("the hub has no folder")?;
+    let programs = fetch_release(version)?;
+    let files: Vec<(&str, &[u8])> =
+        PROGRAMS.iter().copied().zip(programs.iter().map(Vec::as_slice)).collect();
+    reign_setup::place_files(dir, &files)?;
     reign_setup::set_registered_version(version);
     Ok(dir.join(PROGRAMS[0]))
-}
-
-/// A running `.exe` can't be overwritten but can be renamed, so each program
-/// is moved to `name.old` and the new one copied in. Any failure puts the
-/// old ones back.
-fn swap_in(stage: &Path, dir: &Path) -> Result<(), String> {
-    let mut moved: Vec<&str> = Vec::new();
-    let undo = |moved: &[&str]| {
-        for name in moved {
-            let target = dir.join(name);
-            let _ = std::fs::remove_file(&target);
-            let _ = std::fs::rename(dir.join(format!("{name}.old")), target);
-        }
-    };
-    for name in PROGRAMS {
-        let target = dir.join(name);
-        let old = dir.join(format!("{name}.old"));
-        let _ = std::fs::remove_file(&old);
-        if target.exists() {
-            if let Err(e) = std::fs::rename(&target, &old) {
-                undo(&moved);
-                return Err(format!("can't replace {name} (is the editor still open?): {e}"));
-            }
-            moved.push(name);
-        }
-        if let Err(e) = std::fs::copy(stage.join(name), &target) {
-            undo(&moved);
-            return Err(format!("can't write {name}: {e}"));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -320,45 +223,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_tag_from_the_redirect() {
-        assert_eq!(
-            tag_from_url("https://github.com/o/r/releases/tag/v0.2.0"),
-            Some("0.2.0".to_owned())
-        );
-        assert_eq!(tag_from_url("https://github.com/o/r/releases"), None);
-        assert_eq!(tag_from_url("https://github.com/o/r/releases/latest"), None);
-    }
-
-    #[test]
     fn compares_versions_numerically() {
         assert!(is_newer("0.2.0", "0.1.0"));
         assert!(is_newer("0.10.0", "0.9.0"));
-        assert!(is_newer("1.0", "0.9.9"));
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("0.1.0", "0.2.0"));
         assert!(!is_newer("0.2.0-beta", "0.1.0"));
     }
 
     #[test]
-    fn a_failed_swap_restores_the_old_programs() {
-        let root = std::env::temp_dir().join(format!("reign-swap-test-{}", std::process::id()));
-        let (dir, stage) = (root.join("dir"), root.join("stage"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(&stage).unwrap();
-        for name in PROGRAMS {
-            std::fs::write(dir.join(name), "old").unwrap();
-        }
-        std::fs::write(stage.join(PROGRAMS[0]), "new").unwrap();
-        // The second program is missing from the stage, so the copy fails.
-        assert!(swap_in(&stage, &dir).is_err());
-        for name in PROGRAMS {
-            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "old");
-        }
-        std::fs::write(stage.join(PROGRAMS[1]), "new").unwrap();
-        swap_in(&stage, &dir).unwrap();
-        for name in PROGRAMS {
-            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "new");
-        }
-        let _ = std::fs::remove_dir_all(&root);
+    fn reads_release_tags_from_github_json() {
+        let json = r#"[{"url":"x","tag_name":"v0.2.0","name":"Reign v0.2.0"},
+            {"tag_name": "v0.10.1"}, {"tag_name":"v0.3.0-beta"}, {"tag_name":"v0.1.0"}]"#;
+        let mut tags = tag_names(json);
+        assert_eq!(tags, ["0.2.0", "0.10.1", "0.1.0"]);
+        sort_newest_first(&mut tags);
+        assert_eq!(tags, ["0.10.1", "0.2.0", "0.1.0"]);
     }
 }

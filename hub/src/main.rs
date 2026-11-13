@@ -22,6 +22,7 @@ mod versions;
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Sense, Stroke, Vec2,
 };
+use reign_setup::no_console;
 use serde::{Deserialize, Serialize};
 
 use intro::Intro;
@@ -146,17 +147,6 @@ fn plural(n: u64, unit: &str) -> String {
     if n == 1 { format!("1 {unit} ago") } else { format!("{n} {unit}s ago") }
 }
 
-/// On Windows the hub has no console, so a console program it starts would
-/// open a black window of its own; this stops that.
-fn no_console(mut command: Command) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    command
-}
-
 /// The editor executable: `$REIGN_EDITOR`, or `reign-engine` beside the hub.
 fn editor_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("REIGN_EDITOR") {
@@ -169,6 +159,14 @@ fn editor_path() -> Option<PathBuf> {
 
 fn editor_name() -> &'static str {
     if cfg!(windows) { "reign-engine.exe" } else { "reign-engine" }
+}
+
+/// "engine 0.2.0", or "the local engine source" for a checkout.
+fn engine_label(version: &Option<String>) -> String {
+    match version {
+        Some(v) => format!("engine {v}"),
+        None => "the local engine source".to_owned(),
+    }
 }
 
 /// Records the engine version a project uses in its `ReignProject.ron`.
@@ -1043,12 +1041,9 @@ impl Hub {
         match result {
             Ok(()) => {
                 self.info(format!("Engine {version} is ready"));
-                if let Some((path, wanted)) = self.open_after_download.take() {
-                    if wanted == version {
-                        self.open(&path);
-                    } else {
-                        self.open_after_download = Some((path, wanted));
-                    }
+                let waiting = self.open_after_download.take().filter(|(_, v)| *v == version);
+                if let Some((path, _)) = waiting {
+                    self.open(&path);
                 }
             }
             Err(e) => {
@@ -1058,12 +1053,17 @@ impl Hub {
         }
     }
 
-    fn modal_frame() -> egui::Frame {
-        egui::Frame::new()
-            .fill(SURFACE)
-            .stroke(Stroke::new(1.0, HAIRLINE))
-            .corner_radius(CornerRadius::same(18))
-            .inner_margin(Margin::same(28))
+    /// The hub's dialog: a dark card over a dimmed window.
+    fn modal(id: &str) -> egui::Modal {
+        egui::Modal::new(Id::new(id))
+            .frame(
+                egui::Frame::new()
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0, HAIRLINE))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(Margin::same(28)),
+            )
+            .backdrop_color(Color32::from_black_alpha(170))
     }
 
     /// Picks the engine version one project uses.
@@ -1072,17 +1072,16 @@ impl Hub {
             return;
         }
         self.versions.fetch(ctx);
-        let releases: Vec<String> = match &self.versions.releases {
-            Some(Ok(r)) => r.clone(),
-            _ => Vec::new(),
+        let (releases, status) = match &self.versions.releases {
+            Some(Ok(r)) => (r.clone(), None),
+            None => (Vec::new(), Some(("Looking up releases on GitHub…".to_owned(), MUTED))),
+            Some(Err(e)) => (
+                Vec::new(),
+                Some((format!("Couldn't reach GitHub ({e}). Showing what's here."), RED_HOT)),
+            ),
         };
         let installed = versions::installed();
         let all = self.versions.all();
-        let fetching = self.versions.releases.is_none();
-        let fetch_error = match &self.versions.releases {
-            Some(Err(e)) => Some(e.clone()),
-            _ => None,
-        };
         let Some(dialog) = &mut self.version_dialog else { return };
 
         // What can be picked: a local checkout (projects with code, on a
@@ -1094,135 +1093,88 @@ impl Hub {
             }
             let mut list = releases.clone();
             list.extend(dialog.current.clone());
-            versions::sort_newest_first(&mut list);
+            update::sort_newest_first(&mut list);
             options.extend(list.into_iter().map(Some));
         } else {
             options.extend(all.into_iter().map(Some));
         }
-        let describe = |v: &Option<String>| match v {
-            None => "the local engine source".to_owned(),
-            Some(v) => format!("engine {v}"),
-        };
 
         let mut apply = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(Id::new("engine version"))
-            .frame(Self::modal_frame())
-            .backdrop_color(Color32::from_black_alpha(170))
-            .show(ctx, |ui| {
-                ui.set_width(480.0);
-                ui.label(eyebrow("↳ Engine version", RED_HOT));
-                ui.label(text("ENGINE VERSION", Face::Display, 48.0, TEXT, 0.8));
-                ui.add_space(4.0);
-                ui.label(text(
-                    format!("{} uses {}.", project_name(&dialog.path), describe(&dialog.current)),
-                    Face::Medium,
-                    14.0,
-                    TEXT,
-                    -0.2,
-                ));
-                ui.add_space(10.0);
-                if fetching {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(text(
-                            "Looking up releases on GitHub…",
-                            Face::Regular,
-                            12.5,
-                            MUTED,
-                            -0.1,
-                        ));
-                    });
-                } else if let Some(e) = &fetch_error {
-                    ui.label(text(
-                        format!("Couldn't reach GitHub ({e}). Showing what's on this computer."),
-                        Face::Regular,
-                        12.5,
-                        RED_HOT,
-                        -0.1,
-                    ));
-                }
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    for option in &options {
-                        let mut notes: Vec<&str> = Vec::new();
-                        if *option == dialog.current {
-                            notes.push("in use");
+        let modal = Self::modal("engine version").show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(eyebrow("↳ Engine version", RED_HOT));
+            ui.label(text("ENGINE VERSION", Face::Display, 48.0, TEXT, 0.8));
+            ui.add_space(4.0);
+            ui.label(text(
+                format!("{} uses {}.", project_name(&dialog.path), engine_label(&dialog.current)),
+                Face::Medium,
+                14.0,
+                TEXT,
+                -0.2,
+            ));
+            ui.add_space(10.0);
+            if let Some((words, color)) = &status {
+                ui.label(text(words, Face::Regular, 12.5, *color, -0.1));
+            }
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for option in &options {
+                    let in_use = *option == dialog.current;
+                    let (note, available) = match option {
+                        None => ("your engine checkout", true),
+                        Some(v) if dialog.code && releases.contains(v) => ("GitHub release", true),
+                        Some(_) if dialog.code => ("no release on GitHub", in_use),
+                        Some(v) if v == VERSION => ("this hub's editor", true),
+                        Some(v) if installed.contains(v) => ("downloaded", true),
+                        Some(v) if versions::can_download() && releases.contains(v) => {
+                            ("downloads when picked", true)
                         }
-                        let available = match option {
-                            None => {
-                                notes.push("your engine checkout");
-                                true
-                            }
-                            Some(v) if dialog.code => {
-                                if releases.contains(v) {
-                                    notes.push("GitHub release");
-                                    true
-                                } else {
-                                    notes.push("no release on GitHub");
-                                    *option == dialog.current
-                                }
-                            }
-                            Some(v) if v == VERSION => {
-                                notes.push("this hub's editor");
-                                true
-                            }
-                            Some(v) if installed.contains(v) => {
-                                notes.push("downloaded");
-                                true
-                            }
-                            Some(v) if versions::can_download() && releases.contains(v) => {
-                                notes.push("downloads when picked");
-                                true
-                            }
-                            Some(_) => {
-                                notes.push("not available here");
-                                false
-                            }
-                        };
-                        let name = match option {
-                            None => "Local engine source".to_owned(),
-                            Some(v) => format!("Engine {v}"),
-                        };
-                        let label = format!("{name}    {}", notes.join(" · "));
-                        let picked = dialog.choice == *option;
-                        let clicked = ui
-                            .add_enabled_ui(available, |ui| ui.selectable_label(picked, label))
-                            .inner
-                            .clicked();
-                        if clicked {
-                            dialog.choice = option.clone();
-                        }
+                        Some(_) => ("not available here", false),
+                    };
+                    let in_use = if in_use { "in use · " } else { "" };
+                    let name = option
+                        .as_ref()
+                        .map_or("Local engine source".into(), |v| format!("Engine {v}"));
+                    let label = format!("{name}    {in_use}{note}");
+                    let picked = dialog.choice == *option;
+                    let clicked = ui
+                        .add_enabled_ui(available, |ui| ui.selectable_label(picked, label))
+                        .inner
+                        .clicked();
+                    if clicked {
+                        dialog.choice = option.clone();
                     }
-                });
-                ui.add_space(10.0);
-                let mut note = String::from(
-                    "Going back to an older engine can fail to load scenes saved by a newer \
-                     one. Back up the project (or commit it to git) before switching.",
-                );
-                if dialog.code {
-                    note.push_str(
-                        " The project's editor rebuilds with the new engine the next time you \
-                         open it; a version's first build takes a few minutes.",
-                    );
                 }
-                let mut note = text(note, Face::Regular, 12.0, FAINT, -0.1);
-                note.wrap.max_width = ui.available_width();
-                ui.label(note);
-                if let Some(e) = &dialog.error {
-                    ui.add_space(4.0);
-                    ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
-                }
-                ui.add_space(18.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let changed = dialog.choice != dialog.current;
-                    if ui.add_enabled(changed, theme::primary("Use this version")).clicked() {
-                        apply = true;
-                    }
-                    if ui.add(theme::secondary("Cancel")).clicked() {
-                        cancel = true;
-                    }
-                });
             });
+            ui.add_space(10.0);
+            let mut note = String::from(
+                "Going back to an older engine can fail to load scenes saved by a newer \
+                     one. Back up the project (or commit it to git) before switching.",
+            );
+            if dialog.code {
+                note.push_str(
+                    " The project's editor rebuilds with the new engine the next time you \
+                         open it; a version's first build takes a few minutes.",
+                );
+            }
+            let mut note = text(note, Face::Regular, 12.0, FAINT, -0.1);
+            note.wrap.max_width = ui.available_width();
+            ui.label(note);
+            if let Some(e) = &dialog.error {
+                ui.add_space(4.0);
+                ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
+            }
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let changed = dialog.choice != dialog.current;
+                if ui.add_enabled(changed, theme::primary("Use this version")).clicked() {
+                    apply = true;
+                }
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
         if modal.should_close() {
             cancel = true;
         }
@@ -1262,10 +1214,7 @@ impl Hub {
             return;
         }
         let code = dialog.code;
-        let label = match &dialog.choice {
-            Some(v) => format!("engine {v}"),
-            None => "the local engine source".to_owned(),
-        };
+        let label = engine_label(&dialog.choice);
         self.version_dialog = None;
         if code {
             // The old editor was built with the old engine: build a new one.
@@ -1292,45 +1241,42 @@ impl Hub {
         let mut upgrade = false;
         let mut download = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(Id::new("open with"))
-            .frame(Self::modal_frame())
-            .backdrop_color(Color32::from_black_alpha(170))
-            .show(ctx, |ui| {
-                ui.set_width(480.0);
-                ui.label(eyebrow("↳ Engine version", RED_HOT));
-                ui.label(text("WHICH ENGINE?", Face::Display, 48.0, TEXT, 0.8));
-                ui.add_space(4.0);
-                let body = if newer {
-                    format!(
-                        "{name} uses engine {version}, which is newer than this hub \
+        let modal = Self::modal("open with").show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(eyebrow("↳ Engine version", RED_HOT));
+            ui.label(text("WHICH ENGINE?", Face::Display, 48.0, TEXT, 0.8));
+            ui.add_space(4.0);
+            let body = if newer {
+                format!(
+                    "{name} uses engine {version}, which is newer than this hub \
                          ({VERSION}). Update the hub with the green arrow at the top, or \
                          download {version} just for this project."
-                    )
-                } else {
-                    format!(
-                        "{name} uses engine {version}, which isn't on this computer. Open it \
+                )
+            } else {
+                format!(
+                    "{name} uses engine {version}, which isn't on this computer. Open it \
                          with this hub's engine to move it up to {VERSION}, or download \
                          {version} to keep it as it is."
-                    )
-                };
-                let mut body = text(body, Face::Regular, 13.5, MUTED, -0.1);
-                body.wrap.max_width = ui.available_width();
-                ui.label(body);
-                ui.add_space(18.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(theme::primary(&format!("Open with {VERSION}"))).clicked() {
-                        upgrade = true;
-                    }
-                    if can_download
-                        && ui.add(theme::secondary(&format!("Download {version}"))).clicked()
-                    {
-                        download = true;
-                    }
-                    if ui.add(theme::secondary("Cancel")).clicked() {
-                        cancel = true;
-                    }
-                });
+                )
+            };
+            let mut body = text(body, Face::Regular, 13.5, MUTED, -0.1);
+            body.wrap.max_width = ui.available_width();
+            ui.label(body);
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(theme::primary(&format!("Open with {VERSION}"))).clicked() {
+                    upgrade = true;
+                }
+                if can_download
+                    && ui.add(theme::secondary(&format!("Download {version}"))).clicked()
+                {
+                    download = true;
+                }
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
+                }
             });
+        });
         if modal.should_close() {
             cancel = true;
         }
@@ -1356,113 +1302,99 @@ impl Hub {
         let Some(np) = &mut self.new_project else { return };
         let mut create = false;
         let mut cancel = false;
-        let frame = egui::Frame::new()
-            .fill(SURFACE)
-            .stroke(Stroke::new(1.0, HAIRLINE))
-            .corner_radius(CornerRadius::same(18))
-            .inner_margin(Margin::same(28));
-        let modal = egui::Modal::new(Id::new("new project"))
-            .frame(frame)
-            .backdrop_color(Color32::from_black_alpha(170))
-            .show(ctx, |ui| {
-                ui.set_width(500.0);
-                ui.label(eyebrow("↳ Create", RED_HOT));
-                ui.label(text("NEW PROJECT", Face::Display, 56.0, TEXT, 0.8));
-                ui.add_space(10.0);
+        let modal = Self::modal("new project").show(ctx, |ui| {
+            ui.set_width(500.0);
+            ui.label(eyebrow("↳ Create", RED_HOT));
+            ui.label(text("NEW PROJECT", Face::Display, 56.0, TEXT, 0.8));
+            ui.add_space(10.0);
 
-                egui::Frame::new()
-                    .fill(SURFACE_2)
-                    .stroke(Stroke::new(1.5, RED))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(Margin::symmetric(16, 12))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(text("EMPTY 2D", Face::Display, 24.0, TEXT, 0.6));
-                                ui.label(text(
-                                    "A scene with a camera. Drag art in from the Project panel.",
-                                    Face::Regular,
-                                    12.5,
-                                    MUTED,
-                                    -0.1,
-                                ));
-                            });
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(text("●", Face::Bold, 14.0, RED, 0.0));
-                            });
+            egui::Frame::new()
+                .fill(SURFACE_2)
+                .stroke(Stroke::new(1.5, RED))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(text("EMPTY 2D", Face::Display, 24.0, TEXT, 0.6));
+                            ui.label(text(
+                                "A scene with a camera. Drag art in from the Project panel.",
+                                Face::Regular,
+                                12.5,
+                                MUTED,
+                                -0.1,
+                            ));
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(text("●", Face::Bold, 14.0, RED, 0.0));
                         });
                     });
-
-                ui.add_space(10.0);
-                ui.add_enabled_ui(self.cargo, |ui| {
-                    ui.checkbox(
-                        &mut np.scripts,
-                        text(
-                            "Rust scripts: write your own components",
-                            Face::Medium,
-                            13.5,
-                            TEXT,
-                            -0.2,
-                        ),
-                    )
-                    .on_hover_text(
-                        "Makes the project a Rust crate. Its first build takes a few minutes.",
-                    );
                 });
-                if !self.cargo {
-                    ui.label(text(
-                        "Install Rust (rustup.rs) to write components.",
-                        Face::Regular,
-                        12.0,
-                        FAINT,
-                        -0.1,
-                    ));
+
+            ui.add_space(10.0);
+            ui.add_enabled_ui(self.cargo, |ui| {
+                ui.checkbox(
+                    &mut np.scripts,
+                    text("Rust scripts: write your own components", Face::Medium, 13.5, TEXT, -0.2),
+                )
+                .on_hover_text(
+                    "Makes the project a Rust crate. Its first build takes a few minutes.",
+                );
+            });
+            if !self.cargo {
+                ui.label(text(
+                    "Install Rust (rustup.rs) to write components.",
+                    Face::Regular,
+                    12.0,
+                    FAINT,
+                    -0.1,
+                ));
+            }
+            ui.add_space(12.0);
+            ui.label(eyebrow("Project name", MUTED));
+            let name = text_field(ui, &mut np.name, "My Project", f32::INFINITY);
+            if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                create = true;
+            }
+            ui.add_space(10.0);
+            ui.label(eyebrow("Location", MUTED));
+            ui.horizontal(|ui| {
+                let browse = ui.add(theme::secondary("Browse…"));
+                text_field(ui, &mut np.location, "", f32::INFINITY);
+                if browse.clicked()
+                    && let Some(dir) =
+                        rfd::FileDialog::new().set_directory(&np.location).pick_folder()
+                {
+                    np.location = dir.display().to_string();
                 }
-                ui.add_space(12.0);
-                ui.label(eyebrow("Project name", MUTED));
-                let name = text_field(ui, &mut np.name, "My Project", f32::INFINITY);
-                if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            });
+            let target = PathBuf::from(&np.location).join(np.name.trim());
+            ui.add_space(2.0);
+            let mut preview =
+                text(format!("→ {}", target.display()), Face::Regular, 12.0, FAINT, -0.1);
+            preview.wrap.max_width = ui.available_width();
+            preview.wrap.max_rows = 1;
+            preview.wrap.break_anywhere = true;
+            preview.wrap.overflow_character = Some('…');
+            ui.label(preview);
+            if let Some(e) = &np.error {
+                ui.add_space(4.0);
+                ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
+            }
+            ui.add_space(20.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_enabled(!np.name.trim().is_empty(), theme::primary("Create project"))
+                    .clicked()
+                {
                     create = true;
                 }
-                ui.add_space(10.0);
-                ui.label(eyebrow("Location", MUTED));
-                ui.horizontal(|ui| {
-                    let browse = ui.add(theme::secondary("Browse…"));
-                    text_field(ui, &mut np.location, "", f32::INFINITY);
-                    if browse.clicked()
-                        && let Some(dir) =
-                            rfd::FileDialog::new().set_directory(&np.location).pick_folder()
-                    {
-                        np.location = dir.display().to_string();
-                    }
-                });
-                let target = PathBuf::from(&np.location).join(np.name.trim());
-                ui.add_space(2.0);
-                let mut preview =
-                    text(format!("→ {}", target.display()), Face::Regular, 12.0, FAINT, -0.1);
-                preview.wrap.max_width = ui.available_width();
-                preview.wrap.max_rows = 1;
-                preview.wrap.break_anywhere = true;
-                preview.wrap.overflow_character = Some('…');
-                ui.label(preview);
-                if let Some(e) = &np.error {
-                    ui.add_space(4.0);
-                    ui.label(text(e, Face::Medium, 12.5, RED_HOT, -0.1));
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
                 }
-                ui.add_space(20.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!np.name.trim().is_empty(), theme::primary("Create project"))
-                        .clicked()
-                    {
-                        create = true;
-                    }
-                    if ui.add(theme::secondary("Cancel")).clicked() {
-                        cancel = true;
-                    }
-                });
             });
+        });
         if modal.should_close() {
             cancel = true;
         }
@@ -1720,7 +1652,9 @@ fn main() -> eframe::Result {
         uninstall(std::env::args().any(|a| a == "--silent"));
         return Ok(());
     }
-    update::clean_old_files();
+    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(Path::parent) {
+        reign_setup::clean_old_files(dir);
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

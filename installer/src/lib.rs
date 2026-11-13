@@ -3,20 +3,15 @@
 //! (so Windows search finds "Reign Hub"), a Desktop shortcut, and an entry
 //! in Settings → Apps that uninstalls it. No administrator rights needed.
 //!
-//! `ReignSetup.exe` uses all of it; the hub uses [`uninstall`] (for
-//! `reign-hub.exe --uninstall`, which Settings → Apps runs) and
-//! [`set_registered_version`] (after it updates itself).
-//!
-//! On other platforms these do nothing and say so.
+//! `ReignSetup.exe` uses all of it; the hub uses [`place_files`] (updates),
+//! [`uninstall`] (`reign-hub.exe --uninstall`, which Settings → Apps runs)
+//! and [`set_registered_version`].
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The programs an install holds.
 pub const PROGRAMS: [&str; 2] = ["reign-hub.exe", "reign-engine.exe"];
-
-/// What Settings → Apps lists it as.
-pub const DISPLAY_NAME: &str = "Reign Engine";
 
 /// The registry key of the Settings → Apps entry, under HKEY_CURRENT_USER.
 const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ReignEngine";
@@ -28,13 +23,12 @@ pub fn install_dir() -> PathBuf {
             .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             .unwrap_or_else(std::env::temp_dir)
     });
-    base.join("Programs").join(DISPLAY_NAME)
+    base.join("Programs").join("Reign Engine")
 }
 
-/// Runs a console program without flashing a console window.
-fn quiet(program: &str) -> Command {
-    #[allow(unused_mut)]
-    let mut command = Command::new(program);
+/// Keeps a console program started from a windowed one from opening a
+/// console window of its own (Windows).
+pub fn no_console(mut command: Command) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -43,125 +37,136 @@ fn quiet(program: &str) -> Command {
     command
 }
 
+/// A program that ships with the system. On Windows, by its full path in
+/// System32, so a same-named program elsewhere on `PATH` never runs instead.
+pub fn system_tool(name: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let exe = Path::new(&root).join("System32").join(format!("{name}.exe"));
+        if exe.is_file() {
+            return no_console(Command::new(exe));
+        }
+    }
+    no_console(Command::new(name))
+}
+
 fn run(mut command: Command, what: &str) -> Result<(), String> {
     let output = command.output().map_err(|e| format!("{what}: {e}"))?;
     if output.status.success() {
-        Ok(())
-    } else {
-        let err = String::from_utf8_lossy(&output.stderr);
-        Err(format!("{what}: {}", err.trim()))
+        return Ok(());
     }
+    Err(format!("{what}: {}", String::from_utf8_lossy(&output.stderr).trim()))
 }
 
-/// Runs a PowerShell script. Values go in as environment variables, so
-/// paths with spaces or quotes can't break the script.
-fn powershell(script: &str, env: &[(&str, &str)], what: &str) -> Result<(), String> {
-    let mut command = quiet("powershell");
+/// A PowerShell script. Values go in as environment variables, so paths
+/// with spaces or quotes can't break it.
+fn powershell(script: &str, env: &[(&str, &str)]) -> Command {
+    let mut command = system_tool("powershell");
     command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]);
-    command.arg(script);
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    run(command, what)
+    command.arg(script).envs(env.iter().copied());
+    command
 }
 
-/// Copies `files` (name → source) into `dir`. A program that's running
-/// can't be overwritten but can be renamed, so each old file is moved to
-/// `name.old` first (removed on the next install or hub start).
+/// Writes `files` (name, contents) into `dir`. A running program can't be
+/// overwritten but can be renamed, so each old file is moved to `name.old`
+/// first and deleted after; one still running stays until
+/// [`clean_old_files`]. If any file fails, the old ones are put back.
 pub fn place_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let old = |name: &str| dir.join(format!("{name}.old"));
+    let mut moved = Vec::new();
+    let mut result = Ok(());
     for (name, bytes) in files {
         let target = dir.join(name);
-        let old = dir.join(format!("{name}.old"));
-        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(old(name));
         if target.exists() {
-            std::fs::rename(&target, &old)
-                .map_err(|e| format!("can't replace {name} (close Reign first): {e}"))?;
+            if let Err(e) = std::fs::rename(&target, old(name)) {
+                result = Err(format!("can't replace {name} (close Reign first): {e}"));
+                break;
+            }
+            moved.push(*name);
         }
-        std::fs::write(&target, bytes).map_err(|e| format!("can't write {name}: {e}"))?;
+        if let Err(e) = std::fs::write(&target, bytes) {
+            result = Err(format!("can't write {name}: {e}"));
+            break;
+        }
     }
-    Ok(())
+    for name in moved {
+        if result.is_err() {
+            let _ = std::fs::remove_file(dir.join(name));
+            let _ = std::fs::rename(old(name), dir.join(name));
+        } else {
+            let _ = std::fs::remove_file(old(name));
+        }
+    }
+    result
 }
 
-/// Makes the Start menu shortcut and, if `desktop`, a Desktop one, both
-/// called "Reign Hub".
-pub fn add_shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
-    if !cfg!(windows) {
-        return Err("shortcuts are only made on Windows".into());
+/// Removes the programs [`place_files`] moved aside, where nothing still
+/// runs them.
+pub fn clean_old_files(dir: &Path) {
+    for name in PROGRAMS {
+        let _ = std::fs::remove_file(dir.join(format!("{name}.old")));
     }
+}
+
+/// Makes the Start menu shortcut and a Desktop one, both "Reign Hub".
+pub fn add_shortcuts(dir: &Path) -> Result<(), String> {
     let hub = dir.join(PROGRAMS[0]).display().to_string();
-    let dir = dir.display().to_string();
     let script = r#"
         $shell = New-Object -ComObject WScript.Shell
-        $links = @(Join-Path ([Environment]::GetFolderPath('Programs')) 'Reign Hub.lnk')
-        if ($env:REIGN_DESKTOP -eq '1') {
-            $links += Join-Path ([Environment]::GetFolderPath('Desktop')) 'Reign Hub.lnk'
-        }
-        foreach ($link in $links) {
-            $s = $shell.CreateShortcut($link)
+        foreach ($folder in 'Programs', 'Desktop') {
+            $s = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath($folder)) 'Reign Hub.lnk'))
             $s.TargetPath = $env:REIGN_HUB
-            $s.WorkingDirectory = $env:REIGN_DIR
+            $s.WorkingDirectory = Split-Path $env:REIGN_HUB
             $s.IconLocation = $env:REIGN_HUB + ',0'
             $s.Description = 'Reign Hub: create and open Reign Engine projects'
             $s.Save()
         }
     "#;
-    let desktop = if desktop { "1" } else { "0" };
-    powershell(
-        script,
-        &[("REIGN_HUB", &hub), ("REIGN_DIR", &dir), ("REIGN_DESKTOP", desktop)],
-        "making shortcuts",
-    )
+    run(powershell(script, &[("REIGN_HUB", &hub)]), "making shortcuts")
 }
 
-fn remove_shortcuts() -> Result<(), String> {
-    let script = r#"
-        foreach ($folder in 'Programs', 'Desktop') {
-            $link = Join-Path ([Environment]::GetFolderPath($folder)) 'Reign Hub.lnk'
-            if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force }
-        }
-    "#;
-    powershell(script, &[], "removing shortcuts")
+fn reg(args: &[&str], what: &str) -> Result<(), String> {
+    let mut command = system_tool("reg");
+    command.args(args);
+    run(command, what)
 }
 
 fn reg_value(name: &str, kind: &str, data: &str) -> Result<(), String> {
-    let mut command = quiet("reg");
-    command.args(["add", UNINSTALL_KEY, "/v", name, "/t", kind, "/d", data, "/f"]);
-    run(command, "registering with Settings → Apps")
+    let args = ["add", UNINSTALL_KEY, "/v", name, "/t", kind, "/d", data, "/f"];
+    reg(&args, "registering with Settings → Apps")
 }
 
 /// Adds (or refreshes) the Settings → Apps entry.
 pub fn register(dir: &Path, version: &str, repo_url: &str) -> Result<(), String> {
-    if !cfg!(windows) {
-        return Err("only Windows has Settings → Apps".into());
-    }
-    let hub = dir.join(PROGRAMS[0]);
-    let size_kb = PROGRAMS
+    let hub = dir.join(PROGRAMS[0]).display().to_string();
+    let size_kb: u64 = PROGRAMS
         .iter()
         .filter_map(|p| std::fs::metadata(dir.join(p)).ok())
         .map(|m| m.len() / 1024)
-        .sum::<u64>();
-    reg_value("DisplayName", "REG_SZ", DISPLAY_NAME)?;
-    reg_value("DisplayVersion", "REG_SZ", version)?;
-    reg_value("Publisher", "REG_SZ", "Reign Engine contributors")?;
-    reg_value("URLInfoAbout", "REG_SZ", repo_url)?;
-    reg_value("InstallLocation", "REG_SZ", &dir.display().to_string())?;
-    reg_value("DisplayIcon", "REG_SZ", &format!("{},0", hub.display()))?;
-    reg_value("UninstallString", "REG_SZ", &format!("\"{}\" --uninstall", hub.display()))?;
-    reg_value(
-        "QuietUninstallString",
-        "REG_SZ",
-        &format!("\"{}\" --uninstall --silent", hub.display()),
-    )?;
+        .sum();
+    for (name, value) in [
+        ("DisplayName", "Reign Engine".to_owned()),
+        ("DisplayVersion", version.to_owned()),
+        ("Publisher", "Reign Engine contributors".to_owned()),
+        ("URLInfoAbout", repo_url.to_owned()),
+        ("InstallLocation", dir.display().to_string()),
+        ("DisplayIcon", format!("{hub},0")),
+        ("UninstallString", format!("\"{hub}\" --uninstall")),
+        ("QuietUninstallString", format!("\"{hub}\" --uninstall --silent")),
+    ] {
+        reg_value(name, "REG_SZ", &value)?;
+    }
     reg_value("NoModify", "REG_DWORD", "1")?;
     reg_value("NoRepair", "REG_DWORD", "1")?;
     reg_value("EstimatedSize", "REG_DWORD", &size_kb.to_string())
 }
 
 /// Whether Reign has a Settings → Apps entry (it was installed by setup).
-pub fn is_registered() -> bool {
-    cfg!(windows)
-        && quiet("reg").args(["query", UNINSTALL_KEY]).output().is_ok_and(|o| o.status.success())
+fn is_registered() -> bool {
+    cfg!(windows) && reg(&["query", UNINSTALL_KEY], "").is_ok()
 }
 
 /// After an update: the version Settings → Apps shows.
@@ -181,23 +186,24 @@ pub fn uninstall(dir: &Path) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("uninstalling is only automatic on Windows".into());
     }
-    remove_shortcuts()?;
+    let script = r#"
+        foreach ($folder in 'Programs', 'Desktop') {
+            $link = Join-Path ([Environment]::GetFolderPath($folder)) 'Reign Hub.lnk'
+            if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force }
+        }
+    "#;
+    run(powershell(script, &[]), "removing shortcuts")?;
     if is_registered() {
-        let mut command = quiet("reg");
-        command.args(["delete", UNINSTALL_KEY, "/f"]);
-        run(command, "removing the Settings → Apps entry")?;
+        reg(&["delete", UNINSTALL_KEY, "/f"], "removing the Settings → Apps entry")?;
     }
     if dir.join(PROGRAMS[0]).is_file() {
-        // This program is running from that folder, so a separate process
-        // waits for it to quit, then deletes it.
-        let script = r#"
-            Start-Sleep -Seconds 2
-            Remove-Item -LiteralPath $env:REIGN_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        "#;
-        let mut command = quiet("powershell");
-        command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]);
-        command.arg(script).env("REIGN_DIR", dir);
-        command.spawn().map_err(|e| format!("removing {}: {e}", dir.display()))?;
+        // This program runs from that folder: a separate process waits for
+        // it to quit, then deletes the folder.
+        let script = "Start-Sleep -Seconds 2; Remove-Item -LiteralPath $env:REIGN_DIR -Recurse -Force -ErrorAction SilentlyContinue";
+        let dir_text = dir.display().to_string();
+        powershell(script, &[("REIGN_DIR", &dir_text)])
+            .spawn()
+            .map_err(|e| format!("removing {dir_text}: {e}"))?;
     }
     Ok(())
 }
@@ -213,13 +219,16 @@ mod tests {
     }
 
     #[test]
-    fn placing_files_moves_the_old_ones_aside() {
+    fn placing_files_replaces_them_and_undoes_a_failure() {
         let dir = std::env::temp_dir().join(format!("reign-place-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         place_files(&dir, &[("a.exe", b"one")]).unwrap();
         place_files(&dir, &[("a.exe", b"two")]).unwrap();
         assert_eq!(std::fs::read(dir.join("a.exe")).unwrap(), b"two");
-        assert_eq!(std::fs::read(dir.join("a.exe.old")).unwrap(), b"one");
+        assert!(!dir.join("a.exe.old").exists(), "not running, so removed");
+        // The second file can't be written (no such folder): a.exe is put back.
+        assert!(place_files(&dir, &[("a.exe", b"three"), ("missing/b.exe", b"x")]).is_err());
+        assert_eq!(std::fs::read(dir.join("a.exe")).unwrap(), b"two");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

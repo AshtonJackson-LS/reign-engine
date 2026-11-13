@@ -51,54 +51,25 @@ dialogs), saves PNGs of the hub's window into `<dir>` and quits. Fonts are
 Bebas Neue and Inter, both under the SIL Open Font License
 (`hub/assets/fonts/`).
 
-### Installing and updates
+### Installing, updates and engine versions
 
-On Windows, `ReignSetup.exe` (the `installer` crate) holds the release hub
-and editor. It installs them to `%LOCALAPPDATA%\Programs\Reign Engine` with
-Start menu and Desktop shortcuts and a Settings → Apps entry, whose Uninstall
-runs `reign-hub.exe --uninstall`. `--silent` installs without questions.
-`scripts/build-setup.ps1` builds it into `dist/`; `update-reign.bat` builds it
-from your checkout and installs it.
+On Windows, `ReignSetup.exe` (the `installer` crate) installs the hub and
+editor to `%LOCALAPPDATA%\Programs\Reign Engine`, with shortcuts and a
+Settings → Apps entry whose Uninstall runs `reign-hub.exe --uninstall`.
+`update-reign.bat` builds it from your checkout and installs it.
 
-The hub checks the GitHub repository it was built from for a newer release
-and shows a green arrow beside the engine version when there is one. On
-Windows the arrow downloads `reign-windows-x64.zip` and its signature
-`reign-windows-x64.zip.sig`, checks the signature against the release key's
-public half built into the hub (`hub/src/signing.rs`), and only then swaps
-the programs in place and restarts. A download that isn't signed by that
-key is refused. Elsewhere the arrow opens the release page.
-`REIGN_NO_UPDATE_CHECK=1` turns the check off, and `REIGN_UPDATE_FAKE=9.9.9`
-shows the arrow without a release, for UI checks.
+The hub shows a green arrow when its repository has a newer release. On
+Windows the arrow downloads the release's zip, installs it only if its
+signature matches the public key built into the hub (`hub/src/signing.rs`),
+and restarts; elsewhere it opens the release page. `REIGN_NO_UPDATE_CHECK=1`
+turns the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI
+checks. Making releases, approvals and forks: [RELEASING.md](RELEASING.md).
 
-Releases are made with `release.bat` and published by
-`.github/workflows/release.yml`; [RELEASING.md](RELEASING.md) has the steps.
-Releases wait for approval before they're signed: the signing key lives in
-the repository's `release` environment, which only an approved run can use.
-Forks never get the key. A fork that ships its own releases makes its own
-key and sets the `REIGN_UPDATE_PUBKEY` repository variable; the workflow then
-builds its hubs with the fork's name and key (`REIGN_UPDATE_REPO`,
-`REIGN_UPDATE_PUBKEY`), so they follow and trust only the fork's releases.
-RELEASING.md, "Shipping your own fork", has the steps.
-
-### Engine versions
-
-Each project records the engine version it uses, shown on its row in the
-hub. To change it: ••• → **Engine version…**, which lists this repository's
-GitHub releases.
-
-- **A project without code** opens in the editor of its version. The hub's
-  own editor is its version; others are downloaded (and signature-checked)
-  into `versions/<version>/` beside the hub, on Windows. Opening a project
-  whose version isn't here asks whether to move it up to the hub's version or
-  download its own.
-- **A project with code** builds its own editor, against whatever its
-  Cargo.toml names: a release's git tag (`reign = { git = "…", tag =
-  "v0.2.0" }`), or, on a machine with an engine checkout, that checkout
-  (`path = "…"`). Changing the version rewrites those lines; the editor
-  rebuilds the next time the project opens.
-
-New projects use the hub's version, or the local checkout when the hub was
-built from one.
+Each project records its engine version (••• → **Engine version…** changes
+it, from the repository's releases). A project without code opens in that
+version's editor, downloaded into `versions/` beside the hub when it isn't
+the hub's own. A project with code builds its editor against what its
+Cargo.toml names: a release's git tag, or a local engine checkout.
 
 ## Running the editor directly
 

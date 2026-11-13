@@ -53,8 +53,9 @@ GitHub Actions is already set up (`.github/workflows/release.yml`).
    release → Approve and deploy**. Rejecting it ends the release with nothing
    published.
 5. GitHub signs the update, publishes the release, then adds the macOS and
-   Linux builds. Users download the new version, and installed hubs show the
-   green update arrow the next time they open.
+   Linux builds. New users get it from the README's download link; installed
+   hubs show the green update arrow the next time they open. Projects stay on
+   their engine version until someone changes it (••• → Engine version…).
 
 ### Picking the version number
 
@@ -63,18 +64,6 @@ GitHub Actions is already set up (`.github/workflows/release.yml`).
 | Only bug fixes | 0.2.0 → 0.2.1 | last number |
 | Added features | 0.2.1 → 0.3.0 | middle number |
 | Broke old projects or scenes | 0.3.0 → 1.0.0 | first number |
-
-## What users get
-
-- **New users:** the download link
-  `https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/ReignSetup.exe`
-  always points at the newest installer. Running it installs Reign Hub to
-  the Start menu and the Desktop, with an Uninstall entry in Settings → Apps.
-  No administrator rights are needed.
-- **Existing users:** a green arrow in the hub's top bar. One click
-  downloads, checks the signature and restarts on the new version.
-- **Projects** stay on the engine version they were made with until someone
-  changes it in the hub (••• → Engine version…).
 
 ## If something goes wrong
 
@@ -105,19 +94,11 @@ releases. To give your fork its own releases:
    repository variable `REIGN_UPDATE_PUBKEY`: the public key from step 1.
 4. Run `release.bat`.
 
-Nothing in the code needs to change. The release workflow builds your
-hubs with your repository's name and your public key. They look for updates
-in your fork, trust only your signatures, and new projects fetch the engine
-from your fork. Official hubs never trust your releases, and yours never
-trust official ones.
-
-Building a fork's hub on your own machine (not through a release)? Set the
-same two values first:
-
-```bash
-set REIGN_UPDATE_REPO=you/your-fork
-set REIGN_UPDATE_PUBKEY=<your public key>
-```
+No code changes: the workflow builds your hubs with your repository's name
+and public key, so they follow and trust only your releases (and official
+hubs never trust yours). Building your hub by hand instead? Set
+`REIGN_UPDATE_REPO=you/your-fork` and `REIGN_UPDATE_PUBKEY=<your public key>`
+first.
 
 ## Testing a build without releasing
 

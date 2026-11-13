@@ -1,22 +1,12 @@
 name: Release
 
-# Runs when a version tag like v0.2.0 is pushed (release.bat does that; see
-# RELEASING.md). Four jobs:
-#
-#   build    tests everything and builds the Windows installer and update zip.
-#            It has no access to the release key.
-#   publish  waits for approval if the `release` environment requires it,
-#            then signs the zip with the key and publishes the release. Only
-#            this job can see the key (an environment secret).
-#   macos, linux   add their builds to the published release. If one of
-#            them fails, the Windows release is already out.
-#
-# Nothing is published unless build passes. The hub installs a download only
-# if its signature matches the public key built into it.
-#
-# Forks: the repository name and public key come from the repository this
-# runs in, so a fork's hubs follow and trust only the fork's own releases.
-# RELEASING.md, "Shipping your own fork", has the setup.
+# Runs when a version tag like v0.2.0 is pushed (release.bat does that).
+# build tests and packages with no access to the key; publish waits for the
+# `release` environment's approval, then signs and publishes; macos and
+# linux add their builds afterwards. Hubs are built with this repository's
+# name and REIGN_UPDATE_PUBKEY variable, so a fork's hubs trust only the
+# fork's releases. Keep the zip's name in sync with ASSET in
+# hub/src/update.rs. Setup and troubleshooting: RELEASING.md.
 
 on:
   push:

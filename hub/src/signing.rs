@@ -11,12 +11,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 /// The public half of the release key: updates must be signed by its secret.
-/// A fork that ships its own releases makes its own key (`reign-release
-/// keygen`) and builds with `REIGN_UPDATE_PUBKEY=<hex>`, alongside
-/// `REIGN_UPDATE_REPO`.
-///
 /// The release workflow sets `REIGN_UPDATE_PUBKEY` from the repository
-/// variable of that name; unset or empty, it's the official key.
+/// variable of that name (a fork's own key); unset or empty, it's the
+/// official key.
 pub const PUBLIC_KEY: &str = match option_env!("REIGN_UPDATE_PUBKEY") {
     Some(key) if !key.is_empty() => key,
     _ => OFFICIAL_PUBLIC_KEY,

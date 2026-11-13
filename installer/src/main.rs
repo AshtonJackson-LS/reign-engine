@@ -70,14 +70,11 @@ fn main() -> ExitCode {
     let files: [(&str, &[u8]); 3] =
         [(PROGRAMS[0], HUB), (PROGRAMS[1], EDITOR), ("LICENSE", LICENSE)];
     let result = place_files(&dir, &files)
-        .and_then(|()| add_shortcuts(&dir, true))
+        .and_then(|()| add_shortcuts(&dir))
         .and_then(|()| register(&dir, VERSION, &reign_build::release::git_url()));
     if let Err(e) = result {
         tell(MessageLevel::Error, &format!("Reign Engine couldn't be installed:\n\n{e}"));
         return ExitCode::FAILURE;
-    }
-    for (name, _) in files {
-        let _ = std::fs::remove_file(dir.join(format!("{name}.old")));
     }
 
     if !silent && ask(&format!("Reign Engine {VERSION} is installed.\n\nOpen Reign Hub now?")) {
