@@ -5,6 +5,7 @@
 //! `reign-engine` editor, which it finds next to its own executable (or at
 //! `$REIGN_EDITOR`). The list lives in `hub.ron` in the platform's config
 //! folder.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod intro;
 mod snapshot;
 mod theme;
+mod update;
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Sense, Stroke, Vec2,
@@ -142,6 +144,17 @@ fn plural(n: u64, unit: &str) -> String {
     if n == 1 { format!("1 {unit} ago") } else { format!("{n} {unit}s ago") }
 }
 
+/// On Windows the hub has no console, so a console program it starts would
+/// open a black window of its own; this stops that.
+fn no_console(mut command: Command) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
 /// The editor executable: `$REIGN_EDITOR`, or `reign-engine` beside the hub.
 fn editor_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("REIGN_EDITOR") {
@@ -218,6 +231,7 @@ struct Hub {
     intro: Intro,
     grain: egui::TextureHandle,
     snapshots: Option<snapshot::Snapshots>,
+    updater: update::Updater,
 }
 
 impl Hub {
@@ -238,6 +252,7 @@ impl Hub {
             intro,
             grain: theme::grain_texture(&cc.egui_ctx),
             snapshots: snapshot::Snapshots::from_env(),
+            updater: update::Updater::new(),
         }
     }
 
@@ -278,11 +293,11 @@ impl Hub {
             let Some(editor) = cached.filter(|p| p.is_file()) else {
                 return self.build(path);
             };
-            let mut command = Command::new(editor);
+            let mut command = no_console(Command::new(editor));
             command.env("REIGN_CHECK_BUILD_ON_OPEN", "1");
             command
         } else if let Some(editor) = editor_path() {
-            Command::new(editor)
+            no_console(Command::new(editor))
         } else {
             return self.error(
                 "Can't find the reign-engine editor next to the hub (set REIGN_EDITOR to its path)",
@@ -372,7 +387,7 @@ impl Hub {
             }
             let Some(name) = project::read_crate_name(&path) else { continue };
             let exe = project::editor_path(&path, &name);
-            match Command::new(&exe).arg(&path).spawn() {
+            match no_console(Command::new(&exe)).arg(&path).spawn() {
                 Ok(child) => {
                     let secs = build.started.elapsed().as_secs();
                     self.running.insert(path.clone(), child);
@@ -488,6 +503,51 @@ impl Hub {
         let at =
             Pos2::new(rect.right() - GUTTER - v.size().x, rect.center().y - v.size().y / 2.0 + 2.0);
         ui.painter().galley(at, v, FAINT);
+
+        // A green arrow beside the version when a newer release is out.
+        let busy = matches!(self.updater.state, update::State::Installing(_));
+        if let update::State::Available(version) | update::State::Installing(version) =
+            self.updater.state.clone()
+        {
+            let center = Pos2::new(at.x - 28.0, rect.center().y);
+            let hit = Rect::from_center_size(center, Vec2::splat(30.0));
+            let response = ui.interact(hit, Id::new("update"), Sense::click());
+            let tip = if busy {
+                format!("Installing {version}…")
+            } else {
+                format!("Update to {version}")
+            };
+            let response =
+                response.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let fill = if busy {
+                GOOD.gamma_multiply(0.45)
+            } else if response.hovered() {
+                Color32::from_rgb(150, 232, 176)
+            } else {
+                GOOD
+            };
+            let painter = ui.painter();
+            painter.circle_filled(center, 13.0, fill);
+            let stroke = Stroke::new(2.2, BG);
+            painter.line_segment(
+                [center + Vec2::new(0.0, -6.0), center + Vec2::new(0.0, 5.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(-5.0, 0.5), center + Vec2::new(0.0, 5.5)],
+                stroke,
+            );
+            painter
+                .line_segment([center + Vec2::new(5.0, 0.5), center + Vec2::new(0.0, 5.5)], stroke);
+            if response.clicked() && !busy {
+                if !self.running.is_empty() {
+                    self.info("Close open editors before updating");
+                } else {
+                    self.info(format!("Updating to {version}…"));
+                    self.updater.install(ui.ctx());
+                }
+            }
+        }
     }
 
     /// The grainy red band at the top of a page, with a huge title cropped
@@ -1092,6 +1152,18 @@ impl eframe::App for Hub {
         self.reap();
         self.poll_builds();
         let ctx = ui.ctx().clone();
+        if self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some() {
+            self.updater.check(&ctx);
+        }
+        if let Some(error) = self.updater.poll() {
+            self.error(error);
+        }
+        if let Some(hub) = self.updater.restart.take() {
+            match Command::new(&hub).spawn() {
+                Ok(_) => return ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.error(format!("Updated, but can't restart {}: {e}", hub.display())),
+            }
+        }
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
@@ -1173,11 +1245,29 @@ impl eframe::App for Hub {
     }
 }
 
+/// The window and taskbar icon (the same artwork as the .exe's icon).
+fn window_icon() -> egui::IconData {
+    let decoder =
+        png::Decoder::new(std::io::Cursor::new(include_bytes!("../../assets/icon/reign-256.png")));
+    let decoded = decoder.read_info().and_then(|mut reader| {
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap_or(0)];
+        let info = reader.next_frame(&mut rgba)?;
+        rgba.truncate(info.buffer_size());
+        Ok((rgba, info.width, info.height))
+    });
+    match decoded {
+        Ok((rgba, width, height)) => egui::IconData { rgba, width, height },
+        Err(_) => egui::IconData::default(),
+    }
+}
+
 fn main() -> eframe::Result {
+    update::clean_old_files();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Reign Hub")
+            .with_icon(window_icon())
             .with_inner_size([1080.0, 680.0])
             .with_min_inner_size([820.0, 520.0]),
         renderer: eframe::Renderer::Wgpu,

@@ -1,0 +1,46 @@
+name: Release
+
+# Push a tag like v0.2.0 (it must match `version` in Cargo.toml) and this
+# builds Reign for Windows and publishes it as a GitHub release. The hub's
+# green update arrow looks for that release and downloads the zip below, so
+# keep the file name in sync with `ASSET` in hub/src/update.rs.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the crate version
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='reign_hub'))")
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} doesn't match Cargo.toml version v$version" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p reign_hub -p reign_engine
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/reign-hub.exe, target/release/reign-engine.exe dist/
+          Copy-Item LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath reign-windows-x64.zip
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" reign-windows-x64.zip --title "Reign ${GITHUB_REF_NAME}" --generate-notes

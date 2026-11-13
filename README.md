@@ -36,6 +36,23 @@ fixed script (intro frames, each page, the New project dialog), saves PNGs of
 the hub's window into `<dir>` and quits. Fonts are Bebas Neue and Inter, both
 under the SIL Open Font License (`hub/assets/fonts/`).
 
+### Updates
+
+The hub checks the GitHub repository it was built from for a newer release
+and, when there is one, shows a green arrow beside the engine version. On
+Windows the arrow downloads `reign-windows-x64.zip` from that release (it must
+hold `reign-hub.exe` and `reign-engine.exe` at its root), swaps the programs
+in place and restarts the hub; elsewhere it opens the release page. Release
+tags are versions like `v0.2.0`. A fork follows its own releases by building
+with `REIGN_UPDATE_REPO=owner/name` (or changing `DEFAULT_REPO` in
+`hub/src/update.rs`). `REIGN_NO_UPDATE_CHECK=1` turns the check off, and
+`REIGN_UPDATE_FAKE=9.9.9` shows the arrow without a release, for UI checks.
+
+To ship an update, bump `version` in `Cargo.toml`, commit, then push a tag
+that matches it (`git tag v0.2.0 && git push origin v0.2.0`).
+`.github/workflows/release.yml` builds the Windows zip and publishes the
+release; it refuses a tag that doesn't match the crate version.
+
 ## Running the editor directly
 
 ```bash

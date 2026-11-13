@@ -79,6 +79,11 @@ pub fn cargo_path() -> PathBuf {
 pub fn cargo() -> Command {
     let cargo = cargo_path();
     let mut c = Command::new(&cargo);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no black window from a GUI host
+    }
     if let Some(dir) = cargo.parent().filter(|d| !d.as_os_str().is_empty()) {
         let mut paths = vec![dir.to_path_buf()];
         if let Some(existing) = std::env::var_os("PATH") {
