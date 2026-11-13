@@ -104,6 +104,8 @@ if ($LASTEXITCODE -ne 0) { Stop-Release "pushing the tag failed. Retry with: git
 
 $remote = (git remote get-url origin) -replace '\.git$', '' -replace '^git@github\.com:', 'https://github.com/'
 Write-Host ""
-Write-Host "Pushed $tag. GitHub is now testing, building and publishing it (about 15-25 minutes)." -ForegroundColor Green
-Write-Host "Watch it:      $remote/actions"
+Write-Host "Pushed $tag. GitHub is now testing and building it (about 20 minutes)." -ForegroundColor Green
+Write-Host "Then it waits for an approver (the repository owner) to approve it; GitHub emails them."
+Write-Host "After approval it's signed and published."
+Write-Host "Watch it:       $remote/actions"
 Write-Host "When it's done: $remote/releases/tag/$tag"

@@ -14,10 +14,17 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 /// A fork that ships its own releases makes its own key (`reign-release
 /// keygen`) and builds with `REIGN_UPDATE_PUBKEY=<hex>`, alongside
 /// `REIGN_UPDATE_REPO`.
+///
+/// The release workflow sets `REIGN_UPDATE_PUBKEY` from the repository
+/// variable of that name; unset or empty, it's the official key.
 pub const PUBLIC_KEY: &str = match option_env!("REIGN_UPDATE_PUBKEY") {
-    Some(key) => key,
-    None => "e3ad1c021f47a19a134145b3c3548eb9958aafbcc2fe450f361a938a8e6cd1c2",
+    Some(key) if !key.is_empty() => key,
+    _ => OFFICIAL_PUBLIC_KEY,
 };
+
+/// The public key official Reign releases are signed for.
+pub const OFFICIAL_PUBLIC_KEY: &str =
+    "e3ad1c021f47a19a134145b3c3548eb9958aafbcc2fe450f361a938a8e6cd1c2";
 
 /// The bytes a release's signature covers.
 fn message(tag: &str, zip: &[u8]) -> Vec<u8> {

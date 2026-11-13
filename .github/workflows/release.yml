@@ -1,20 +1,22 @@
 name: Release
 
 # Runs when a version tag like v0.2.0 is pushed (release.bat does that; see
-# RELEASING.md). Nothing is published unless every check passes.
+# RELEASING.md). Four jobs:
 #
-# Windows (the release itself):
-#   ReignSetup.exe            the installer users download
-#   reign-windows-x64.zip     what the hub's update arrow and engine-version
-#   reign-windows-x64.zip.sig   downloads use, and its signature
-# Then, added to the same release (a failure there doesn't undo Windows):
-#   reign-macos.zip           "Reign Hub.app"
-#   reign-linux-x64.tar.gz    reign-hub and reign-engine
+#   build    tests everything and builds the Windows installer and update zip.
+#            It has no access to the release key.
+#   publish  waits for approval if the `release` environment requires it,
+#            then signs the zip with the key and publishes the release. Only
+#            this job can see the key (an environment secret).
+#   macos, linux   add their builds to the published release. If one of
+#            them fails, the Windows release is already out.
 #
-# The hub installs a download only if its signature matches the public key
-# built into it (hub/src/signing.rs). The secret half is the repository
-# secret REIGN_RELEASE_KEY. Keep the zip's name in sync with `ASSET` in
-# hub/src/update.rs.
+# Nothing is published unless build passes. The hub installs a download only
+# if its signature matches the public key built into it.
+#
+# Forks: the repository name and public key come from the repository this
+# runs in, so a fork's hubs follow and trust only the fork's own releases.
+# RELEASING.md, "Shipping your own fork", has the setup.
 
 on:
   push:
@@ -25,10 +27,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Built into the hub: where it looks for updates and which key it trusts.
+  # An unset variable means the official key (hub/src/signing.rs).
+  REIGN_UPDATE_REPO: ${{ github.repository }}
+  REIGN_UPDATE_PUBKEY: ${{ vars.REIGN_UPDATE_PUBKEY }}
 
 jobs:
-  windows:
-    name: Windows (tests, installer, release)
+  build:
+    name: Test and build (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,15 +48,6 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | python -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='reign_hub'))")
           if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
             echo "::error::Tag ${GITHUB_REF_NAME} doesn't match the version in Cargo.toml (v$version). Use release.bat, which keeps them in step."
-            exit 1
-          fi
-      - name: The release key is set
-        shell: bash
-        env:
-          REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
-        run: |
-          if [ -z "$REIGN_RELEASE_KEY" ]; then
-            echo "::error::The REIGN_RELEASE_KEY secret is missing. See RELEASING.md, one-time setup."
             exit 1
           fi
       # The same checks CI runs: a release never ships what CI would reject.
@@ -67,14 +64,62 @@ jobs:
           # The hub has Bebas Neue and Inter built in; their licence travels with them.
           Copy-Item hub/assets/fonts/*-OFL.txt pack/
           Compress-Archive -Path pack/* -DestinationPath reign-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          if-no-files-found: error
+          path: |
+            dist/ReignSetup.exe
+            reign-windows-x64.zip
+            target/release/reign-release.exe
+
+  publish:
+    name: Sign and publish
+    needs: build
+    runs-on: windows-latest
+    # Approval happens here when the environment has required reviewers.
+    environment: release
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+      - name: The release key is set
+        shell: bash
+        env:
+          REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
+        run: |
+          if [ -n "$REIGN_RELEASE_KEY" ]; then exit 0; fi
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## No release key
+
+          This repository has no \`REIGN_RELEASE_KEY\` secret, so the release can't be signed.
+
+          1. Make a key on your computer, outside the repository:
+             \`cargo run -p reign_hub --bin reign-release -- keygen C:\\somewhere\\reign-release.key\`
+          2. In ${GITHUB_REPOSITORY} → **Settings → Environments → release**, add an
+             environment secret \`REIGN_RELEASE_KEY\`: the line in that file.
+          3. If this is a fork: in **Settings → Secrets and variables → Actions → Variables**,
+             add \`REIGN_UPDATE_PUBKEY\`: the public key \`keygen\` printed.
+          4. Delete the tag and run release.bat again, or re-run this workflow.
+
+          See RELEASING.md.
+          EOF
+          echo "::error::No REIGN_RELEASE_KEY secret. The run summary has the steps."
+          exit 1
       - name: Sign
         shell: bash
         env:
           REIGN_RELEASE_KEY: ${{ secrets.REIGN_RELEASE_KEY }}
         run: |
-          target/release/reign-release sign reign-windows-x64.zip "${GITHUB_REF_NAME}"
-          # Fails if the secret isn't the partner of the hub's public key.
-          target/release/reign-release verify reign-windows-x64.zip "${GITHUB_REF_NAME}"
+          signer=target/release/reign-release.exe
+          "$signer" sign reign-windows-x64.zip "${GITHUB_REF_NAME}"
+          # The secret must be the partner of the public key built into the hub.
+          if ! "$signer" verify reign-windows-x64.zip "${GITHUB_REF_NAME}"; then
+            echo "::error::REIGN_RELEASE_KEY doesn't match the public key built into the hub. A fork sets its public key in the REIGN_UPDATE_PUBKEY repository variable (RELEASING.md)."
+            exit 1
+          fi
       - name: Publish
         shell: bash
         env:
@@ -98,7 +143,7 @@ jobs:
 
   macos:
     name: macOS build
-    needs: windows
+    needs: publish
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +160,7 @@ jobs:
 
   linux:
     name: Linux build
-    needs: windows
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

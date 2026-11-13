@@ -72,10 +72,13 @@ shows the arrow without a release, for UI checks.
 
 Releases are made with `release.bat` and published by
 `.github/workflows/release.yml`; [RELEASING.md](RELEASING.md) has the steps.
-A fork that ships its own releases builds with `REIGN_UPDATE_REPO=owner/name`
-and `REIGN_UPDATE_PUBKEY=<its public key>` (from `reign-release keygen`): its
-hub then follows and trusts only its own releases, and its projects fetch
-the engine from it.
+Releases wait for approval before they're signed: the signing key lives in
+the repository's `release` environment, which only an approved run can use.
+Forks never get the key. A fork that ships its own releases makes its own
+key and sets the `REIGN_UPDATE_PUBKEY` repository variable; the workflow then
+builds its hubs with the fork's name and key (`REIGN_UPDATE_REPO`,
+`REIGN_UPDATE_PUBKEY`), so they follow and trust only the fork's releases.
+RELEASING.md, "Shipping your own fork", has the steps.
 
 ### Engine versions
 

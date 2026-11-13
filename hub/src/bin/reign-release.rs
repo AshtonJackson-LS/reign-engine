@@ -45,6 +45,13 @@ fn keygen(file: &Path) -> Result<(), String> {
     std::fs::write(file, format!("{secret}\n")).map_err(|e| e.to_string())?;
     println!("Secret key written to {}", file.display());
     println!("Public key: {public}");
+    println!();
+    println!("On GitHub, in your repository's Settings:");
+    println!("  1. Environments -> release -> Add environment secret");
+    println!("     name REIGN_RELEASE_KEY, value: the line in {}", file.display());
+    println!("  2. Secrets and variables -> Actions -> Variables -> New repository variable");
+    println!("     name REIGN_UPDATE_PUBKEY, value: {public}");
+    println!("Keep {} private and backed up. See RELEASING.md.", file.display());
     Ok(())
 }
 
