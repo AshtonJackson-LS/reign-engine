@@ -1,0 +1,25 @@
+[package]
+name = "reign"
+description = "Reign, a 2D engine: one dependency that re-exports every engine crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_core.workspace = true
+reign_physics.workspace = true
+reign_combat.workspace = true
+reign_render.workspace = true
+reign_audio.workspace = true
+reign_net.workspace = true
+reign_assets.workspace = true
+reign_app.workspace = true
+reign_scene.workspace = true
+reign_behaviour.workspace = true
+reign_editor = { workspace = true, optional = true }
+
+[features]
+# The editor shell (egui). Off by default so games don't pull in egui.
+editor = ["dep:reign_editor"]

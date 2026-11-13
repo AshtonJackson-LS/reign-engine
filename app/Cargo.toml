@@ -1,0 +1,24 @@
+[package]
+name = "reign_engine"
+description = "The Reign Engine editor: the Reign editor around an empty project, no game attached"
+version.workspace = true
+edition.workspace = true
+# The editor shell (egui_dock) needs a newer compiler than the engine itself.
+rust-version = "1.95"
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "reign-engine"
+path = "src/main.rs"
+
+[dependencies]
+reign = { workspace = true, features = ["editor"] }
+log.workspace = true
+serde.workspace = true
+ron.workspace = true
+png.workspace = true
+reign_build.workspace = true
+env_logger.workspace = true
+# The folder picker for Export Game.
+rfd = "0.15"

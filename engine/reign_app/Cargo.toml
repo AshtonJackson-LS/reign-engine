@@ -1,0 +1,17 @@
+[package]
+name = "reign_app"
+description = "Window, event loop, fixed-tick loop and gamepads: the shell a Reign game runs in"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_core.workspace = true
+reign_render.workspace = true
+reign_assets.workspace = true
+winit.workspace = true
+gilrs.workspace = true
+pollster.workspace = true
+log.workspace = true

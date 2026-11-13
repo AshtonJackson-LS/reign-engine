@@ -1,0 +1,26 @@
+[package]
+name = "reign_assets"
+description = "Assets: GUIDs and .meta import settings, typed handles, loading, hot reload and packing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_core.workspace = true
+reign_physics.workspace = true
+reign_scene.workspace = true
+reign_combat.workspace = true
+png.workspace = true
+serde.workspace = true
+ron.workspace = true
+log.workspace = true
+notify = { version = "8", optional = true, default-features = false, features = ["macos_fsevent"] }
+
+[features]
+# Hot reload of loose asset folders (the editor turns it on).
+watch = ["dep:notify"]
+
+[dev-dependencies]
+png.workspace = true

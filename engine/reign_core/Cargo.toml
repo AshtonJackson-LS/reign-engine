@@ -1,0 +1,15 @@
+[package]
+name = "reign_core"
+description = "Deterministic simulation primitives: fixed-point math, input, clock, RNG"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+# Serialize Fx as exact decimal strings (scene files).
+serde = ["dep:serde"]

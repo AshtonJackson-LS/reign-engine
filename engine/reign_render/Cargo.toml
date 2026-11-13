@@ -1,0 +1,22 @@
+[package]
+name = "reign_render"
+description = "wgpu renderer: 640x360 pixel target, integer upscale, post-effect chain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_assets.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+
+[features]
+# Lets a host draw the window itself: offscreen frames, device and queue
+# access, and a present hook. The editor uses it; games don't need it.
+hooks = []

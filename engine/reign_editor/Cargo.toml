@@ -1,0 +1,28 @@
+[package]
+name = "reign_editor"
+description = "The Reign editor shell: docked Game view, Hierarchy, Inspector, Console and Play/Pause/Step"
+version.workspace = true
+edition.workspace = true
+# egui_dock needs a newer compiler than the engine itself.
+rust-version = "1.95"
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_core.workspace = true
+reign_render = { workspace = true, features = ["hooks"] }
+reign_app.workspace = true
+reign_scene.workspace = true
+reign_assets = { workspace = true, features = ["watch"] }
+reign_combat.workspace = true
+log.workspace = true
+env_logger.workspace = true
+# egui_dock 0.21 is the newest release and targets egui 0.36, which uses the
+# same wgpu 30 and winit 0.30 as the engine. Move to 0.37 with egui_dock.
+egui = "0.36"
+egui-winit = { version = "0.36", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+egui-wgpu = { version = "0.36", default-features = false, features = ["winit"] }
+egui_dock = "0.21"
+
+[dev-dependencies]
+serde.workspace = true

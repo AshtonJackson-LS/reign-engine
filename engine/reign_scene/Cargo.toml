@@ -1,0 +1,20 @@
+[package]
+name = "reign_scene"
+description = "Scenes: game objects, components, reflection and scene files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_core = { workspace = true, features = ["serde"] }
+serde.workspace = true
+erased-serde.workspace = true
+reign_derive.workspace = true
+ron.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+ron.workspace = true
+reign_core.workspace = true

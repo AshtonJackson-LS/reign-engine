@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "engine/reign_core",
+    "engine/reign_audio",
+    "engine/reign_physics",
+    "engine/reign_combat",
+    "engine/reign_render",
+    "engine/reign_net",
+    "engine/reign_assets",
+    "engine/reign_app",
+    "engine/reign_editor",
+    "engine/reign_scene",
+    "engine/reign_behaviour",
+    "engine/reign_derive",
+    "engine/reign",
+    "engine/reign_build",
+    "app",
+    "hub",
+]
+default-members = ["app", "hub"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# let-chains need 1.88; the editor crates need 1.95 (see their manifests).
+rust-version = "1.88"
+license = "MPL-2.0"
+publish = false
+
+[workspace.dependencies]
+reign_core = { path = "engine/reign_core" }
+reign_audio = { path = "engine/reign_audio" }
+reign_physics = { path = "engine/reign_physics" }
+reign_combat = { path = "engine/reign_combat" }
+reign_render = { path = "engine/reign_render" }
+reign_net = { path = "engine/reign_net" }
+reign_assets = { path = "engine/reign_assets" }
+reign_app = { path = "engine/reign_app" }
+reign_editor = { path = "engine/reign_editor" }
+reign_scene = { path = "engine/reign_scene" }
+reign_behaviour = { path = "engine/reign_behaviour" }
+reign_derive = { path = "engine/reign_derive" }
+reign = { path = "engine/reign" }
+reign_build = { path = "engine/reign_build" }
+winit = "0.30"
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+png = "0.18"
+gilrs = "0.11"
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+erased-serde = "0.4"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,8 @@
+[package]
+name = "reign_build"
+description = "Build-script helper for Reign projects: registers every component in src/components/"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true

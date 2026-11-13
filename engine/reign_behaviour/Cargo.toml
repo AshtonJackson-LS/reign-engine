@@ -1,0 +1,16 @@
+[package]
+name = "reign_behaviour"
+description = "Behaviours: deterministic per-object scripts, run in fixed stages with messages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_core.workspace = true
+reign_scene.workspace = true
+reign_assets.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
