@@ -443,7 +443,9 @@ impl<A: EditorApp> Session<A> {
         if self.prefab_mode.is_none() {
             self.panels.drawn_scene = None;
             let camera = self.panels.scene_camera;
+            // Fullscreen shows the game as it plays, not the scene tools' view.
             if self.play.mode() != PlayMode::Playing
+                && !self.panels.game_fullscreen
                 && let Some(camera) = camera
                 && self.app.draw_scene(&mut self.renderer, camera)
             {
@@ -1557,6 +1559,11 @@ impl<A: EditorApp> Viewer<'_, A> {
             }
         }
         self.panels.view_map = map;
+        // Fullscreen is for looking at the game: no gizmos, no drops.
+        if self.panels.game_fullscreen {
+            self.panels.view_map = None;
+            return;
+        }
         if !playing
             && let (Some(map), Some(drag)) = (map, response.dnd_release_payload::<AssetDrag>())
             && let Some(p) = response.interact_pointer_pos().or(response.hover_pos())
