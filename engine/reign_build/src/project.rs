@@ -537,8 +537,10 @@ pub fn editor_path(root: &Path, crate_name: &str) -> PathBuf {
 /// Where Cargo puts the project's build output. Usually `<project>/target`,
 /// but a project inside a larger workspace, or one whose `.cargo/config.toml`
 /// sets `target-dir`, builds elsewhere: Cargo is asked (`cargo metadata`),
-/// once per project per run, and `<project>/target` is the answer when it
-/// can't say (no Rust installed, a broken manifest).
+/// once per project per run (about 50 ms), and `<project>/target` is the
+/// answer when it can't say (no Rust installed, no Cargo.toml yet, a broken
+/// manifest). Only Cargo's answers are remembered, so a project that gains
+/// its Cargo.toml later is asked again.
 pub fn target_dir(root: &Path) -> PathBuf {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -547,11 +549,15 @@ pub fn target_dir(root: &Path) -> PathBuf {
     if let Some(dir) = cache.lock().ok().and_then(|c| c.get(root).cloned()) {
         return dir;
     }
-    let dir = query_target_dir(root).unwrap_or_else(|| root.join("target"));
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(root.to_owned(), dir.clone());
+    match query_target_dir(root) {
+        Some(dir) => {
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(root.to_owned(), dir.clone());
+            }
+            dir
+        }
+        None => root.join("target"),
     }
-    dir
 }
 
 /// The `target_directory` `cargo metadata` reports for the project.
@@ -563,6 +569,10 @@ fn query_target_dir(root: &Path) -> Option<PathBuf> {
     c.current_dir(root).args(["metadata", "--no-deps", "--format-version", "1", "--offline"]);
     // The same environment the build gets (see build_bin).
     c.env_remove("CARGO_TARGET_DIR").env_remove("CARGO_MANIFEST_DIR");
+    // A project's rust-toolchain.toml may name a toolchain that isn't
+    // installed: don't let rustup download it here, where a GUI may be
+    // waiting on the answer. The build (on its own thread) installs it.
+    c.env("RUSTUP_AUTO_INSTALL", "0");
     c.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     let output = c.output().ok().filter(|o| o.status.success())?;
     json_string(&String::from_utf8_lossy(&output.stdout), "target_directory").map(PathBuf::from)
@@ -604,24 +614,52 @@ fn json_string(json: &str, key: &str) -> Option<String> {
 pub fn build_features(root: &Path, key: &str) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
     let mut in_table = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_table = line == "[package.metadata.reign]";
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(header) = table_header(line) {
+            in_table = header == "package.metadata.reign";
             continue;
         }
-        let Some((k, value)) = line.split_once('=') else { continue };
-        if in_table && k.trim() == key {
-            let list = value.trim().trim_start_matches('[');
-            let list = list.split(']').next().unwrap_or("");
-            return list
-                .split(',')
-                .map(|f| f.trim().trim_matches('"').to_owned())
-                .filter(|f| !f.is_empty())
-                .collect();
+        let Some((k, value, _)) = key_value(line).filter(|_| in_table) else { continue };
+        if k != key {
+            continue;
         }
+        // An array may run over several lines, with comments: read up to its
+        // closing `]`, leaving the comments out.
+        let code = |l: &str| l[..comment_start(l).unwrap_or(l.len())].to_owned();
+        let mut array = code(&value);
+        while !array_closed(&array) {
+            let Some(next) = lines.next() else { break };
+            array.push(' ');
+            array.push_str(&code(next));
+        }
+        let Some(inner) = array.trim().strip_prefix('[') else { return Vec::new() };
+        let mut close = inner.len();
+        scan_toml(inner, |i, c, depth| {
+            let found = c == ']' && depth == 0;
+            if found {
+                close = i;
+            }
+            found
+        });
+        return split_top_level(&inner[..close])
+            .into_iter()
+            .map(unquote)
+            .filter(|f| !f.is_empty())
+            .collect();
     }
     Vec::new()
+}
+
+/// Whether TOML text that starts an array has reached its closing `]`.
+/// Comments must already be left out.
+fn array_closed(text: &str) -> bool {
+    let mut closed = false;
+    scan_toml(text, |_, c, depth| {
+        closed = c == ']' && depth == 1;
+        closed
+    });
+    closed
 }
 
 /// The project game binary's name for a crate: the game without the
@@ -1195,6 +1233,44 @@ mod tests {
         assert!(editor.windows(2).any(|w| w == ["--features", "editor,debug-ui"]), "{editor:?}");
         let game = args(&game_build_command(&root, "g"));
         assert!(!game.contains(&"--features".to_owned()), "{game:?}");
+
+        // Written over several lines, with comments, under a commented header.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"g\"\n\n[package.metadata.reign]   # for the hub\n\
+             editor-features = [\n    \"editor\",   # the editor shell, egui ]\n\
+             \x20   'tools/x', # another\n]\ngame-features = [] # none\n\n[dependencies]\n",
+        )
+        .unwrap();
+        assert_eq!(build_features(&root, "editor-features"), ["editor", "tools/x"]);
+        assert!(build_features(&root, "game-features").is_empty());
+        // No table, no Cargo.toml: nothing asked for.
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+        assert!(build_features(&root, "editor-features").is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(build_features(&root, "editor-features").is_empty());
+    }
+
+    /// A folder that isn't a crate yet gets the usual place, and is asked
+    /// again once it becomes one (the fallback isn't remembered).
+    #[test]
+    fn a_project_that_gains_code_is_asked_again() {
+        let root =
+            std::env::temp_dir().join(format!("reign-target-later-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert_eq!(target_dir(&root), root.join("target"));
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join(".cargo/config.toml"), "[build]\ntarget-dir = \"elsewhere\"\n")
+            .unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let dir = target_dir(&root).to_string_lossy().replace('\\', "/");
+        assert!(dir.ends_with("/elsewhere"), "{dir}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
