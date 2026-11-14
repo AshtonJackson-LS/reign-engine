@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
@@ -162,6 +162,9 @@ struct Session<A: EditorApp> {
     game_texture: Option<(egui::TextureId, (u32, u32))>,
     /// The texture is sampled smoothly: it's being shrunk to fill.
     game_texture_smooth: bool,
+    /// The fullscreen state last given to the window, and when.
+    fullscreen_applied: bool,
+    fullscreen_applied_at: Instant,
     dock: DockState<Tab>,
     panels: Panels,
     history: History,
@@ -250,6 +253,8 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             egui_wgpu,
             game_texture: None,
             game_texture_smooth: false,
+            fullscreen_applied: false,
+            fullscreen_applied_at: Instant::now(),
             dock,
             panels: Panels {
                 selected: None,
@@ -390,11 +395,27 @@ impl<A: EditorApp> Session<A> {
         let elapsed = now - self.last_frame;
         let dt = elapsed.as_secs_f32().min(0.1);
         self.last_frame = now;
-        // The window follows the Game view's fullscreen state.
-        if self.panels.game_fullscreen != self.window.fullscreen().is_some() {
-            self.window.set_fullscreen(
-                self.panels.game_fullscreen.then_some(Fullscreen::Borderless(None)),
-            );
+        // The window follows the Game view's fullscreen state when that
+        // changes, and the state follows the window when the user leaves
+        // fullscreen another way (macOS's green button, Ctrl+Cmd+F).
+        let sync = fullscreen_sync(
+            self.panels.game_fullscreen,
+            self.fullscreen_applied,
+            self.window.fullscreen().is_some(),
+            self.fullscreen_applied_at.elapsed(),
+        );
+        match sync {
+            FullscreenSync::Apply(on) => {
+                self.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
+                self.fullscreen_applied = on;
+                self.fullscreen_applied_at = Instant::now();
+            }
+            FullscreenSync::UserLeft => {
+                self.panels.game_fullscreen = false;
+                self.panels.fullscreen_since = None;
+                self.fullscreen_applied = false;
+            }
+            FullscreenSync::Nothing => {}
         }
         self.fit_game_texture();
         self.reload_assets(event_loop);
@@ -636,6 +657,32 @@ impl<A: EditorApp> Session<A> {
         self.game_texture = Some((id, size));
         self.game_texture_smooth = smooth;
         self.renderer.set_offscreen(Some(offscreen));
+    }
+}
+
+/// What to do about the window's fullscreen state this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullscreenSync {
+    /// The Game view's fullscreen state changed: give it to the window.
+    Apply(bool),
+    /// The window left fullscreen by other means: the Game view follows.
+    UserLeft,
+    Nothing,
+}
+
+/// Compares the fullscreen state the Game view `wanted`, the one last
+/// `applied` to the window `since` ago, and whether the window `is`
+/// fullscreen now. The window is only told when the wanted state changes,
+/// so a window the user made fullscreen themselves (macOS) is left alone,
+/// and leaving fullscreen by other means is noticed rather than undone.
+/// A second's grace covers platforms that switch fullscreen asynchronously.
+fn fullscreen_sync(wanted: bool, applied: bool, is: bool, since: Duration) -> FullscreenSync {
+    if wanted != applied {
+        FullscreenSync::Apply(wanted)
+    } else if applied && !is && since > Duration::from_secs(1) {
+        FullscreenSync::UserLeft
+    } else {
+        FullscreenSync::Nothing
     }
 }
 
@@ -1787,5 +1834,36 @@ mod key_route_tests {
         // Ctrl+S saves, even while the game has the keyboard.
         let save = KeyState { command: true, ..press(true) };
         assert_eq!(route_key(S, save), KeyRoute::To { egui: true, game: false });
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_sync_tests {
+    use super::{FullscreenSync, fullscreen_sync};
+    use std::time::Duration;
+
+    const NOW: Duration = Duration::from_millis(0);
+    const LATER: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn changes_are_applied_once() {
+        assert_eq!(fullscreen_sync(true, false, false, LATER), FullscreenSync::Apply(true));
+        assert_eq!(fullscreen_sync(false, true, true, LATER), FullscreenSync::Apply(false));
+        // Applied and in effect: nothing more to do, frame after frame.
+        assert_eq!(fullscreen_sync(true, true, true, LATER), FullscreenSync::Nothing);
+        assert_eq!(fullscreen_sync(false, false, false, LATER), FullscreenSync::Nothing);
+    }
+
+    #[test]
+    fn a_window_made_fullscreen_by_the_user_is_left_alone() {
+        // macOS's green button: not ours to undo.
+        assert_eq!(fullscreen_sync(false, false, true, LATER), FullscreenSync::Nothing);
+    }
+
+    #[test]
+    fn leaving_fullscreen_another_way_is_followed_not_fought() {
+        assert_eq!(fullscreen_sync(true, true, false, LATER), FullscreenSync::UserLeft);
+        // Just asked for: the window may not have switched yet.
+        assert_eq!(fullscreen_sync(true, true, false, NOW), FullscreenSync::Nothing);
     }
 }
