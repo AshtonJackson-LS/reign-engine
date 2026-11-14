@@ -89,17 +89,57 @@ impl Launched {
 }
 
 impl Exit {
-    /// The line that best says what went wrong: the last one that reads
-    /// like an error or a panic, else the last line printed.
-    pub fn reason(&self) -> Option<&str> {
-        let lines = || self.tail.iter().map(|l| l.trim()).filter(|l| !l.is_empty());
-        let looks_wrong = |l: &&str| {
-            let lower = l.to_ascii_lowercase();
-            ["error", "panicked", "unknown argument", "failed", "can't", "cannot"]
+    /// What best says what went wrong, from the editor's last lines, in this
+    /// order: a panic's message (Rust prints it on the line after
+    /// `thread '..' panicked at FILE:`), the last ERROR-level log line
+    /// (without its timestamp), the last line starting `error`, the last
+    /// that mentions a failure, else the last line. Cut to fit the status
+    /// bar.
+    pub fn reason(&self) -> Option<String> {
+        let lines: Vec<&str> =
+            self.tail.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let panic = lines.iter().rposition(|l| l.contains("panicked at")).map(|at| {
+            let place = lines[at].split("panicked at").nth(1).unwrap_or("").trim();
+            let place = place.trim_end_matches(':');
+            let message = lines[at + 1..]
+                .iter()
+                .find(|l| !l.starts_with("note:") && !l.starts_with("stack backtrace"));
+            match message {
+                Some(message) => format!("panicked: {message} (at {place})"),
+                None => format!("panicked at {place}"),
+            }
+        });
+        let logged_error = || {
+            lines.iter().rev().find_map(|l| {
+                // env_logger: `[2026-11-14T17:44:38Z ERROR target] message`.
+                let (head, message) = l.strip_prefix('[')?.split_once("] ")?;
+                head.split_whitespace().any(|w| w == "ERROR").then(|| message.to_owned())
+            })
+        };
+        let starts_error =
+            || lines.iter().rev().find(|l| l.to_ascii_lowercase().starts_with("error"));
+        let mentions_failure = || {
+            lines.iter().rev().find(|l| {
+                let lower = l.to_ascii_lowercase();
+                [
+                    "panicked",
+                    "unknown argument",
+                    "unknown flag",
+                    "failed",
+                    "can't",
+                    "cannot",
+                    "not found",
+                ]
                 .iter()
                 .any(|w| lower.contains(w))
+            })
         };
-        lines().rfind(looks_wrong).or_else(|| lines().next_back())
+        let reason = panic
+            .or_else(logged_error)
+            .or_else(|| starts_error().map(|l| l.to_string()))
+            .or_else(|| mentions_failure().map(|l| l.to_string()))
+            .or_else(|| lines.last().map(|l| l.to_string()))?;
+        Some(shorten(&reason, 160))
     }
 
     /// What the status bar says when `name`'s editor exits; `None` for a
@@ -119,6 +159,16 @@ impl Exit {
             None => format!("{name}'s editor {when}{code}"),
         })
     }
+}
+
+/// `text` cut to at most `max` characters, with `…` when cut.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]
@@ -159,16 +209,59 @@ mod tests {
 
     #[test]
     fn a_late_crash_says_it_quit() {
-        let e = exit(false, Some(101), 120, &["thread 'main' panicked at src/lib.rs:4:5:", ""]);
+        let e = exit(
+            false,
+            Some(101),
+            120,
+            &[
+                "[2026-11-14T17:44:38Z INFO  reign_editor::shell] play",
+                "",
+                "thread 'main' (4312) panicked at src/lib.rs:4:5:",
+                "index out of bounds: the len is 3 but the index is 7",
+                "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+            ],
+        );
         assert_eq!(
             e.message("Game").unwrap(),
-            "Game's editor quit with an error (exit code 101): thread 'main' panicked at src/lib.rs:4:5:"
+            "Game's editor quit with an error (exit code 101): panicked: index out of bounds: the len is 3 but the index is 7 (at src/lib.rs:4:5)"
         );
+        // A panic whose message didn't make it out still says where.
+        let bare = exit(false, Some(101), 1, &["thread 'main' panicked at src/a.rs:1:1:"]);
+        assert_eq!(bare.reason().unwrap(), "panicked at src/a.rs:1:1");
+    }
+
+    #[test]
+    fn an_error_log_line_beats_info_that_mentions_errors() {
+        let e = exit(
+            false,
+            Some(1),
+            2,
+            &[
+                "[2026-11-14T17:44:38Z ERROR reign_assets::db] can't read scenes/main.scene.ron",
+                "[2026-11-14T17:44:39Z INFO  reign_editor] checked 40 assets, 0 errors",
+            ],
+        );
+        assert_eq!(e.reason().unwrap(), "can't read scenes/main.scene.ron");
+        // `Error: ..` from a main that returned Err.
+        let e = exit(false, Some(1), 2, &["[INFO x] 0 errors so far", "Error: Os { code: 5 }"]);
+        assert_eq!(e.reason().unwrap(), "Error: Os { code: 5 }");
+    }
+
+    #[test]
+    fn long_reasons_are_cut_to_fit() {
+        let long = "error: ".to_owned() + &"x".repeat(400);
+        let e = exit(false, Some(1), 1, &[&long]);
+        let reason = e.reason().unwrap();
+        assert_eq!(reason.chars().count(), 160);
+        assert!(reason.ends_with('…') && reason.starts_with("error: xxx"));
     }
 
     #[test]
     fn with_no_telling_line_the_last_one_is_used() {
-        assert_eq!(exit(false, None, 1, &["first", "last", "  "]).reason(), Some("last"));
+        assert_eq!(
+            exit(false, None, 1, &["first", "last", "  "]).reason().as_deref(),
+            Some("last")
+        );
         assert_eq!(
             exit(false, Some(1), 1, &[]).message("G").unwrap(),
             "G's editor couldn't start (exit code 1)"
@@ -201,6 +294,6 @@ mod tests {
         };
         assert!(!exit.success);
         assert_eq!(exit.code, Some(3));
-        assert_eq!(exit.reason(), Some("error: no such project"));
+        assert_eq!(exit.reason().as_deref(), Some("error: no such project"));
     }
 }
