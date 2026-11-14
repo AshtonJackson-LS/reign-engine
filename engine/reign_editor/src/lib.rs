@@ -4,7 +4,8 @@
 //! [`reign_app::App`]:
 //!
 //! - **Scene / Game**: the app's frame, rendered offscreen and shown as a texture at
-//!   a whole-number scale where it fits. While playing, keyboard, mouse and
+//!   a whole-number scale where it fits, or filling the view with the toolbar's
+//!   **Fill** (the next scale up, shrunk smoothly; pixels may be uneven). While playing, keyboard, mouse and
 //!   pads reach the app while the view is hovered or focused (clicked).
 //!   While not playing, clicking selects the topmost object under the
 //!   cursor and dragging moves it (snapped to pixels; Ctrl snaps to the

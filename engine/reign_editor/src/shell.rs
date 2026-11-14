@@ -96,6 +96,9 @@ struct Panels {
     game_fullscreen: bool,
     /// When fullscreen began, for the exit hint shown at its start.
     fullscreen_since: Option<Instant>,
+    /// The Game view fills its space even where no whole-number scale fits
+    /// (the toolbar's Fill), at the cost of slightly uneven pixels.
+    fill_view: bool,
     /// The space the Game tab had last frame, in points; sizes the frame.
     game_space: Option<Rect>,
     /// Where the frame was shown last frame, in points.
@@ -157,6 +160,8 @@ struct Session<A: EditorApp> {
     egui_wgpu: egui_wgpu::Renderer,
     /// The Game view's texture in egui and its size in pixels.
     game_texture: Option<(egui::TextureId, (u32, u32))>,
+    /// The texture is sampled smoothly: it's being shrunk to fill.
+    game_texture_smooth: bool,
     dock: DockState<Tab>,
     panels: Panels,
     history: History,
@@ -244,6 +249,7 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             egui_winit,
             egui_wgpu,
             game_texture: None,
+            game_texture_smooth: false,
             dock,
             panels: Panels {
                 selected: None,
@@ -259,6 +265,7 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
                 command: false,
                 game_fullscreen: false,
                 fullscreen_since: None,
+                fill_view: false,
                 game_space: None,
                 game_image: None,
                 game_focused: false,
@@ -607,20 +614,23 @@ impl<A: EditorApp> Session<A> {
         }
     }
 
-    /// Sizes the offscreen frame to the largest whole-number scale of the
-    /// view that fits the Game tab, and keeps egui's texture pointing at it.
+    /// Sizes the offscreen frame for the Game tab (see [`game_view_scale`])
+    /// and keeps egui's texture pointing at it.
     fn fit_game_texture(&mut self) {
         let ppp = self.egui.pixels_per_point();
-        let scale = self.panels.game_space.map_or(1, |space| {
-            view_scale((space.width() * ppp) as u32, (space.height() * ppp) as u32)
+        let (scale, smooth) = self.panels.game_space.map_or((1, false), |space| {
+            let size = ((space.width() * ppp) as u32, (space.height() * ppp) as u32);
+            game_view_scale(size, self.panels.fill_view)
         });
         let size = (VIEW_WIDTH * scale, VIEW_HEIGHT * scale);
-        if self.game_texture.is_some_and(|(_, current)| current == size) {
+        if self.game_texture.is_some_and(|(_, current)| current == size)
+            && self.game_texture_smooth == smooth
+        {
             return;
         }
         let offscreen = self.renderer.create_offscreen(size.0, size.1);
         let device = self.renderer.device();
-        let filter = wgpu::FilterMode::Nearest;
+        let filter = if smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
         let id = match self.game_texture {
             Some((id, _)) => {
                 self.egui_wgpu.update_egui_texture_from_wgpu_texture(
@@ -634,8 +644,23 @@ impl<A: EditorApp> Session<A> {
             None => self.egui_wgpu.register_native_texture(device, &offscreen.view, filter),
         };
         self.game_texture = Some((id, size));
+        self.game_texture_smooth = smooth;
         self.renderer.set_offscreen(Some(offscreen));
     }
+}
+
+/// The scale to render the frame at for a Game view of `space` physical
+/// pixels, and whether to sample it smoothly. Normally the largest whole
+/// number that fits, drawn with crisp pixels. With `fill`, where no whole
+/// number fits exactly, the next scale up, shrunk smoothly onto the view so
+/// it fills it (the view keeps 16:9; only a different aspect leaves bars).
+fn game_view_scale(space: (u32, u32), fill: bool) -> (u32, bool) {
+    let whole = view_scale(space.0, space.1);
+    let fits_exactly = (VIEW_WIDTH * whole == space.0 && VIEW_HEIGHT * whole <= space.1)
+        || (VIEW_HEIGHT * whole == space.1 && VIEW_WIDTH * whole <= space.0);
+    // Smaller than the view at 1x: it's shrunk either way.
+    let bigger_than_view = space.0 > VIEW_WIDTH && space.1 > VIEW_HEIGHT;
+    if fill && !fits_exactly && bigger_than_view { (whole + 1, true) } else { (whole, false) }
 }
 
 impl<A: EditorApp> Session<A> {
@@ -1288,6 +1313,9 @@ fn toolbar<A: EditorApp>(
             {
                 panels.toggle_fullscreen();
             }
+            ui.checkbox(&mut panels.fill_view, "Fill").on_hover_text(
+                "Scale the Game view to fill its space even when no whole-number                  scale fits (pixels may be slightly uneven). Off: crisp pixels,                  with borders where the space isn't a multiple of the view.",
+            );
             ui.separator();
             ui.label("Time scale");
             let mut scale = play.scale();
@@ -1646,4 +1674,34 @@ fn console(ui: &mut egui::Ui, panels: &mut Panels) {
             }
         },
     );
+}
+
+#[cfg(test)]
+mod view_scale_tests {
+    use super::game_view_scale;
+
+    #[test]
+    fn whole_number_scale_by_default() {
+        assert_eq!(game_view_scale((1920, 1080), false), (3, false));
+        assert_eq!(game_view_scale((1600, 900), false), (2, false), "bars: 1280x720 in 1600x900");
+        assert_eq!(game_view_scale((1366, 768), false), (2, false));
+        assert_eq!(game_view_scale((300, 200), false), (1, false));
+    }
+
+    #[test]
+    fn fill_goes_one_up_and_shrinks_smoothly_only_when_needed() {
+        // An exact fit stays crisp.
+        assert_eq!(game_view_scale((1920, 1080), true), (3, false));
+        assert_eq!(game_view_scale((2560, 1440), true), (4, false));
+        // Width fits exactly on a 16:10 screen: bars above and below either way.
+        assert_eq!(game_view_scale((1920, 1200), true), (3, false));
+        // Otherwise the next scale up, shrunk onto the screen.
+        assert_eq!(game_view_scale((1600, 900), true), (3, true));
+        assert_eq!(game_view_scale((1366, 768), true), (3, true));
+        // Ultrawide: the height fits 4x exactly, so the sides have bars
+        // either way; it stays crisp.
+        assert_eq!(game_view_scale((3440, 1440), true), (4, false));
+        // Smaller than the view: unchanged.
+        assert_eq!(game_view_scale((300, 200), true), (1, false));
+    }
 }
