@@ -364,31 +364,21 @@ impl<A: EditorApp> Session<A> {
                 )
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Released {
-                    return (true, true);
-                }
-                // F11 is the editor's, even while the game has the keyboard:
-                // a hosted game can't change the window itself.
-                if event.physical_key == PhysicalKey::Code(KeyCode::F11) {
-                    if !event.repeat {
+                let state = KeyState {
+                    pressed: event.state == ElementState::Pressed,
+                    repeat: event.repeat,
+                    command: self.panels.command,
+                    game_has_keyboard: self.play.mode() == PlayMode::Playing
+                        && (self.panels.game_focused || self.panels.cursor_over_game(ppp))
+                        && !self.egui.egui_wants_keyboard_input(),
+                };
+                match route_key(event.physical_key, state) {
+                    KeyRoute::ToggleFullscreen => {
                         self.panels.toggle_fullscreen();
+                        (false, false)
                     }
-                    return (false, false);
+                    KeyRoute::To { egui, game } => (egui, game),
                 }
-                // The editor's own shortcuts never reach the game.
-                let shortcut = matches!(
-                    event.physical_key,
-                    PhysicalKey::Code(
-                        KeyCode::KeyZ | KeyCode::KeyY | KeyCode::KeyS | KeyCode::KeyD
-                    )
-                );
-                if self.panels.command && shortcut {
-                    return (true, false);
-                }
-                let game = self.play.mode() == PlayMode::Playing
-                    && (self.panels.game_focused || self.panels.cursor_over_game(ppp))
-                    && !self.egui.egui_wants_keyboard_input();
-                (!game, game)
             }
             WindowEvent::Ime(_) => (true, false),
             _ => (true, true),
@@ -647,6 +637,53 @@ impl<A: EditorApp> Session<A> {
         self.game_texture_smooth = smooth;
         self.renderer.set_offscreen(Some(offscreen));
     }
+}
+
+/// What the editor knows about a key event besides the key.
+#[derive(Clone, Copy, Debug)]
+struct KeyState {
+    pressed: bool,
+    repeat: bool,
+    /// Ctrl (Cmd on macOS) is held.
+    command: bool,
+    /// Playing, with the Game view focused or hovered and no text field
+    /// taking keys.
+    game_has_keyboard: bool,
+}
+
+/// Where a key event goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyRoute {
+    /// F11 pressed: the editor switches fullscreen; nobody else sees it.
+    ToggleFullscreen,
+    /// To egui (the editor's panels), the game, or both.
+    To { egui: bool, game: bool },
+}
+
+/// Routes a key: releases reach both (so nothing stays held), F11 is the
+/// editor's even while the game has the keyboard (a hosted game can't change
+/// the window), the editor's Ctrl shortcuts never reach the game, and the
+/// rest goes to the game when it has the keyboard, else to the editor.
+fn route_key(key: PhysicalKey, state: KeyState) -> KeyRoute {
+    if !state.pressed {
+        return KeyRoute::To { egui: true, game: true };
+    }
+    if key == PhysicalKey::Code(KeyCode::F11) {
+        if state.repeat {
+            // Held down: swallowed, so it doesn't flicker in and out.
+            return KeyRoute::To { egui: false, game: false };
+        }
+        return KeyRoute::ToggleFullscreen;
+    }
+    let shortcut = matches!(
+        key,
+        PhysicalKey::Code(KeyCode::KeyZ | KeyCode::KeyY | KeyCode::KeyS | KeyCode::KeyD)
+    );
+    if state.command && shortcut {
+        return KeyRoute::To { egui: true, game: false };
+    }
+    let game = state.game_has_keyboard;
+    KeyRoute::To { egui: !game, game }
 }
 
 /// The scale to render the frame at for a Game view of `space` physical
@@ -1703,5 +1740,52 @@ mod view_scale_tests {
         assert_eq!(game_view_scale((3440, 1440), true), (4, false));
         // Smaller than the view: unchanged.
         assert_eq!(game_view_scale((300, 200), true), (1, false));
+    }
+}
+
+#[cfg(test)]
+mod key_route_tests {
+    use super::{KeyRoute, KeyState, route_key};
+    use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
+
+    const F11: PhysicalKey = PhysicalKey::Code(KeyCode::F11);
+    const SPACE: PhysicalKey = PhysicalKey::Code(KeyCode::Space);
+    const S: PhysicalKey = PhysicalKey::Code(KeyCode::KeyS);
+
+    fn press(game_has_keyboard: bool) -> KeyState {
+        KeyState { pressed: true, repeat: false, command: false, game_has_keyboard }
+    }
+
+    #[test]
+    fn f11_toggles_fullscreen_whoever_has_the_keyboard() {
+        assert_eq!(route_key(F11, press(false)), KeyRoute::ToggleFullscreen);
+        // Playing with the Game view focused: still the editor's, and the
+        // game never sees it (it used to, and couldn't change the window).
+        assert_eq!(route_key(F11, press(true)), KeyRoute::ToggleFullscreen);
+        let ctrl = KeyState { command: true, ..press(true) };
+        assert_eq!(route_key(F11, ctrl), KeyRoute::ToggleFullscreen);
+    }
+
+    #[test]
+    fn a_held_f11_does_not_flicker() {
+        let held = KeyState { repeat: true, ..press(true) };
+        assert_eq!(route_key(F11, held), KeyRoute::To { egui: false, game: false });
+    }
+
+    #[test]
+    fn releases_reach_everyone() {
+        for key in [F11, SPACE, S] {
+            let up = KeyState { pressed: false, ..press(true) };
+            assert_eq!(route_key(key, up), KeyRoute::To { egui: true, game: true });
+        }
+    }
+
+    #[test]
+    fn other_keys_go_where_the_keyboard_is() {
+        assert_eq!(route_key(SPACE, press(true)), KeyRoute::To { egui: false, game: true });
+        assert_eq!(route_key(SPACE, press(false)), KeyRoute::To { egui: true, game: false });
+        // Ctrl+S saves, even while the game has the keyboard.
+        let save = KeyState { command: true, ..press(true) };
+        assert_eq!(route_key(S, save), KeyRoute::To { egui: true, game: false });
     }
 }
