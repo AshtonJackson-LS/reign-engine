@@ -716,13 +716,20 @@ fn newest_source(root: &Path) -> Option<SystemTime> {
 
 /// Shows a file in the system's file browser.
 fn reveal(path: &Path) {
-    let result = if cfg!(target_os = "macos") {
-        Command::new("open").arg("-R").arg(path).spawn()
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg("-R").arg(path);
+        c
     } else if cfg!(windows) {
-        Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+        let mut c = Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
     } else {
-        Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn()
+        let mut c = Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
     };
+    let result = reign_build::ide::spawn_detached(&mut command);
     if let Err(e) = result {
         log::warn!("couldn't show {}: {e}", path.display());
     }
