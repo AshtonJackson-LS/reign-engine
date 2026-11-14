@@ -54,6 +54,10 @@
 //!
 //! The editor knows nothing about any particular game; a game opts in by
 //! implementing [`EditorApp`] for its [`reign_app::App`].
+//!
+//! Reign Hub opens a project's editor with the project folder as its first
+//! argument. A game whose editor binary reads its own flags should read them
+//! from [`game_args`], which leaves that folder out.
 
 mod anim_editor;
 mod assets_ui;
@@ -254,4 +258,72 @@ where
     F: FnOnce(&mut Ctx) -> A,
 {
     shell::run(config, make);
+}
+
+/// The process's arguments for a game's own flags: everything after the
+/// program name, without the project folder Reign Hub passes first (see
+/// [`split_project_arg`]). Read a game editor's flags from this, not
+/// `std::env::args`, or opening the project from the hub fails on an
+/// argument the game doesn't know.
+pub fn game_args() -> Vec<String> {
+    split_project_arg(std::env::args().skip(1)).1
+}
+
+/// Splits a leading project folder off `args` (the program name already
+/// left out): the first argument, when it isn't a flag and names a folder
+/// that exists. Reign Hub opens an editor as `editor <project folder>`, and
+/// `cargo run --bin <crate>-editor -- . --check` does the same by hand.
+pub fn split_project_arg(args: impl IntoIterator<Item = String>) -> (Option<PathBuf>, Vec<String>) {
+    let mut args: Vec<String> = args.into_iter().collect();
+    let project = args
+        .first()
+        .filter(|a| !a.starts_with('-') && Path::new(a.as_str()).is_dir())
+        .map(PathBuf::from);
+    if project.is_some() {
+        args.remove(0);
+    }
+    (project, args)
+}
+
+#[cfg(test)]
+mod project_arg_tests {
+    use super::split_project_arg;
+
+    fn split(args: &[&str]) -> (Option<std::path::PathBuf>, Vec<String>) {
+        split_project_arg(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn a_leading_folder_is_the_project() {
+        let dir = std::env::temp_dir();
+        let dir_text = dir.to_string_lossy().into_owned();
+        let (project, rest) = split(&[&dir_text, "--play", "--seed", "4"]);
+        assert_eq!(project, Some(dir));
+        assert_eq!(rest, ["--play", "--seed", "4"]);
+    }
+
+    #[test]
+    fn flags_alone_are_left_alone() {
+        assert_eq!(
+            split(&["--play", "--seed", "4"]),
+            (None, vec!["--play".into(), "--seed".into(), "4".into()])
+        );
+        assert_eq!(split(&[]), (None, vec![]));
+    }
+
+    #[test]
+    fn only_a_leading_folder_counts() {
+        // A folder later on is some flag's value, like --export-scene DIR.
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let (project, rest) = split(&["--export-scene", &dir]);
+        assert_eq!(project, None);
+        assert_eq!(rest.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_folder_is_not_a_project() {
+        let (project, rest) = split(&["no/such/folder/here", "--play"]);
+        assert_eq!(project, None);
+        assert_eq!(rest, ["no/such/folder/here", "--play"]);
+    }
 }

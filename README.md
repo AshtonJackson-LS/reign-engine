@@ -71,6 +71,12 @@ version's editor, downloaded into `versions/` beside the hub when it isn't
 the hub's own. A project with code builds its editor against what its
 Cargo.toml names: a release's git tag, or a local engine checkout.
 
+The hub starts a project's editor with the project folder as its only
+argument. A game that writes its own editor binary around
+`reign::editor::run_editor` and reads its own flags should read them from
+`reign::editor::game_args()`, which leaves that folder out; otherwise the
+editor exits on an argument it doesn't know.
+
 ## Running the editor directly
 
 ```bash
