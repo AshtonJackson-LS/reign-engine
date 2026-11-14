@@ -551,14 +551,26 @@ impl<A: EditorApp> Session<A> {
                     let hint_for =
                         viewer.panels.fullscreen_since.map(|t| t.elapsed().as_secs_f32());
                     if let Some(t) = hint_for.filter(|t| *t < 3.0) {
-                        let alpha = ((3.0 - t).min(1.0) * 255.0) as u8;
-                        ui.painter().text(
-                            ui.max_rect().center_top() + Vec2::new(0.0, 12.0),
-                            egui::Align2::CENTER_TOP,
-                            "F11 to leave fullscreen",
+                        // On a dark plate, so it reads over the game's own
+                        // text; fades out over its last second.
+                        let fade = (3.0 - t).min(1.0);
+                        let painter = ui.painter();
+                        let galley = painter.layout_no_wrap(
+                            "F11 to leave fullscreen".into(),
                             egui::FontId::proportional(16.0),
-                            Color32::from_white_alpha(alpha),
+                            Color32::from_white_alpha((fade * 255.0) as u8),
                         );
+                        let top = ui.max_rect().center_top() + Vec2::new(0.0, 16.0);
+                        let text = Rect::from_min_size(
+                            top - Vec2::new(galley.size().x / 2.0, 0.0),
+                            galley.size(),
+                        );
+                        painter.rect_filled(
+                            text.expand2(Vec2::new(14.0, 8.0)),
+                            6.0,
+                            Color32::from_rgba_unmultiplied(16, 16, 20, (fade * 245.0) as u8),
+                        );
+                        painter.galley(text.min, galley, Color32::WHITE);
                         ui.ctx().request_repaint();
                     }
                 });
