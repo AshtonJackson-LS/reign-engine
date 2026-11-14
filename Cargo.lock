@@ -3607,7 +3607,6 @@ name = "reign_net"
 version = "0.1.0"
 dependencies = [
  "ggrs",
- "log",
  "reign_core",
 ]
 
