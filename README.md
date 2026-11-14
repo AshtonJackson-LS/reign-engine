@@ -80,6 +80,18 @@ If an editor the hub started exits with an error, the hub's status bar
 says so with the most telling line of its output (it has no console of its
 own); the rest goes to the hub's log.
 
+The hub (and the editor's Reload and Export Game) builds a project with
+plain `cargo build --bin <crate>-editor` / `--bin <crate>-game`. A project
+that keeps its editor behind a Cargo feature names the features in its
+`Cargo.toml`, and Cargo is asked where the build lands, so a project inside
+a larger workspace or with its own `target-dir` works too:
+
+```toml
+[package.metadata.reign]
+editor-features = ["editor"]   # what the hub and Reload build the editor with
+game-features = []             # what Export Game builds the game with
+```
+
 ## Running the editor directly
 
 ```bash

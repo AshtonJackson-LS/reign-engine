@@ -321,7 +321,97 @@ pub fn editor_bin(crate_name: &str) -> String {
 /// Where `cargo build` puts the project's editor.
 pub fn editor_path(root: &Path, crate_name: &str) -> PathBuf {
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    root.join("target").join("debug").join(format!("{}{exe}", editor_bin(crate_name)))
+    target_dir(root).join("debug").join(format!("{}{exe}", editor_bin(crate_name)))
+}
+
+/// Where Cargo puts the project's build output. Usually `<project>/target`,
+/// but a project inside a larger workspace, or one whose `.cargo/config.toml`
+/// sets `target-dir`, builds elsewhere: Cargo is asked (`cargo metadata`),
+/// once per project per run, and `<project>/target` is the answer when it
+/// can't say (no Rust installed, a broken manifest).
+pub fn target_dir(root: &Path) -> PathBuf {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(dir) = cache.lock().ok().and_then(|c| c.get(root).cloned()) {
+        return dir;
+    }
+    let dir = query_target_dir(root).unwrap_or_else(|| root.join("target"));
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(root.to_owned(), dir.clone());
+    }
+    dir
+}
+
+/// The `target_directory` `cargo metadata` reports for the project.
+fn query_target_dir(root: &Path) -> Option<PathBuf> {
+    if !root.join("Cargo.toml").is_file() {
+        return None;
+    }
+    let mut c = cargo();
+    c.current_dir(root).args(["metadata", "--no-deps", "--format-version", "1", "--offline"]);
+    // The same environment the build gets (see build_bin).
+    c.env_remove("CARGO_TARGET_DIR").env_remove("CARGO_MANIFEST_DIR");
+    c.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let output = c.output().ok().filter(|o| o.status.success())?;
+    json_string(&String::from_utf8_lossy(&output.stdout), "target_directory").map(PathBuf::from)
+}
+
+/// A top-level string field of a JSON document, unescaped. Enough for
+/// `cargo metadata`'s paths without a JSON parser in this crate.
+fn json_string(json: &str, key: &str) -> Option<String> {
+    let start = json.find(&format!("\"{key}\":\""))? + key.len() + 4;
+    let mut out = String::new();
+    let mut chars = json[start..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                }
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The features a project asks for in its `[package.metadata.reign]` table:
+/// `editor-features` for the editor the hub and Reload build, and
+/// `game-features` for the game Export Game builds. A project can keep its
+/// editor (and egui) behind a feature this way and still open from the hub:
+///
+/// ```toml
+/// [package.metadata.reign]
+/// editor-features = ["editor"]
+/// ```
+pub fn build_features(root: &Path, key: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
+    let mut in_table = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_table = line == "[package.metadata.reign]";
+            continue;
+        }
+        let Some((k, value)) = line.split_once('=') else { continue };
+        if in_table && k.trim() == key {
+            let list = value.trim().trim_start_matches('[');
+            let list = list.split(']').next().unwrap_or("");
+            return list
+                .split(',')
+                .map(|f| f.trim().trim_matches('"').to_owned())
+                .filter(|f| !f.is_empty())
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 /// The project game binary's name for a crate: the game without the
@@ -333,7 +423,7 @@ pub fn game_bin(crate_name: &str) -> String {
 /// Where `cargo build --release` puts the project's game.
 pub fn game_path(root: &Path, crate_name: &str) -> PathBuf {
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    root.join("target").join("release").join(format!("{}{exe}", game_bin(crate_name)))
+    target_dir(root).join("release").join(format!("{}{exe}", game_bin(crate_name)))
 }
 
 /// The `[package] name` in the project's `Cargo.toml`.
@@ -352,21 +442,26 @@ pub fn read_crate_name(root: &Path) -> Option<String> {
     None
 }
 
-/// The command that builds the project's editor.
+/// The command that builds the project's editor, with its
+/// `editor-features` (see [`build_features`]).
 pub fn build_command(root: &Path, crate_name: &str) -> Command {
-    build_bin(root, &editor_bin(crate_name), false)
+    build_bin(root, &editor_bin(crate_name), false, &build_features(root, "editor-features"))
 }
 
-/// The command that builds the project's game, optimised, for export.
+/// The command that builds the project's game, optimised, for export, with
+/// its `game-features` (see [`build_features`]).
 pub fn game_build_command(root: &Path, crate_name: &str) -> Command {
-    build_bin(root, &game_bin(crate_name), true)
+    build_bin(root, &game_bin(crate_name), true, &build_features(root, "game-features"))
 }
 
-fn build_bin(root: &Path, bin: &str, release: bool) -> Command {
+fn build_bin(root: &Path, bin: &str, release: bool, features: &[String]) -> Command {
     let mut c = cargo();
     c.current_dir(root).args(["build", "--bin", bin, "--message-format=short", "--color=never"]);
     if release {
         c.arg("--release");
+    }
+    if !features.is_empty() {
+        c.arg("--features").arg(features.join(","));
     }
     // Don't inherit a parent build's settings when started from one.
     c.env_remove("CARGO_TARGET_DIR")
@@ -856,6 +951,81 @@ mod tests {
         set_project_engine(&root, &local).unwrap();
         assert_eq!(project_engine(&root), Some(local));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn json_strings_are_unescaped() {
+        let json =
+            r#"{"packages":[],"target_directory":"C:\\Games\\My \"Game\"\\target","version":1}"#;
+        assert_eq!(json_string(json, "target_directory").unwrap(), r#"C:\Games\My "Game"\target"#);
+        assert_eq!(json_string(r#"{"a":"\u00e9x"}"#, "a").unwrap(), "éx");
+        assert_eq!(json_string(json, "missing"), None);
+    }
+
+    #[test]
+    fn build_features_come_from_package_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("reign-build-features-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"g\"\nversion = \"0.1.0\"\n\n\
+             [features]\neditor-features = [\"not-this-table\"]\n\n\
+             [package.metadata.reign]\neditor-features = [\"editor\", \"debug-ui\"]\n",
+        )
+        .unwrap();
+        assert_eq!(build_features(&root, "editor-features"), ["editor", "debug-ui"]);
+        assert!(build_features(&root, "game-features").is_empty());
+
+        let args = |c: &Command| {
+            c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        let editor = args(&build_command(&root, "g"));
+        assert!(editor.windows(2).any(|w| w == ["--features", "editor,debug-ui"]), "{editor:?}");
+        let game = args(&game_build_command(&root, "g"));
+        assert!(!game.contains(&"--features".to_owned()), "{game:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Cargo is asked where the build goes: `<project>/target` normally,
+    /// elsewhere when `.cargo/config.toml` says so.
+    #[test]
+    fn the_target_dir_is_cargos() {
+        let base =
+            std::env::temp_dir().join(format!("reign-target-dir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let manifest =
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n";
+        let plain = base.join("plain");
+        std::fs::create_dir_all(plain.join("src")).unwrap();
+        std::fs::write(plain.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(plain.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let moved = base.join("moved");
+        std::fs::create_dir_all(moved.join("src")).unwrap();
+        std::fs::create_dir_all(moved.join(".cargo")).unwrap();
+        std::fs::write(moved.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(moved.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(moved.join(".cargo/config.toml"), "[build]\ntarget-dir = \"out\"\n")
+            .unwrap();
+
+        let same = |a: &Path, b: &Path| {
+            let canon =
+                |p: &Path| strip_verbatim(p.canonicalize().unwrap_or_else(|_| p.to_owned()));
+            assert_eq!(
+                canon(a).to_string_lossy().to_lowercase(),
+                canon(b).to_string_lossy().to_lowercase()
+            );
+        };
+        std::fs::create_dir_all(plain.join("target")).unwrap();
+        std::fs::create_dir_all(moved.join("out")).unwrap();
+        same(&target_dir(&plain), &plain.join("target"));
+        same(&target_dir(&moved), &moved.join("out"));
+        assert!(editor_path(&moved, "t").starts_with(target_dir(&moved)));
+        // No manifest: the usual place, without asking.
+        let none = base.join("none");
+        assert_eq!(target_dir(&none), none.join("target"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// ENGINE_CRATES lists every library crate in the engine's workspace, so a
