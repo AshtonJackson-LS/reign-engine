@@ -7,7 +7,7 @@
 //! the most telling line in the status bar.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,8 +47,9 @@ impl Launched {
             std::thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     // Still printed where it went before (the hub's own
-                    // terminal, when there is one).
-                    eprintln!("{line}");
+                    // terminal, when there is one). Not eprintln!: it panics
+                    // when that terminal is gone, which would lose the line.
+                    let _ = writeln!(std::io::stderr(), "{line}");
                     let Ok(mut tail) = tail.lock() else { return };
                     if tail.len() == TAIL {
                         tail.pop_front();
