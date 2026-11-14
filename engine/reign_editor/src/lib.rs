@@ -36,6 +36,10 @@
 //!   mode, events, and a 120 Hz preview with play, pause, step and scrub).
 //! - A toolbar with Play, Pause, Step, Stop, the time scale, undo and redo,
 //!   and the Scene menu (Save, Open).
+//! - **Fullscreen** (the toolbar's button, or F11, even while the game has the
+//!   keyboard): the editor window goes borderless fullscreen and the Game view
+//!   fills it, with no toolbar or panels. F11 again returns to the editor. A
+//!   hosted game can't change the window itself, so this is the editor's.
 //!
 //! Every scene edit can be undone (Ctrl+Z) and redone (Ctrl+Y or
 //! Ctrl+Shift+Z); in an asset tool, the same keys undo the tool's own

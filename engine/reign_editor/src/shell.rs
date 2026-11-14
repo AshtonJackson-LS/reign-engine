@@ -11,7 +11,7 @@ use reign_app::winit::application::ApplicationHandler;
 use reign_app::winit::event::{ElementState, WindowEvent};
 use reign_app::winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
-use reign_app::winit::window::{Window, WindowId};
+use reign_app::winit::window::{Fullscreen, Window, WindowId};
 use reign_app::{Ctx, Frame, Pads, TickCtx};
 use reign_core::checksum;
 use reign_render::{Renderer, VIEW_HEIGHT, VIEW_WIDTH, view_scale, wgpu};
@@ -91,6 +91,11 @@ struct Panels {
     status: Option<String>,
     /// Ctrl (Cmd on macOS) is held.
     command: bool,
+    /// The Game view fills a borderless fullscreen window (F11 or the
+    /// toolbar's Fullscreen button): no toolbar, no other panels.
+    game_fullscreen: bool,
+    /// When fullscreen began, for the exit hint shown at its start.
+    fullscreen_since: Option<Instant>,
     /// The space the Game tab had last frame, in points; sizes the frame.
     game_space: Option<Rect>,
     /// Where the frame was shown last frame, in points.
@@ -120,6 +125,12 @@ struct Panels {
 }
 
 impl Panels {
+    /// Switches between the full editor and the Game view alone.
+    fn toggle_fullscreen(&mut self) {
+        self.game_fullscreen = !self.game_fullscreen;
+        self.fullscreen_since = self.game_fullscreen.then(Instant::now);
+    }
+
     /// The Game view in physical window pixels: x, y, width, height.
     fn game_rect_px(&self, ppp: f32) -> Option<[f32; 4]> {
         self.game_image.map(|r| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp])
@@ -246,6 +257,8 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
                 rename: None,
                 status: None,
                 command: false,
+                game_fullscreen: false,
+                fullscreen_since: None,
                 game_space: None,
                 game_image: None,
                 game_focused: false,
@@ -347,6 +360,14 @@ impl<A: EditorApp> Session<A> {
                 if event.state == ElementState::Released {
                     return (true, true);
                 }
+                // F11 is the editor's, even while the game has the keyboard:
+                // a hosted game can't change the window itself.
+                if event.physical_key == PhysicalKey::Code(KeyCode::F11) {
+                    if !event.repeat {
+                        self.panels.toggle_fullscreen();
+                    }
+                    return (false, false);
+                }
                 // The editor's own shortcuts never reach the game.
                 let shortcut = matches!(
                     event.physical_key,
@@ -372,6 +393,12 @@ impl<A: EditorApp> Session<A> {
         let elapsed = now - self.last_frame;
         let dt = elapsed.as_secs_f32().min(0.1);
         self.last_frame = now;
+        // The window follows the Game view's fullscreen state.
+        if self.panels.game_fullscreen != self.window.fullscreen().is_some() {
+            self.window.set_fullscreen(
+                self.panels.game_fullscreen.then_some(Fullscreen::Borderless(None)),
+            );
+        }
         self.fit_game_texture();
         self.reload_assets(event_loop);
         self.app.set_play_mode(self.play.mode());
@@ -476,8 +503,11 @@ impl<A: EditorApp> Session<A> {
         let prefab_name = prefab_mode.as_ref().map(|m| m.name.clone());
         let output = egui.run_ui(input, |ui| {
             shortcuts(ui, app, panels, &mut requests);
-            let state = ToolbarState { history, stashed_history, dirty, dirty_at_play };
-            toolbar(ui, app, play, panels, state, &mut requests);
+            let fullscreen = panels.game_fullscreen;
+            if !fullscreen {
+                let state = ToolbarState { history, stashed_history, dirty, dirty_at_play };
+                toolbar(ui, app, play, panels, state, &mut requests);
+            }
             let mut style = Style::from_egui(ui.style());
             style.tab_bar.fill_tab_bar = true;
             let mut viewer = Viewer {
@@ -495,12 +525,31 @@ impl<A: EditorApp> Session<A> {
                 prefab_mode: prefab_name.as_deref(),
                 dirty,
             };
-            DockArea::new(dock)
-                .style(style)
-                .show_close_buttons(false)
-                .show_leaf_close_all_buttons(false)
-                .show_leaf_collapse_buttons(false)
-                .show_inside(ui, &mut viewer);
+            if fullscreen {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                    viewer.ui(ui, &mut Tab::Game);
+                    let hint_for =
+                        viewer.panels.fullscreen_since.map(|t| t.elapsed().as_secs_f32());
+                    if let Some(t) = hint_for.filter(|t| *t < 3.0) {
+                        let alpha = ((3.0 - t).min(1.0) * 255.0) as u8;
+                        ui.painter().text(
+                            ui.max_rect().center_top() + Vec2::new(0.0, 12.0),
+                            egui::Align2::CENTER_TOP,
+                            "F11 to leave fullscreen",
+                            egui::FontId::proportional(16.0),
+                            Color32::from_white_alpha(alpha),
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                });
+            } else {
+                DockArea::new(dock)
+                    .style(style)
+                    .show_close_buttons(false)
+                    .show_leaf_close_all_buttons(false)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut viewer);
+            }
         });
         self.app.set_play_mode(self.play.mode());
         self.apply_create();
@@ -1228,6 +1277,14 @@ fn toolbar<A: EditorApp>(
                 }
                 requests.run_changed = true;
                 log::info!("stop: restored the state from before Play");
+            }
+            ui.separator();
+            if ui
+                .selectable_label(panels.game_fullscreen, "⛶ Fullscreen")
+                .on_hover_text("Game view fills the screen  (F11)")
+                .clicked()
+            {
+                panels.toggle_fullscreen();
             }
             ui.separator();
             ui.label("Time scale");
