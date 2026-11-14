@@ -747,13 +747,17 @@ pub fn ensure_game_bin(root: &Path, project_name: &str) -> std::io::Result<bool>
     let name = read_crate_name(root)
         .ok_or_else(|| std::io::Error::other("Cargo.toml has no [package] name"))?;
     let mut changed = false;
-    let listed = text.lines().any(|l| {
-        l.trim()
-            .strip_prefix("name")
-            .and_then(|r| r.trim_start().strip_prefix('='))
-            .is_some_and(|v| v.trim().trim_matches('"') == game_bin(&name))
-    });
-    if !listed {
+    // A game binary the project already lists keeps its own source: only
+    // the template's src/game.rs is ever written (Exreign's exreign-game is
+    // src/main.rs, and must not get a stray game.rs).
+    let listed = bin_path(&text, &game_bin(&name));
+    let writes_game_rs = match &listed {
+        None => true,
+        Some(path) => {
+            path.as_deref().map(|p| p.replace('\\', "/")).as_deref() == Some("src/game.rs")
+        }
+    };
+    if listed.is_none() {
         // Next to the other binaries, before [dependencies], else at the end.
         let table = game_bin_table(&name);
         let text = match text.find("\n[dependencies]") {
@@ -764,12 +768,48 @@ pub fn ensure_game_bin(root: &Path, project_name: &str) -> std::io::Result<bool>
         changed = true;
     }
     let main = root.join("src").join("game.rs");
-    if !main.exists() {
+    if writes_game_rs && !main.exists() {
         std::fs::create_dir_all(root.join("src"))?;
         std::fs::write(main, game_main(project_name, &name))?;
         changed = true;
     }
     Ok(changed)
+}
+
+/// Whether the manifest lists a `[[bin]]` named `bin`: `None` if not, else
+/// its `path` (`None` inside when it has none and Cargo's default applies).
+fn bin_path(text: &str, bin: &str) -> Option<Option<String>> {
+    let mut in_bin = false;
+    let (mut name, mut path) = (None::<String>, None::<String>);
+    let mut found = None;
+    let mut finish = |name: &mut Option<String>, path: &mut Option<String>| {
+        if name.as_deref() == Some(bin) && found.is_none() {
+            found = Some(path.clone());
+        }
+        *name = None;
+        *path = None;
+    };
+    for line in text.lines() {
+        if table_header(line).is_some() {
+            if in_bin {
+                finish(&mut name, &mut path);
+            }
+            in_bin = line.trim().starts_with("[[bin]]");
+            continue;
+        }
+        if !in_bin {
+            continue;
+        }
+        match key_value(line) {
+            Some((k, v, _)) if k == "name" => name = Some(unquote(&v)),
+            Some((k, v, _)) if k == "path" => path = Some(unquote(&v)),
+            _ => {}
+        }
+    }
+    if in_bin {
+        finish(&mut name, &mut path);
+    }
+    found
 }
 
 /// Makes the project a crate, if it isn't already. Returns its crate name.
@@ -1572,6 +1612,32 @@ editor = [\"reign/editor\"]
             std::fs::read_to_string(root.join("src/game.rs")).unwrap().contains("old::scripts()")
         );
         assert!(!ensure_game_bin(&root, "Old").unwrap(), "only once");
+        // Deleted later: the listed src/game.rs comes back.
+        std::fs::remove_file(root.join("src/game.rs")).unwrap();
+        assert!(ensure_game_bin(&root, "Old").unwrap());
+        assert!(root.join("src/game.rs").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A hand-made project (Exreign) lists its game binary with its own
+    /// source: Export must not add a template src/game.rs beside it.
+    #[test]
+    fn a_game_binary_with_its_own_source_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("reign-own-game-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = "[package]\nname = \"exreign\"\nversion = \"0.1.0\"\n\n\
+             [[bin]]\nname = \"exreign\"\npath = \"src/main.rs\"\n\n\
+             [[bin]]   # what Export Game builds\nname = \"exreign-game\"\npath = 'src/main.rs'\n\n\
+             [[bin]]\nname = \"exreign-editor\"\npath = \"src/bin/editor.rs\"\n";
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        assert!(!ensure_game_bin(&root, "Exreign").unwrap());
+        assert!(!root.join("src/game.rs").exists());
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), manifest);
+        assert_eq!(bin_path(manifest, "exreign-game"), Some(Some("src/main.rs".into())));
+        assert_eq!(bin_path(manifest, "exreign-editor"), Some(Some("src/bin/editor.rs".into())));
+        assert_eq!(bin_path("[[bin]]\nname = \"a\"\n", "a"), Some(None));
+        assert_eq!(bin_path(manifest, "nope"), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
