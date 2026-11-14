@@ -92,15 +92,13 @@ const ENGINE_CRATES: [(&str, &str); 15] = [
 /// engine moves.
 const SOURCE_KEYS: [&str; 6] = ["path", "git", "tag", "branch", "rev", "version"];
 
-/// Where a project with code gets its engine, read from its Cargo.toml.
+/// Where a project with code gets its engine, read from its Cargo.toml: the
+/// `reign` dependency, inline (`reign = { path = ".." }`) or as a table
+/// (`[dependencies.reign]`).
 pub fn project_engine(root: &Path) -> Option<EngineSource> {
     let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    let line =
-        text.lines().find(|l| l.split_once('=').is_some_and(|(k, _)| k.trim() == "reign"))?;
-    let value = |key: &str| -> Option<String> {
-        let rest = line.split(&format!("{key} = \"")[..]).nth(1)?;
-        Some(rest.split('"').next()?.to_owned())
-    };
+    let entries = manifest_dependency(&text, "reign")?;
+    let value = |key: &str| entries.iter().find(|(k, _)| k == key).map(|(_, v)| unquote(v));
     if let Some(path) = value("path") {
         let path = PathBuf::from(path);
         let root = path.parent().and_then(Path::parent).map(Path::to_owned).unwrap_or(path);
@@ -110,98 +108,310 @@ pub fn project_engine(root: &Path) -> Option<EngineSource> {
 }
 
 /// Points a project's engine dependencies at `source`: every engine crate
-/// (see [`ENGINE_CRATES`]) in any dependency table, keeping each one's other
-/// settings. Rebuilding the project's editor afterwards uses that engine.
+/// (see `ENGINE_CRATES`) in any dependency table, written inline
+/// (`reign = { .. }`) or as its own table (`[dependencies.reign]`), keeping
+/// each one's other settings (features, optional, ..), comments and line
+/// endings. A crate inherited from a workspace (`workspace = true`) is left
+/// to the workspace. Rebuilding the project's editor afterwards uses that
+/// engine.
 pub fn set_project_engine(root: &Path, source: &EngineSource) -> std::io::Result<()> {
     let file = root.join("Cargo.toml");
     let text = std::fs::read_to_string(&file)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
     let mut changed = 0;
-    let mut in_dependencies = false;
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                // [dependencies], [build-dependencies], [dev-dependencies],
-                // [target.'cfg(..)'.dependencies], [workspace.dependencies].
-                in_dependencies = trimmed.trim_end_matches(']').ends_with("dependencies");
-                return line.to_owned();
+    let mut table = Table::Other;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        let (body, end) = match line.strip_suffix('\r') {
+            Some(body) => (body, "\r"),
+            None => (line, ""),
+        };
+        if let Some(header) = table_header(body) {
+            table = Table::of(header);
+            out.push(line.to_owned());
+            let Table::Crate(name) = &table else { continue };
+            let Some(dir) = engine_dir(name) else { continue };
+            // The table's own lines, up to the next header.
+            let start = i;
+            while i < lines.len() && table_header(lines[i].trim_end_matches('\r')).is_none() {
+                i += 1;
             }
-            let Some((key, value)) = line.split_once('=') else { return line.to_owned() };
-            let crate_dir = ENGINE_CRATES.iter().find(|(name, _)| *name == key.trim());
-            match crate_dir.filter(|_| in_dependencies) {
-                Some((_, dir)) => {
-                    changed += 1;
-                    let end = if line.ends_with('\r') { "\r" } else { "" };
-                    let value = value.trim_end_matches('\r');
-                    format!("{key}= {}{end}", with_source(value, &source.dependency(dir)))
+            let own = &lines[start..i];
+            let key_of = |l: &&str| key_value(l.trim_end_matches('\r')).map(|(k, _, _)| k);
+            let inherits = own.iter().any(|l| {
+                key_value(l.trim_end_matches('\r'))
+                    .is_some_and(|(k, v, _)| k == "workspace" && unquote(&v) == "true")
+            });
+            if !inherits {
+                changed += 1;
+                let new = source.dependency(dir);
+                for entry in inline_body(&new).map(split_top_level).unwrap_or_default() {
+                    out.push(format!("{}{end}", entry.trim()));
                 }
-                None => line.to_owned(),
             }
-        })
-        .collect();
+            for l in own {
+                let source_key = key_of(l).is_some_and(|k| SOURCE_KEYS.contains(&k.as_str()));
+                if inherits || !source_key {
+                    out.push((*l).to_owned());
+                }
+            }
+            continue;
+        }
+        if matches!(table, Table::Dependencies)
+            && let Some((key, value, eq)) = key_value(body)
+            && let Some(dir) = engine_dir(&key)
+            && let Some(new) = with_source(&value, &source.dependency(dir))
+        {
+            changed += 1;
+            out.push(format!("{}= {new}{end}", &body[..eq]));
+            continue;
+        }
+        out.push(line.to_owned());
+    }
     if changed == 0 {
         return Err(std::io::Error::other("Cargo.toml has no Reign engine dependencies"));
     }
-    std::fs::write(file, lines.join("\n"))
+    std::fs::write(file, out.join("\n"))
 }
 
-/// A dependency's value (`"1"` or `{ path = "...", features = [...] }`, and
-/// any comment after it) with its source swapped for `source` (an inline
-/// table, as [`EngineSource::dependency`] writes) and every other setting
-/// kept.
-fn with_source(value: &str, source: &str) -> String {
-    let value = value.trim();
-    let new = source.trim().trim_start_matches('{').trim_end_matches('}').trim();
-    let Some(body) = value.strip_prefix('{') else {
-        // A bare version string: nothing else to keep.
-        return source.to_owned();
-    };
-    // The table ends at its closing brace; anything after is a comment.
-    let Some(close) = top_level_end(body) else { return source.to_owned() };
-    let (inner, after) = (&body[..close], &body[close + 1..]);
-    let kept = split_top_level(inner).into_iter().map(str::trim).filter(|entry| {
-        let key = entry.split('=').next().unwrap_or("").trim();
-        !entry.is_empty() && !SOURCE_KEYS.contains(&key)
-    });
-    let entries: Vec<&str> = std::iter::once(new).chain(kept).collect();
-    format!("{{ {} }}{after}", entries.join(", "))
+/// The kind of Cargo.toml table a header opens.
+enum Table {
+    /// `[dependencies]`, `[build-dependencies]`, `[dev-dependencies]`,
+    /// `[target.'cfg(..)'.dependencies]`, `[workspace.dependencies]`.
+    Dependencies,
+    /// One dependency as a table: `[dependencies.reign]`.
+    Crate(String),
+    Other,
 }
 
-/// Where the inline table whose body starts `body` closes: the index of its
-/// `}`, outside strings and arrays.
-fn top_level_end(body: &str) -> Option<usize> {
-    let (mut depth, mut quoted) = (0, false);
-    for (i, c) in body.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '[' | '{' if !quoted => depth += 1,
-            ']' if !quoted => depth -= 1,
-            '}' if !quoted && depth == 0 => return Some(i),
-            '}' if !quoted => depth -= 1,
+impl Table {
+    fn of(header: &str) -> Table {
+        if header.ends_with("dependencies") {
+            return Table::Dependencies;
+        }
+        match header.rsplit_once('.') {
+            Some((tables, name)) if tables.trim().ends_with("dependencies") => {
+                Table::Crate(unquote(name))
+            }
+            _ => Table::Other,
+        }
+    }
+}
+
+/// The table name a header line opens (`[dependencies] # x` →
+/// `dependencies`, `[[bin]]` → `bin`), or `None` if it isn't a header.
+fn table_header(line: &str) -> Option<&str> {
+    let inner = line.trim().strip_prefix('[')?.trim_start_matches('[');
+    Some(inner.split(']').next()?.trim())
+}
+
+fn engine_dir(name: &str) -> Option<&'static str> {
+    ENGINE_CRATES.iter().find(|(crate_name, _)| *crate_name == name).map(|(_, dir)| *dir)
+}
+
+/// The engine dependency `name` in a manifest's dependency tables, as its
+/// key/value entries (`path`, `git`, `tag`, `features`, ..).
+fn manifest_dependency(text: &str, name: &str) -> Option<Vec<(String, String)>> {
+    let mut table = Table::Other;
+    let mut found: Option<Vec<(String, String)>> = None;
+    for line in text.lines() {
+        if let Some(header) = table_header(line) {
+            if found.is_some() {
+                return found;
+            }
+            table = Table::of(header);
+            if matches!(&table, Table::Crate(c) if c == name) {
+                found = Some(Vec::new());
+            }
+            continue;
+        }
+        let Some((key, value, _)) = key_value(line) else { continue };
+        match (&table, found.as_mut()) {
+            (Table::Crate(_), Some(entries)) => entries.push((key, value)),
+            (Table::Dependencies, None) if key == name => {
+                let body = inline_body(&value)?;
+                return Some(
+                    split_top_level(body)
+                        .into_iter()
+                        .filter_map(|e| key_value(e).map(|(k, v, _)| (k, v)))
+                        .collect(),
+                );
+            }
             _ => {}
         }
     }
-    None
+    found
+}
+
+/// A dependency's value (`"1"` or `{ path = "..", features = [..] }`, and
+/// any comment after it) with its source swapped for `source` (an inline
+/// table, as [`EngineSource::dependency`] writes) and every other setting
+/// kept. `None` when it inherits from the workspace (`workspace = true`).
+fn with_source(value: &str, source: &str) -> Option<String> {
+    let new = inline_body(source)?.trim();
+    let value = value.trim();
+    let Some(body) = value.strip_prefix('{') else {
+        // A bare version string: nothing else to keep, but keep a comment.
+        let comment = comment_start(value).map_or("", |at| &value[at..]);
+        let gap = if comment.is_empty() { "" } else { "  " };
+        return Some(format!("{{ {new} }}{gap}{comment}"));
+    };
+    let close = top_level_end(body)?;
+    let (inner, after) = (&body[..close], &body[close + 1..]);
+    let entries = split_top_level(inner);
+    let inherits = entries
+        .iter()
+        .any(|e| key_value(e).is_some_and(|(k, v, _)| k == "workspace" && unquote(&v) == "true"));
+    if inherits {
+        return None;
+    }
+    let kept = entries.into_iter().map(str::trim).filter(|entry| {
+        let key = key_value(entry).map(|(k, _, _)| k).unwrap_or_default();
+        !entry.is_empty() && !SOURCE_KEYS.contains(&key.as_str())
+    });
+    let all: Vec<&str> = std::iter::once(new).chain(kept).collect();
+    Some(format!("{{ {} }}{after}", all.join(", ")))
+}
+
+/// Calls `f(index, char, depth)` for each character of TOML text outside a
+/// string (basic `".."` with escapes, or literal `'..'`), with the bracket
+/// depth before it, until `f` returns true.
+fn scan_toml(text: &str, mut f: impl FnMut(usize, char, i32) -> bool) {
+    let mut depth = 0;
+    let mut chars = text.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' => {
+                while let Some((_, d)) = chars.next() {
+                    match d {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '\'' => {
+                for (_, d) in chars.by_ref() {
+                    if d == '\'' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                if f(i, c, depth) {
+                    return;
+                }
+                match c {
+                    '[' | '{' => depth += 1,
+                    ']' | '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Where the inline table whose body starts `body` closes: its `}`.
+fn top_level_end(body: &str) -> Option<usize> {
+    let mut end = None;
+    scan_toml(body, |i, c, depth| {
+        let found = c == '}' && depth == 0;
+        if found {
+            end = Some(i);
+        }
+        found
+    });
+    end
 }
 
 /// Splits an inline table's body at its top-level commas.
 fn split_top_level(body: &str) -> Vec<&str> {
-    let (mut parts, mut start, mut depth, mut quoted) = (Vec::new(), 0, 0, false);
-    for (i, c) in body.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '[' | '{' if !quoted => depth += 1,
-            ']' | '}' if !quoted => depth -= 1,
-            ',' if !quoted && depth == 0 => {
-                parts.push(&body[start..i]);
-                start = i + 1;
-            }
-            _ => {}
+    let mut cuts = Vec::new();
+    scan_toml(body, |i, c, depth| {
+        if c == ',' && depth == 0 {
+            cuts.push(i);
         }
+        false
+    });
+    let mut parts = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for cut in cuts {
+        parts.push(&body[start..cut]);
+        start = cut + 1;
     }
     parts.push(&body[start..]);
     parts
+}
+
+/// The body of an inline table value (`{ a = 1 }` → ` a = 1 `).
+fn inline_body(value: &str) -> Option<&str> {
+    let body = value.trim().strip_prefix('{')?;
+    Some(&body[..top_level_end(body)?])
+}
+
+/// Where a `#` comment starts in a line, outside strings.
+fn comment_start(text: &str) -> Option<usize> {
+    let mut at = None;
+    scan_toml(text, |i, c, _| {
+        let found = c == '#';
+        if found {
+            at = Some(i);
+        }
+        found
+    });
+    at
+}
+
+/// A `key = value` line or entry: the key (unquoted), the value (as written,
+/// with any comment), and where the `=` is. `None` for anything else.
+fn key_value(text: &str) -> Option<(String, String, usize)> {
+    if text.trim_start().starts_with('#') || text.trim_start().starts_with('[') {
+        return None;
+    }
+    let mut eq = None;
+    scan_toml(text, |i, c, depth| {
+        let found = c == '=' && depth == 0;
+        if found {
+            eq = Some(i);
+        }
+        found
+    });
+    let eq = eq?;
+    let key = unquote(&text[..eq]);
+    (!key.is_empty()).then(|| (key, text[eq + 1..].trim().to_owned(), eq))
+}
+
+/// A TOML scalar as text: a basic or literal string unquoted (escapes
+/// resolved), anything else trimmed with its comment dropped.
+fn unquote(text: &str) -> String {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(other) => out.push(other),
+                    None => break,
+                },
+                c => out.push(c),
+            }
+        }
+        out
+    } else if let Some(rest) = text.strip_prefix('\'') {
+        rest.split('\'').next().unwrap_or("").to_owned()
+    } else {
+        let end = comment_start(text).unwrap_or(text.len());
+        text[..end].trim().to_owned()
+    }
 }
 
 /// The engine source a new project builds against: the local checkout when
@@ -1055,6 +1265,131 @@ mod tests {
         for (name, dir) in ENGINE_CRATES {
             assert!(members.contains(&dir), "{name} ({dir}) is not a workspace member");
         }
+    }
+
+    /// Writes `manifest` as a project's Cargo.toml, points it at release
+    /// 0.3.1, and returns the result.
+    fn moved_to_release(test: &str, manifest: &str) -> String {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-edge-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        set_project_engine(&root, &EngineSource::release("0.3.1")).unwrap();
+        let text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        text
+    }
+
+    const TAG: &str = r#"git = "https://github.com/AshtonJackson-LS/reign-engine", tag = "v0.3.1""#;
+
+    #[test]
+    fn workspace_inherited_engine_crates_are_left_to_the_workspace() {
+        let text = moved_to_release(
+            "inherit",
+            "[package]\nname = \"g\"\n\n[dependencies]\n\
+             reign = { workspace = true, features = [\"editor\"] }\n\
+             reign_assets.workspace = true\n\
+             reign_core = { path = \"../e/engine/reign_core\" }\n",
+        );
+        assert!(text.contains("reign = { workspace = true, features = [\"editor\"] }\n"), "{text}");
+        assert!(text.contains("reign_assets.workspace = true\n"), "{text}");
+        assert!(text.contains(&format!("reign_core = {{ {TAG} }}")), "{text}");
+    }
+
+    #[test]
+    fn a_commented_table_header_still_counts() {
+        let text = moved_to_release(
+            "comment",
+            "[package]\nname = \"g\"\n\n[dependencies]   # the engine\n\
+             reign = { path = \"../e/engine/reign\" }  # keep me\n",
+        );
+        assert!(text.contains(&format!("reign = {{ {TAG} }}  # keep me")), "{text}");
+    }
+
+    #[test]
+    fn table_form_dependencies_move_too() {
+        let text = moved_to_release(
+            "table",
+            "[package]\nname = \"g\"\n\n[dependencies.reign]\npath = \"../e/engine/reign\"\n\
+             features = [\"editor\"]\n\n[build-dependencies.reign_assets]\n\
+             git = \"https://example.com/old\"\nbranch = \"dev\"\n\n[dependencies.serde]\nversion = \"1\"\n",
+        );
+        assert!(!text.contains("../e/engine"), "{text}");
+        assert!(!text.contains("branch = \"dev\"") && !text.contains("example.com/old"), "{text}");
+        assert_eq!(text.matches("tag = \"v0.3.1\"").count(), 2, "{text}");
+        assert!(text.contains("features = [\"editor\"]"), "{text}");
+        assert!(
+            text.contains("[dependencies.serde]\nversion = \"1\""),
+            "not an engine crate:\n{text}"
+        );
+        // And project_engine reads the table form.
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-edge-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), &text).unwrap();
+        assert_eq!(project_engine(&root), Some(EngineSource::release("0.3.1")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quotes_and_brackets_inside_settings_are_kept_whole() {
+        let text = moved_to_release(
+            "quotes",
+            "[package]\nname = \"g\"\n\n[dependencies]\n\
+             reign = { path = 'C:\\old\\engine\\reign', features = [\"a,b}\", 'c]'], package = \"reign\" }\n\
+             reign_core = { path = \"../x\\\"y\", optional = true }\n",
+        );
+        assert!(
+            text.contains(&format!(
+                "reign = {{ {TAG}, features = [\"a,b}}\", 'c]'], package = \"reign\" }}"
+            )),
+            "{text}"
+        );
+        assert!(text.contains(&format!("reign_core = {{ {TAG}, optional = true }}")), "{text}");
+    }
+
+    #[test]
+    fn versions_quoted_keys_and_target_tables() {
+        let text = moved_to_release(
+            "misc",
+            "[package]\nname = \"g\"\n\n[dependencies]\nreign = \"0.1\"  # from crates.io one day\n\
+             \"reign_core\" = { path = \"../e/engine/reign_core\" }\n\n\
+             [target.'cfg(target_os = \"macos\")'.dependencies]\nreign_audio = { path = \"../e/engine/reign_audio\" }\n\n\
+             [features]\nreign = []\n",
+        );
+        assert!(text.contains(&format!("reign = {{ {TAG} }}  # from crates.io one day")), "{text}");
+        assert!(text.contains(&format!("\"reign_core\" = {{ {TAG} }}")), "{text}");
+        assert!(text.contains(&format!("reign_audio = {{ {TAG} }}")), "{text}");
+        assert!(
+            text.contains("[features]\nreign = []"),
+            "a feature named reign isn't a dependency:\n{text}"
+        );
+    }
+
+    #[test]
+    fn no_engine_crates_is_an_error_and_changes_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-edge-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = "[package]\nname = \"g\"\n\n[dependencies]\nserde = \"1\"\n";
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        assert!(set_project_engine(&root, &EngineSource::release("0.3.1")).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), manifest);
+        assert_eq!(project_engine(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn crlf_manifests_stay_crlf() {
+        let text = moved_to_release(
+            "crlf",
+            "[package]\r\nname = \"g\"\r\n\r\n[dependencies]\r\nreign = { path = \"../e/engine/reign\" }\r\nserde = \"1\"\r\n",
+        );
+        assert!(text.contains(&format!("reign = {{ {TAG} }}\r\n")), "{text:?}");
+        assert!(!text.replace("\r\n", "").contains('\n'), "only CRLF line ends: {text:?}");
     }
 
     /// A hand-made project (like Exreign) depends on more engine crates than
