@@ -76,6 +76,9 @@ argument. A game that writes its own editor binary around
 `reign::editor::run_editor` and reads its own flags should read them from
 `reign::editor::game_args()`, which leaves that folder out; otherwise the
 editor exits on an argument it doesn't know.
+If an editor the hub started exits with an error, the hub's status bar
+says so with the most telling line of its output (it has no console of its
+own); the rest goes to the hub's log.
 
 ## Running the editor directly
 
