@@ -1197,22 +1197,26 @@ impl Hub {
             };
             let action =
                 download_window(ctx, ("download", kind as u8), &title, Some(&snapshot), None);
-            actions.push((kind, action));
+            actions.push((Some(kind), action));
         }
+        // The "installed" window has no download of its own: `None`.
         if self.update_done
             && let update::State::Installed(version) = self.updater.state.clone()
         {
             let done = format!("Reign {version} is installed");
             let action = download_window(ctx, ("download", 2), &done, None, Some(&version));
-            actions.push((DownloadKind::Update, action));
+            actions.push((None, action));
         }
         for (kind, action) in actions {
             match (kind, action) {
                 (_, None) => {}
-                (DownloadKind::Update, Some(DownloadAction::Cancel)) => self.updater.cancel(),
-                (DownloadKind::Engine, Some(DownloadAction::Cancel)) => self.versions.cancel(),
-                (_, Some(DownloadAction::Close)) if self.update_done => self.update_done = false,
-                (kind, Some(DownloadAction::Close)) => self.closed_downloads.push(kind),
+                (Some(DownloadKind::Update), Some(DownloadAction::Cancel)) => self.updater.cancel(),
+                (Some(DownloadKind::Engine), Some(DownloadAction::Cancel)) => {
+                    self.versions.cancel()
+                }
+                (None, Some(DownloadAction::Cancel)) => {}
+                (None, Some(DownloadAction::Close)) => self.update_done = false,
+                (Some(kind), Some(DownloadAction::Close)) => self.closed_downloads.push(kind),
                 (_, Some(DownloadAction::Restart)) => {
                     self.update_done = false;
                     self.restart_hub(ctx);
