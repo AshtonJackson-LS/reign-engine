@@ -1,5 +1,15 @@
 # Contributing to Reign Engine
 
+## How a change ships
+
+1. Branch off `main`, make the change, open a pull request.
+2. Label it `breaking`, `feature` or `fix` (unlabelled counts as small).
+   The label picks the next version number and the changelog section.
+3. CI must pass on Windows, macOS and Linux before it can merge.
+4. Once merged, it goes out as a beta to hubs with Beta updates on, and
+   lands in the open **Release v…** pull request. Merging that ships it to
+   everyone. Details: [RELEASING.md](RELEASING.md).
+
 ## Building and testing
 
 Reign builds with stable Rust (`rust-toolchain.toml`). The editor (`app`),
@@ -31,7 +41,8 @@ target/release/reign-hub
 ```
 
 `--play` starts the editor in Play mode and `--exit-after SECONDS` quits on
-its own. `scripts/bundle-macos.sh` builds `dist/Reign Hub.app` with both.
+its own. `scripts/bundle-macos.sh` builds `dist/Reign Hub.app` with both, and
+`scripts/package-linux.sh` the Linux archive.
 
 ## Layout
 

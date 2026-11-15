@@ -5,15 +5,13 @@
 //! beside the hub, and a project without code opens in the editor of the
 //! version its `ReignProject.ron` records. A project with code needs none of
 //! this: its Cargo.toml names its engine, and its own editor is built from it.
-//!
-//! Downloading versions is Windows-only for now, like self-updates.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
 
-use super::update::{fetch_release, parse_version, releases, sort_newest_first};
+use super::update::{PACKAGE, fetch_release, is_beta, parse_version, releases, sort_newest_first};
 
 /// Where downloaded versions go: `versions/<version>/` beside the hub.
 fn versions_dir() -> Option<PathBuf> {
@@ -45,7 +43,7 @@ pub fn editor_for(version: &str) -> Option<PathBuf> {
 
 /// Whether this platform can download versions.
 pub fn can_download() -> bool {
-    cfg!(windows)
+    PACKAGE.is_some()
 }
 
 /// The release list (fetched when first asked for) and downloads.
@@ -66,7 +64,9 @@ impl Versions {
     /// Fetches the release list in the background, if it isn't already.
     pub fn fetch(&mut self, ctx: &egui::Context) {
         if self.releases.is_none() && self.listing.is_none() {
-            self.listing = Some(background(ctx, releases));
+            // Projects pin stable versions; old betas get deleted.
+            let stable = || releases().map(|all| all.into_iter().filter(|v| !is_beta(v)).collect());
+            self.listing = Some(background(ctx, stable));
         }
     }
 
@@ -120,14 +120,10 @@ pub fn background<T: Send + 'static>(
 }
 
 fn install_version(version: &str) -> Result<(), String> {
-    if !can_download() {
-        return Err("downloading engine versions is Windows-only for now".into());
-    }
     let dir = versions_dir().ok_or("the hub has no folder")?.join(version);
     let programs = fetch_release(version)?;
-    let editor = super::editor_name();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(dir.join(editor), &programs[1]))
+        .and_then(|()| reign_setup::write_program(&dir.join(super::editor_name()), &programs[1]))
         .map_err(|e| e.to_string())
 }

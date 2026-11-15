@@ -421,7 +421,6 @@ impl<A: EditorApp> Session<A> {
         self.reload_assets(event_loop);
         self.app.set_play_mode(self.play.mode());
 
-        // Run the game: as many ticks as the play state allows.
         let ppp = self.egui.pixels_per_point();
         let game_input = self.play.mode() == PlayMode::Playing
             && (self.panels.game_focused || self.panels.cursor_over_game(ppp));
@@ -1819,7 +1818,7 @@ mod key_route_tests {
     fn f11_toggles_fullscreen_whoever_has_the_keyboard() {
         assert_eq!(route_key(F11, press(false)), KeyRoute::ToggleFullscreen);
         // Playing with the Game view focused: still the editor's, and the
-        // game never sees it (it used to, and couldn't change the window).
+        // game never sees it.
         assert_eq!(route_key(F11, press(true)), KeyRoute::ToggleFullscreen);
         let ctrl = KeyState { command: true, ..press(true) };
         assert_eq!(route_key(F11, ctrl), KeyRoute::ToggleFullscreen);

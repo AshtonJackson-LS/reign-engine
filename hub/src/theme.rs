@@ -11,8 +11,6 @@ use eframe::egui::{
     text::{LayoutJob, TextFormat},
 };
 
-// ------------------------------------------------------------------- colours
-
 pub const INK: Color32 = Color32::from_rgb(11, 9, 10);
 pub const BG: Color32 = Color32::from_rgb(15, 13, 14);
 pub const SURFACE: Color32 = Color32::from_rgb(23, 20, 21);
@@ -26,8 +24,6 @@ pub const RED: Color32 = Color32::from_rgb(228, 46, 52);
 pub const RED_HOT: Color32 = Color32::from_rgb(247, 74, 76);
 pub const RED_DEEP: Color32 = Color32::from_rgb(92, 14, 22);
 pub const GOOD: Color32 = Color32::from_rgb(120, 214, 150);
-
-// --------------------------------------------------------------------- fonts
 
 #[derive(Clone, Copy)]
 pub enum Face {
@@ -148,8 +144,6 @@ pub fn eyebrow(s: &str, color: Color32) -> LayoutJob {
     text(s.to_uppercase(), Face::SemiBold, 10.5, color, 1.2)
 }
 
-// ------------------------------------------------------------------ buttons
-
 /// A filled red pill.
 pub fn primary(label: &str) -> egui::Button<'static> {
     egui::Button::new(text(label, Face::SemiBold, 13.0, Color32::WHITE, -0.1))
@@ -167,8 +161,6 @@ pub fn secondary(label: &str) -> egui::Button<'static> {
         .corner_radius(CornerRadius::same(200))
         .min_size(Vec2::new(0.0, 34.0))
 }
-
-// ------------------------------------------------------------------ drawing
 
 /// A rectangle with a colour at each corner: top-left, top-right,
 /// bottom-right, bottom-left.

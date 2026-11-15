@@ -1,17 +1,19 @@
-//! Installing Reign Engine for the current user, the way Windows expects:
-//! programs in `%LOCALAPPDATA%\Programs\Reign Engine`, a Start menu entry
-//! (so Windows search finds "Reign Hub"), a Desktop shortcut, and an entry
-//! in Settings → Apps that uninstalls it. No administrator rights needed.
+//! Installing Reign Engine for the current user. On Windows that means
+//! `%LOCALAPPDATA%\Programs\Reign Engine`, Start menu and Desktop shortcuts,
+//! and an uninstall entry in Settings → Apps, with no administrator rights.
 //!
-//! `ReignSetup.exe` uses all of it; the hub uses [`place_files`] (updates),
-//! [`uninstall`] (`reign-hub.exe --uninstall`, which Settings → Apps runs)
-//! and [`set_registered_version`].
+//! `ReignSetup.exe` uses all of it. The hub uses [`place_files`] to update
+//! itself on every platform, and [`uninstall`] for `reign-hub --uninstall`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The programs an install holds.
-pub const PROGRAMS: [&str; 2] = ["reign-hub.exe", "reign-engine.exe"];
+/// The programs an install holds: the hub, then the editor.
+pub const PROGRAMS: [&str; 2] = if cfg!(windows) {
+    ["reign-hub.exe", "reign-engine.exe"]
+} else {
+    ["reign-hub", "reign-engine"]
+};
 
 /// The registry key of the Settings → Apps entry, under HKEY_CURRENT_USER.
 const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ReignEngine";
@@ -26,11 +28,9 @@ pub fn install_dir() -> PathBuf {
     base.join("Programs").join("Reign Engine")
 }
 
-/// Keeps a console program started from a windowed one from opening a
-/// console window of its own (Windows).
+/// Stops a console program started from a windowed one from opening its
+/// own console window (Windows only).
 pub fn no_console(command: Command) -> Command {
-    // Only Windows changes it: a `mut` parameter would be unused elsewhere,
-    // which fails CI's clippy on macOS and Linux.
     #[cfg(windows)]
     let command = {
         use std::os::windows::process::CommandExt;
@@ -72,10 +72,10 @@ fn powershell(script: &str, env: &[(&str, &str)]) -> Command {
     command
 }
 
-/// Writes `files` (name, contents) into `dir`. A running program can't be
-/// overwritten but can be renamed, so each old file is moved to `name.old`
-/// first and deleted after; one still running stays until
-/// [`clean_old_files`]. If any file fails, the old ones are put back.
+/// Writes `files` (name, contents) into `dir` as executables. A running
+/// program can't be overwritten but can be renamed, so each old file is
+/// moved to `name.old` first and deleted after; one still running stays
+/// until [`clean_old_files`]. If any file fails, the old ones are put back.
 pub fn place_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let old = |name: &str| dir.join(format!("{name}.old"));
@@ -91,7 +91,7 @@ pub fn place_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<(), String> {
             }
             moved.push(*name);
         }
-        if let Err(e) = std::fs::write(&target, bytes) {
+        if let Err(e) = write_program(&target, bytes) {
             result = Err(format!("can't write {name}: {e}"));
             break;
         }
@@ -105,6 +105,17 @@ pub fn place_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<(), String> {
         }
     }
     result
+}
+
+/// Writes a file that can be run (on macOS and Linux, with the execute bit).
+pub fn write_program(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
 }
 
 /// Removes the programs [`place_files`] moved aside, where nothing still
@@ -201,8 +212,8 @@ pub fn uninstall(dir: &Path) -> Result<(), String> {
         reg(&["delete", UNINSTALL_KEY, "/f"], "removing the Settings → Apps entry")?;
     }
     if dir.join(PROGRAMS[0]).is_file() {
-        // This program runs from that folder: a separate process waits for
-        // it to quit, then deletes the folder.
+        // The caller runs from this folder, so another process deletes it
+        // once the caller has quit.
         let script = "Start-Sleep -Seconds 2; Remove-Item -LiteralPath $env:REIGN_DIR -Recurse -Force -ErrorAction SilentlyContinue";
         let dir_text = dir.display().to_string();
         powershell(script, &[("REIGN_DIR", &dir_text)])

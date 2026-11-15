@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
-# Builds the release hub and editor and wraps them in "Reign Hub.app" under
-# dist/. The hub is the app's entry point; it starts the editor
-# (Contents/MacOS/reign-engine) for whichever project you open.
+# Builds "Reign Hub.app" for Apple Silicon and Intel Macs in one universal
+# app, and zips it as dist/reign-macos.zip: the file users download and the
+# hub updates itself from. The hub starts the editor (Contents/MacOS/
+# reign-engine) for whichever project you open.
 #
 # usage: scripts/bundle-macos.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release -p reign_engine -p reign_hub
+targets=(aarch64-apple-darwin x86_64-apple-darwin)
+rustup target add "${targets[@]}"
+for target in "${targets[@]}"; do
+  cargo build --release --target "$target" -p reign_engine -p reign_hub
+done
+
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 app="dist/Reign Hub.app"
-
-rm -rf "$app" "dist/Reign Engine.app"
+rm -rf "$app" dist/reign-macos.zip
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/reign-hub "$app/Contents/MacOS/reign-hub"
-cp target/release/reign-engine "$app/Contents/MacOS/reign-engine"
+
+for program in reign-hub reign-engine; do
+  lipo -create -output "$app/Contents/MacOS/$program" \
+    "target/aarch64-apple-darwin/release/$program" \
+    "target/x86_64-apple-darwin/release/$program"
+done
+cp LICENSE hub/assets/fonts/*-OFL.txt "$app/Contents/Resources/"
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,5 +43,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-cp target/release/reign-engine target/release/reign-hub dist/
-echo "Bundled $app, dist/reign-hub and dist/reign-engine"
+
+# Apple Silicon only runs signed code; an ad-hoc signature is enough for an
+# app that isn't notarised.
+codesign --force --deep --sign - "$app"
+ditto -c -k --keepParent "$app" dist/reign-macos.zip
+echo "Built $app and dist/reign-macos.zip"

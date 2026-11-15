@@ -70,7 +70,6 @@ impl Intro {
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("intro")));
         let c = screen.center();
 
-        // The wordmark and its geometry.
         let word = painter.layout_job(theme::text("REIGN", Face::Display, 168.0, TEXT, 4.0));
         let size = word.size();
         let word_pos = Pos2::new(c.x - size.x / 2.0, c.y - size.y / 2.0 - 14.0);
@@ -105,7 +104,6 @@ impl Intro {
                 painter.hline(x0..=seam_x, rule_y, Stroke::new(1.0, MUTED.gamma_multiply(0.6)));
             }
 
-            // Caption under the rule.
             let cap = ease_out(span(t, 1.0, 1.4));
             if cap > 0.0 {
                 let y = rule_y + 14.0 + (1.0 - cap) * 8.0;
@@ -126,7 +124,6 @@ impl Intro {
                 );
             }
 
-            // The seam itself.
             let h = seam_h * grow;
             if flood <= 0.0 {
                 let seam = Rect::from_center_size(Pos2::new(seam_x, seam_mid), Vec2::new(3.0, h));

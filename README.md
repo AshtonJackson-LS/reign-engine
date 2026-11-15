@@ -7,13 +7,20 @@ browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
 ## Download
 
 - **Windows:** [ReignSetup.exe](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/ReignSetup.exe)
+  ([ARM64](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/ReignSetup-arm64.exe))
   installs Reign Hub for your user (Start menu, Desktop, and Uninstall in
   Settings → Apps; no administrator rights). Windows may say "Windows
   protected your PC": click **More info → Run anyway**.
-- **macOS and Linux:** on the [Releases page](https://github.com/AshtonJackson-LS/reign-engine/releases/latest).
+- **macOS** (Apple Silicon and Intel): [reign-macos.zip](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/reign-macos.zip).
+  Move **Reign Hub** to Applications, then right-click it → **Open** the first time.
+- **Linux:** [x64](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/reign-linux-x64.tar.gz)
+  or [ARM64](https://github.com/AshtonJackson-LS/reign-engine/releases/latest/download/reign-linux-arm64.tar.gz).
+  Unpack and run `./reign-hub`.
 
-Reign Hub updates itself: a green arrow appears in its top bar when a new
-version is out. Writing your own components needs [Rust](https://rustup.rs).
+Reign Hub keeps itself up to date: it installs new releases in the
+background and shows a green arrow to restart into them. Turn on **Beta
+updates** in its Settings to get each change as soon as it's merged. Writing your own
+components needs [Rust](https://rustup.rs).
 
 Making releases: see [RELEASING.md](RELEASING.md).
 
@@ -39,8 +46,8 @@ See [docs/ENGINE.md](docs/ENGINE.md) for the scene/component/asset model.
 
 ## Reign Hub
 
-`scripts/bundle-macos.sh` builds `dist/Reign Hub.app`, which holds both the
-hub and the editor. Open it to make a new project, add an existing folder, or
+`scripts/bundle-macos.sh` builds `dist/Reign Hub.app` (universal: Apple
+Silicon and Intel), which holds both the hub and the editor. Open it to make a new project, add an existing folder, or
 open a project (double-click or Open) in the editor. The project list is kept
 in `~/Library/Application Support/Reign Engine/hub.ron`. A project folder is
 marked by `ReignProject.ron` (name and engine version).
@@ -58,12 +65,17 @@ editor to `%LOCALAPPDATA%\Programs\Reign Engine`, with shortcuts and a
 Settings → Apps entry whose Uninstall runs `reign-hub.exe --uninstall`.
 `update-reign.bat` builds it from your checkout and installs it.
 
-The hub shows a green arrow when its repository has a newer release. On
-Windows the arrow downloads the release's zip, installs it only if its
-signature matches the public key built into the hub (`hub/src/signing.rs`),
-and restarts; elsewhere it opens the release page. `REIGN_NO_UPDATE_CHECK=1`
-turns the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI
-checks. Making releases, approvals and forks: [RELEASING.md](RELEASING.md).
+When the hub starts it asks its repository's GitHub Releases for a newer
+version. If there is one, it downloads this platform's archive
+(`PACKAGE` in `hub/src/update.rs`), checks its signature against the public
+key built into the hub (`hub/src/signing.rs`), swaps the new programs in
+beside itself and shows a green arrow that restarts into them. Settings →
+**Install updates automatically** off makes it wait for a click on the arrow
+instead. **Beta updates** on also takes betas (`v0.3.0-beta.4`), which are
+built from every merge to `main`. Debug builds and builds inside a Cargo
+`target` folder never update on their own. `REIGN_NO_UPDATE_CHECK=1` turns
+the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI checks.
+How releases are made, and forks: [RELEASING.md](RELEASING.md).
 
 Each project records its engine version (••• → **Engine version…** changes
 it, from the repository's releases). A project without code opens in that
