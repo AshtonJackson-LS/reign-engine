@@ -54,6 +54,8 @@ struct Settings {
     /// Wait for a click on the update arrow instead of installing updates
     /// as soon as they're out.
     manual_updates: bool,
+    /// Take beta releases, built from every change to `main`.
+    beta_updates: bool,
 }
 
 /// What `ReignProject.ron` holds.
@@ -289,7 +291,7 @@ impl Hub {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
         let intro = if settings.skip_intro { Intro::finished() } else { Intro::new() };
-        let updater = update::Updater::new(!settings.manual_updates);
+        let updater = update::Updater::new(!settings.manual_updates, settings.beta_updates);
         Hub {
             settings,
             page: Page::Projects,
@@ -986,6 +988,13 @@ impl Hub {
             {
                 self.settings.manual_updates = !automatic;
                 self.updater.automatic = automatic;
+                self.settings.save();
+            }
+            ui.add_space(4.0);
+            let label =
+                text("Beta updates (newest features, less tested)", Face::Medium, 14.0, TEXT, -0.2);
+            if ui.checkbox(&mut self.settings.beta_updates, label).changed() {
+                self.updater.set_beta(self.settings.beta_updates);
                 self.settings.save();
             }
             ui.add_space(14.0);

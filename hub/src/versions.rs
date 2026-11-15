@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
 
-use super::update::{PACKAGE, fetch_release, parse_version, releases, sort_newest_first};
+use super::update::{PACKAGE, fetch_release, is_beta, parse_version, releases, sort_newest_first};
 
 /// Where downloaded versions go: `versions/<version>/` beside the hub.
 fn versions_dir() -> Option<PathBuf> {
@@ -64,7 +64,9 @@ impl Versions {
     /// Fetches the release list in the background, if it isn't already.
     pub fn fetch(&mut self, ctx: &egui::Context) {
         if self.releases.is_none() && self.listing.is_none() {
-            self.listing = Some(background(ctx, releases));
+            // Projects pin stable versions; old betas get deleted.
+            let stable = || releases().map(|all| all.into_iter().filter(|v| !is_beta(v)).collect());
+            self.listing = Some(background(ctx, stable));
         }
     }
 

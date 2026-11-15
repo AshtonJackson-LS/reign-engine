@@ -1,119 +1,114 @@
 # Releasing Reign
 
-How a new version of Reign gets to users. You do two things: a one-time
-setup, then **double-click `release.bat`** whenever you want to ship.
+How changes get from a pull request to everyone's Reign Hub. After a
+one-time setup, nobody runs anything on their own computer: GitHub builds,
+signs and publishes, and installed hubs update themselves.
 
 ## How it fits together
 
-- **The key belongs to the repository**, not to a person. It's stored in a
-  GitHub *environment* called `release`, and only the publishing step can
-  use it. Nobody can read it back out, not even the owner.
-- **Pushing to `main` never releases anything.** Only a version tag (like
-  `v0.2.0`) does, and `release.bat` is what makes one.
-- **Every platform builds at once:** Windows (x64 and ARM64), macOS
-  (one app for Apple Silicon and Intel) and Linux (x64 and ARM64). Nothing
-  is published unless all of them and the tests pass.
-- **Approval is optional.** If the `release` environment has required
-  reviewers, the run stops before signing until one of them clicks
-  **Approve**. Without reviewers it publishes on its own.
-- **Installed hubs update themselves.** Each one finds the new release,
-  checks its signature, installs it in the background and shows a green
-  arrow to restart.
-- **Forks never get the key.** GitHub doesn't copy secrets into forks. A fork
-  that wants its own releases makes its own key (see "Shipping your own
-  fork"), and its hubs then trust only that fork's releases.
+```
+feature branch ──PR──► main ──► beta release (v0.3.0-beta.4)  → hubs with Beta updates on
+                         │
+                         └────► "Release v0.3.0" PR ──merge──► stable release (v0.3.0) → every hub
+```
+
+1. **Work happens on branches.** Each change is a pull request into `main`.
+   CI (`ci.yml`) builds and tests it on Windows, macOS and Linux.
+2. **Label the pull request** so the release knows what it is:
+   `breaking` (old projects or scenes stop working), `feature`
+   (something new) or `fix`. Unlabelled changes count as small ones.
+3. **Every merge into `main` makes a beta.** `release.yml` tests it, builds
+   Windows (x64, ARM64), macOS (Apple Silicon and Intel) and Linux (x64,
+   ARM64), signs everything and publishes a pre-release such as
+   `v0.3.0-beta.4`. Hubs with **Settings → Beta updates** on install it.
+   Only the newest three betas are kept.
+4. **The Release PR keeps itself up to date.** The same run opens or
+   updates a pull request called **Release v0.3.0**. It holds the version
+   bump and a `CHANGELOG.md` entry listing the merged pull requests. The
+   labels decide the version: any `breaking` → next major, any `feature` →
+   next minor, otherwise next patch.
+5. **Merging the Release PR ships it.** That push builds, signs and
+   publishes `v0.3.0` as a stable release. Every hub installs it in the
+   background and shows a green arrow to restart. The README's download
+   links always point at the newest stable release.
+
+Projects stay on their engine version until someone changes it (••• →
+Engine version…). The version picker only offers stable releases.
+
+How a push is classified lives in `scripts/plan-release.sh`; the Release PR
+is written by `scripts/update-release-pr.sh`.
 
 ## One-time setup (the repository owner)
 
-Only the owner can do these, in the repository's **Settings**:
+In the repository's **Settings**:
 
-1. **Add collaborators** who will make releases: **Collaborators → Add
-   people**.
+1. **Let Actions open the Release PR:** **Actions → General → Workflow
+   permissions**: tick **Allow GitHub Actions to create and approve pull
+   requests**, and save.
 2. **Make the `release` environment:** **Environments → New environment**,
-   name it `release`.
-3. **Approval (optional):** to review each release before it goes out, tick
-   **Required reviewers** on that environment and add yourself. Leave it
-   off for releases that publish as soon as they're built. If other people
-   can push tags, turn it on.
-4. **Add the key to the environment:** on the same page, under **Environment
-   secrets → Add environment secret**, name it `REIGN_RELEASE_KEY`, paste the
-   key's one line as the value, and save. Put it here, not under "Repository
-   secrets": then only an approved release can use it.
-5. **Back the key file up** somewhere safe, like a password manager, and
-   never commit it or send it in a message. Whoever has it can push updates
-   to every Reign user. If it's lost, see "Lost key" below.
-
-GitHub Actions is already set up (`.github/workflows/release.yml`).
+   name it `release`. Leave **Required reviewers** off: merging the Release
+   PR is the approval, and with reviewers on every beta would wait for one.
+3. **Add the signing key:** on that environment, **Add environment secret**
+   named `REIGN_RELEASE_KEY`, with the key file's one line as the value. Back
+   the key file up somewhere safe (a password manager) and never commit it:
+   whoever has it can push updates to every Reign user. No key yet? Make one
+   with `cargo run -p reign_hub --bin reign-release -- keygen C:\somewhere\reign-release.key`.
+4. **Protect `main`:** **Branches → Add branch ruleset** (or **Add rule**)
+   for `main`: require a pull request before merging, and require the
+   status checks `Build and test (ubuntu-latest)`, `Build and test
+   (windows-latest)`, `Build and test (macos-latest)` and `License and
+   advisory check`. Then nothing reaches users without passing CI.
+5. **Add collaborators** under **Collaborators → Add people**. Anyone who
+   can merge into `main` can ship betas, and merge the Release PR.
 
 ## Every release
 
-1. Merge what you want to ship into `main`, then `git checkout main` and
-   `git pull`.
-2. Double-click **`release.bat`**. It asks for the new version (press Enter to
-   take the suggestion) and checks with you before doing anything. Then it:
-   - puts the version in `Cargo.toml`,
-   - commits and tags it (for example `v0.2.0`),
-   - pushes both to GitHub.
-3. GitHub runs the tests and builds all five platforms side by side (about
-   20 minutes). Watch it under the repository's **Actions** tab.
-4. **If approval is on**, the run stops at "Sign and publish" and GitHub
-   emails the approvers. They open the run and click **Review deployments →
-   release → Approve and deploy**. Rejecting it ends the release with nothing
-   published.
-5. GitHub signs every archive and publishes the release with all of them.
-   New users get it from the README's download links; installed hubs pick it
-   up the next time they open. Projects stay on their engine version until
-   someone changes it (••• → Engine version…).
+1. Merge pull requests into `main` as usual. Each one becomes a beta within
+   about 20 minutes (watch the **Actions** tab).
+2. When you want to ship, open the **Release v…** pull request, check the
+   changelog, fix any labels on the merged pull requests if the version
+   looks wrong (the PR updates on the next merge), and merge it.
 
-### Picking the version number
-
-| You changed… | Example | Bump |
-| --- | --- | --- |
-| Only bug fixes | 0.2.0 → 0.2.1 | last number |
-| Added features | 0.2.1 → 0.3.0 | middle number |
-| Broke old projects or scenes | 0.3.0 → 1.0.0 | first number |
+That's all. To check a beta yourself first, turn on **Beta updates** in your
+hub's Settings.
 
 ## If something goes wrong
 
 | Problem | Fix |
 | --- | --- |
-| `release.bat` says "pushing failed" | You don't have write access yet (one-time setup, step 1). Your commit and tag are kept: once you have access, run the `git push` line it printed. |
-| The run waits at "Sign and publish" | It's waiting for approval (Every release, step 4). Approve it, or untick **Required reviewers** on the `release` environment so later releases don't wait. |
-| The run fails at "Sign" with "No REIGN_RELEASE_KEY" | The `release` environment has no `REIGN_RELEASE_KEY` (one-time setup, step 4). Add it, then on the failed run click **Re-run failed jobs**. |
-| The run fails at "Sign" with "doesn't match" | The secret isn't the partner of the key the hub trusts. Paste the key file's line into the secret again, then re-run. In a fork, check the `REIGN_UPDATE_PUBKEY` variable. |
-| A test or a build fails | Nothing was published. Fix it on `main`, then run `release.bat` again with the next version (for example 0.2.1). For a failure that wasn't the code's fault (a GitHub hiccup), **Re-run failed jobs** instead. |
+| No Release PR appears | Setup step 1 is missing. Then re-run the latest **Release** run (**Actions → Release → Re-run all jobs**). |
+| The run fails at "Sign" with "No REIGN_RELEASE_KEY" | Setup step 3. Add the secret, then **Re-run failed jobs**. |
+| The run fails at "Sign" with "doesn't match" | The secret isn't the partner of the public key the hub trusts. Paste the key file's line into the secret again and re-run. In a fork, check the `REIGN_UPDATE_PUBKEY` variable. |
+| The run waits at "Sign and publish" | The `release` environment has required reviewers. Approve the run, or turn reviewers off (setup step 2). |
+| A test or build fails | Nothing was published. Fix it in a new pull request; its merge makes the next beta. A GitHub hiccup instead? **Re-run failed jobs**. |
+| The Release PR has no checks | Its CI run is started by the workflow; look under **Actions → CI** for the `release/next` branch, or run CI there by hand (**Run workflow**). |
+| The version in the Release PR is wrong | Fix the labels on the merged pull requests; the next merge into `main` rewrites the Release PR. |
 | Users see "Windows protected your PC" | Normal for an installer that isn't code-signed: **More info → Run anyway**. Code signing removes it (SignPath offers it free to open-source projects). |
-| Lost or leaked key | Make a new key: `cargo run -p reign_hub --bin reign-release -- keygen C:\somewhere\new.key`. Put the printed public key in `OFFICIAL_PUBLIC_KEY` in `hub/src/signing.rs`, replace the environment secret, and release. Hubs from before can't verify the new key, so their users reinstall once with ReignSetup.exe. |
+| Lost or leaked key | Make a new key with `keygen` (setup step 3). Put the printed public key in `OFFICIAL_PUBLIC_KEY` in `hub/src/signing.rs`, replace the environment secret, and release. Hubs from before can't verify the new key, so their users reinstall once. |
 
 ## Shipping your own fork
 
-A fork starts with no key, and its release runs stop with steps to follow.
-A hub built from an unchanged fork still follows and trusts the official
-releases. To give your fork its own releases:
+A fork starts with no key, so its runs stop at "Sign". To give it its own
+releases:
 
 1. Make a key, outside the repository:
    `cargo run -p reign_hub --bin reign-release -- keygen C:\somewhere\my-reign.key`.
-   It prints your public key and these same steps.
-2. In your fork's **Settings → Environments**, make `release` (add required
-   reviewers if you want approvals). Add the environment secret
-   `REIGN_RELEASE_KEY`: the line in your key file.
+   It prints your public key.
+2. Do the one-time setup above in your fork, with that key.
 3. In **Settings → Secrets and variables → Actions → Variables**, add the
-   repository variable `REIGN_UPDATE_PUBKEY`: the public key from step 1.
-4. Run `release.bat`.
+   repository variable `REIGN_UPDATE_PUBKEY`: your public key.
 
-No code changes: the workflow builds your hubs with your repository's name
-and public key, so they follow and trust only your releases (and official
-hubs never trust yours). Building your hub by hand instead? Set
+The workflow builds your hubs with your repository's name and public key, so
+they follow and trust only your releases. Building a hub by hand instead? Set
 `REIGN_UPDATE_REPO=you/your-fork` and `REIGN_UPDATE_PUBKEY=<your public key>`
 first.
 
-## Testing a build without releasing
+## Building without releasing
 
 - **`update-reign.bat`** builds everything from your folder and installs it
-  on this computer, the same way `ReignSetup.exe` does for users.
+  on this computer, the way `ReignSetup.exe` does for users.
 - **`scripts\build-setup.ps1`** builds `dist\ReignSetup.exe` and the update
-  zip, so you can try the installer or send it to someone (`-Arch arm64` for
-  ARM PCs). On a Mac, `scripts/bundle-macos.sh`; on Linux,
-  `scripts/package-linux.sh`.
-- **`scripts\release.ps1 -DryRun`** does a whole release locally (version,
-  commit, tag) without pushing. It prints how to undo it.
+  zip (`-Arch arm64` for ARM PCs). On a Mac, `scripts/bundle-macos.sh`; on
+  Linux, `scripts/package-linux.sh`.
+- **`scripts/plan-release.sh`** prints what the next push to `main` would
+  release, from your local history (without `gh`, it can't read labels).

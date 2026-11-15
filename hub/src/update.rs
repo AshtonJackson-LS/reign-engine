@@ -2,6 +2,10 @@
 //! starts, installs it in the background, then offers a restart. The Engine
 //! version dialog uses the same release list and downloads.
 //!
+//! Releases are stable (`v1.2.3`) or beta (`v1.2.3-beta.4`, built from every
+//! merge to `main`). A hub only takes betas when its Beta updates setting is
+//! on.
+//!
 //! Each release has one archive per platform ([`PACKAGE`]) and a signature
 //! made with the release key (`signing.rs`). Nothing is unpacked unless the
 //! signature checks out. Downloads use the system's `curl` and `tar`, which
@@ -66,14 +70,25 @@ pub struct Updater {
     pub state: State,
     /// Install a newer release as soon as it's found.
     pub automatic: bool,
+    /// Take beta releases too.
+    beta: bool,
     rx: Option<Receiver<Message>>,
     /// The new hub, once an update is installed.
     new_hub: Option<PathBuf>,
 }
 
 impl Updater {
-    pub fn new(automatic: bool) -> Self {
-        Updater { state: State::Idle, automatic, rx: None, new_hub: None }
+    pub fn new(automatic: bool, beta: bool) -> Self {
+        Updater { state: State::Idle, automatic, beta, rx: None, new_hub: None }
+    }
+
+    /// Switches between stable and beta releases, checking again if
+    /// nothing is on its way.
+    pub fn set_beta(&mut self, beta: bool) {
+        self.beta = beta;
+        if self.rx.is_none() && matches!(self.state, State::Checked | State::Available(_)) {
+            self.state = State::Idle;
+        }
     }
 
     /// Asks GitHub for the latest release in the background (once).
@@ -125,7 +140,7 @@ impl Updater {
         self.rx = None;
         match message {
             Message::Latest(Ok(releases)) => {
-                let latest = releases.into_iter().next()?;
+                let latest = releases.into_iter().find(|v| self.beta || !is_beta(v))?;
                 if is_newer(&latest, super::VERSION) {
                     self.state = State::Available(latest);
                     if self.automatic && can_install_here() {
@@ -163,10 +178,28 @@ fn can_install_here() -> bool {
     PACKAGE.is_some() && !cfg!(debug_assertions) && !in_cargo_target
 }
 
-/// Numeric parts of `1.2.3`. A pre-release like `1.2.3-beta` gives `None`,
-/// so it's never offered.
-pub fn parse_version(v: &str) -> Option<Vec<u64>> {
-    v.split('.').map(|part| part.parse().ok()).collect()
+/// A release version, ordered so that `1.2.3-beta.4` comes after
+/// `1.2.3-beta.3` and before `1.2.3`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    numbers: Vec<u64>,
+    /// The beta number, or `u64::MAX` for a stable release.
+    beta: u64,
+}
+
+/// Reads `1.2.3` or `1.2.3-beta.4`. Anything else, like `1.2.3-rc1`, gives
+/// `None` and is never offered.
+pub fn parse_version(v: &str) -> Option<Version> {
+    let (numbers, beta) = match v.split_once("-beta.") {
+        Some((numbers, beta)) => (numbers, beta.parse().ok()?),
+        None => (v, u64::MAX),
+    };
+    let numbers = numbers.split('.').map(|part| part.parse().ok()).collect::<Option<_>>()?;
+    Some(Version { numbers, beta })
+}
+
+pub fn is_beta(v: &str) -> bool {
+    parse_version(v).is_some_and(|v| v.beta != u64::MAX)
 }
 
 pub fn is_newer(candidate: &str, current: &str) -> bool {
@@ -178,7 +211,7 @@ pub fn sort_newest_first(versions: &mut Vec<String>) {
     versions.dedup();
 }
 
-/// Release versions in [`REPO`], newest first, without pre-releases.
+/// Release versions in [`REPO`], stable and beta, newest first.
 pub fn releases() -> Result<Vec<String>, String> {
     let output = system_tool("curl")
         .args(["-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json"])
@@ -287,17 +320,27 @@ mod tests {
         assert!(is_newer("0.10.0", "0.9.0"));
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("0.1.0", "0.2.0"));
-        assert!(!is_newer("0.2.0-beta", "0.1.0"));
+        assert!(!is_newer("0.2.0-rc1", "0.1.0"), "only betas are pre-releases we know");
+    }
+
+    #[test]
+    fn a_beta_comes_between_the_release_before_and_its_own() {
+        assert!(is_newer("0.2.0-beta.1", "0.1.0"));
+        assert!(is_newer("0.2.0-beta.10", "0.2.0-beta.9"));
+        assert!(is_newer("0.2.0", "0.2.0-beta.10"));
+        assert!(!is_newer("0.2.0-beta.3", "0.2.0"));
+        assert!(is_beta("0.2.0-beta.3") && !is_beta("0.2.0"));
     }
 
     #[test]
     fn reads_release_tags_from_github_json() {
         let json = r#"[{"url":"x","tag_name":"v0.2.0","name":"Reign v0.2.0"},
-            {"tag_name": "v0.10.1"}, {"tag_name":"v0.3.0-beta"}, {"tag_name":"v0.1.0"}]"#;
+            {"tag_name": "v0.10.1"}, {"tag_name":"v0.3.0-rc1"},
+            {"tag_name":"v0.10.2-beta.3"}, {"tag_name":"v0.1.0"}]"#;
         let mut tags = tag_names(json);
-        assert_eq!(tags, ["0.2.0", "0.10.1", "0.1.0"]);
+        assert_eq!(tags, ["0.2.0", "0.10.1", "0.10.2-beta.3", "0.1.0"]);
         sort_newest_first(&mut tags);
-        assert_eq!(tags, ["0.10.1", "0.2.0", "0.1.0"]);
+        assert_eq!(tags, ["0.10.2-beta.3", "0.10.1", "0.2.0", "0.1.0"]);
     }
 
     #[test]

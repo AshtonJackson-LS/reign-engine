@@ -11,3 +11,6 @@ Thumbs.db
 
 # Release signing keys never belong in the repository
 *.key
+
+# Written by scripts/plan-release.sh
+/release-notes.md

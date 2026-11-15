@@ -1,10 +1,11 @@
 name: CI
 
+# Runs on every pull request. Pushes to main run it through release.yml,
+# which only publishes when it passes.
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

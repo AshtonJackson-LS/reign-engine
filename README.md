@@ -18,7 +18,8 @@ browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
   Unpack and run `./reign-hub`.
 
 Reign Hub keeps itself up to date: it installs new releases in the
-background and shows a green arrow to restart into them. Writing your own
+background and shows a green arrow to restart into them. Turn on **Beta
+updates** in its Settings to get each change as soon as it's merged. Writing your own
 components needs [Rust](https://rustup.rs).
 
 Making releases: see [RELEASING.md](RELEASING.md).
@@ -70,9 +71,11 @@ version. If there is one, it downloads this platform's archive
 key built into the hub (`hub/src/signing.rs`), swaps the new programs in
 beside itself and shows a green arrow that restarts into them. Settings →
 **Install updates automatically** off makes it wait for a click on the arrow
-instead. Debug builds and builds inside a Cargo `target` folder never update
-on their own. `REIGN_NO_UPDATE_CHECK=1` turns the check off;
-`REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI checks. Making releases, approvals and forks: [RELEASING.md](RELEASING.md).
+instead. **Beta updates** on also takes betas (`v0.3.0-beta.4`), which are
+built from every merge to `main`. Debug builds and builds inside a Cargo
+`target` folder never update on their own. `REIGN_NO_UPDATE_CHECK=1` turns
+the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI checks.
+How releases are made, and forks: [RELEASING.md](RELEASING.md).
 
 Each project records its engine version (••• → **Engine version…** changes
 it, from the repository's releases). A project without code opens in that
