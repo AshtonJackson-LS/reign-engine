@@ -5,11 +5,11 @@
 //! Building the game is the editor's job (`code.rs` runs cargo); this is
 //! the part after, which needs no window.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use reign::assets::{AssetKind, Meta, pack_dir, read_pack};
+use reign_build::progress::{Output, read_output};
 use reign_build::project;
 
 use crate::player::{GAME_FILE, GameInfo, PACK_FILE, choose_scene};
@@ -63,20 +63,14 @@ pub fn prepare(root: &Path, title: &str) -> Result<(String, bool), String> {
     Ok((name, had_code))
 }
 
-/// Builds the game with `--release`, handing each line cargo prints to
-/// `line`. Blocks until cargo is done.
-pub fn build(
-    root: &Path,
-    crate_name: &str,
-    mut line: impl FnMut(String),
-) -> Result<PathBuf, String> {
+/// Builds the game with `--release`, handing each line cargo prints, and
+/// each progress update, to `output`. Blocks until cargo is done.
+pub fn build(root: &Path, crate_name: &str, output: impl FnMut(Output)) -> Result<PathBuf, String> {
     let mut command = project::game_build_command(root, crate_name);
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("can't run cargo: {e}"))?;
     if let Some(stderr) = child.stderr.take() {
-        for l in BufReader::new(stderr).lines().map_while(Result::ok) {
-            line(l);
-        }
+        read_output(stderr, output);
     }
     if child.wait().is_ok_and(|s| s.success()) {
         Ok(project::game_path(root, crate_name))
@@ -88,7 +82,11 @@ pub fn build(
 /// The whole export, start to end, blocking: what `--export` does.
 pub fn export_project(root: &Path, title: &str, out_dir: &Path) -> Result<PathBuf, String> {
     let (name, _) = prepare(root, title)?;
-    let exe = build(root, &name, |l| eprintln!("{l}"))?;
+    let exe = build(root, &name, |output| {
+        if let Output::Line(line) = output {
+            eprintln!("{line}");
+        }
+    })?;
     assemble(&Export {
         title: title.to_owned(),
         crate_name: name,

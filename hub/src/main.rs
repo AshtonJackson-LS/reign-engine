@@ -237,10 +237,13 @@ struct HubBuild {
     started: std::time::Instant,
     first_error: Option<String>,
     hide_progress: bool,
+    /// How far cargo says it has got; `None` until it says.
+    progress: Option<reign_build::progress::BuildProgress>,
 }
 
 enum BuildEvent {
     Line(String),
+    Progress(reign_build::progress::BuildProgress),
     Done(bool),
 }
 
@@ -424,11 +427,14 @@ impl Hub {
             Ok(mut child) => {
                 let stderr = child.stderr.take();
                 std::thread::spawn(move || {
-                    use std::io::BufRead;
+                    use reign_build::progress::{Output, read_output};
                     if let Some(stderr) = stderr {
-                        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
-                            let _ = tx.send(BuildEvent::Line(line));
-                        }
+                        read_output(stderr, |output| {
+                            let _ = tx.send(match output {
+                                Output::Line(line) => BuildEvent::Line(line),
+                                Output::Progress(progress) => BuildEvent::Progress(progress),
+                            });
+                        });
                     }
                     let ok = child.wait().is_ok_and(|s| s.success());
                     let _ = tx.send(BuildEvent::Done(ok));
@@ -441,6 +447,7 @@ impl Hub {
                         started: std::time::Instant::now(),
                         first_error: None,
                         hide_progress: false,
+                        progress: None,
                     },
                 );
                 self.info(format!("Compiling {}…", project_name(path)));
@@ -464,6 +471,7 @@ impl Hub {
                             build.first_error = Some(line.trim().to_owned());
                         }
                     }
+                    BuildEvent::Progress(progress) => build.progress = Some(progress),
                     BuildEvent::Done(ok) => finished.push((path.clone(), ok)),
                 }
             }
@@ -1711,9 +1719,55 @@ impl eframe::App for Hub {
                     Some((msg, false)) => (msg.clone(), MUTED),
                     None => ("Ready".to_owned(), FAINT),
                 };
+                // A project building: how many of cargo's steps are done.
+                let building = self
+                    .building
+                    .values()
+                    .filter_map(|b| b.progress.as_ref())
+                    .find(|p| p.total > 0);
                 ui.horizontal(|ui| {
                     ui.label(text("●", Face::Bold, 9.0, color, 0.0));
                     ui.label(text(msg, Face::Medium, 12.0, color, -0.1));
+                    if let Some(progress) = building {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // A fixed slot for the count, so the bar doesn't
+                            // shift when it gains a digit.
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(88.0, 16.0),
+                                Layout::right_to_left(Align::Center),
+                                |ui| {
+                                    // The slot shrinks to its text unless told not to.
+                                    ui.set_min_size(Vec2::new(88.0, 16.0));
+                                    ui.label(text(
+                                        format!("{} / {}", progress.done, progress.total),
+                                        Face::Medium,
+                                        12.0,
+                                        MUTED,
+                                        -0.1,
+                                    ))
+                                    .on_hover_text(
+                                        if progress.building.is_empty() {
+                                            "Cargo's build steps: the engine, its libraries and \
+                                         your scripts."
+                                                .to_owned()
+                                        } else {
+                                            format!("Building: {}", progress.building)
+                                        },
+                                    );
+                                },
+                            );
+                            // The track is the window's own colour unless told.
+                            ui.scope(|ui| {
+                                ui.visuals_mut().extreme_bg_color = HAIRLINE;
+                                ui.add(
+                                    egui::ProgressBar::new(progress.fraction())
+                                        .desired_width(240.0)
+                                        .desired_height(10.0)
+                                        .fill(GOOD),
+                                );
+                            });
+                        });
+                    }
                 });
             });
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {

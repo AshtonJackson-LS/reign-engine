@@ -212,6 +212,9 @@ When code changes and the editor is in front, it rebuilds in the
 background (output in the Console), saves the scene, and reopens on it.
 Ctrl/Cmd+R does it by hand. Reign Hub builds a project with code before
 opening it; the first build compiles the engine and takes a few minutes.
+While it builds, the hub's status bar shows a bar and `141 / 324` (cargo's
+own count of finished build steps), and the editor's toolbar shows the same
+as `Compiling 141 of 324` while it rebuilds or exports.
 Pick the code editor (VS Code, RustRover, Cursor, Zed, Sublime Text) in the
 hub's About page or Scripts → Code editor. Projects build against this
 checkout (`REIGN_ENGINE_SOURCE` overrides it). Where there's no checkout (a

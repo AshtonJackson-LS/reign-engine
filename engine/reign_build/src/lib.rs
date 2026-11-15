@@ -22,9 +22,11 @@
 //!
 //! This crate has no dependencies, so it builds in a moment. It also holds
 //! the tooling Reign Hub and the editor share: setting a project up for code
-//! ([`project`]) and opening it in a code editor ([`ide`]).
+//! ([`project`]), opening it in a code editor ([`ide`]) and reading how far a
+//! build is ([`progress`]).
 
 pub mod ide;
+pub mod progress;
 pub mod project;
 pub mod release;
 

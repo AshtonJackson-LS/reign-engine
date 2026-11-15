@@ -12,7 +12,6 @@
 //! `export.rs`). That needs the project to be a crate, so a project without
 //! code is set up as one first.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -20,15 +19,27 @@ use std::time::{Duration, Instant, SystemTime};
 
 use reign::editor::{EditorRequests, PlayMode, egui};
 use reign_build::ide;
+use reign_build::progress::{BuildProgress, Output, read_output};
 use reign_build::project::{self, Template};
 
 use crate::export::{self, Export, Layout};
 
 enum BuildEvent {
     Line(String),
+    /// Cargo's count of finished build steps.
+    Progress(BuildProgress),
     Done(bool),
     /// An export finished packing and copying: the app or folder it made.
     Exported(Result<PathBuf, String>),
+}
+
+impl From<Output> for BuildEvent {
+    fn from(output: Output) -> Self {
+        match output {
+            Output::Line(line) => BuildEvent::Line(line),
+            Output::Progress(progress) => BuildEvent::Progress(progress),
+        }
+    }
 }
 
 struct Build {
@@ -36,6 +47,8 @@ struct Build {
     started: Instant,
     /// The last line cargo printed, for the toolbar.
     last: String,
+    /// How far cargo says it has got; `None` until it says.
+    progress: Option<BuildProgress>,
     /// Building the game for Export Game, not this project's editor.
     export: bool,
 }
@@ -156,9 +169,9 @@ impl Code {
                 let stderr = child.stderr.take();
                 std::thread::spawn(move || {
                     if let Some(stderr) = stderr {
-                        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                            let _ = tx.send(BuildEvent::Line(line));
-                        }
+                        read_output(stderr, |output| {
+                            let _ = tx.send(BuildEvent::from(output));
+                        });
                     }
                     let ok = child.wait().is_ok_and(|s| s.success());
                     let _ = tx.send(BuildEvent::Done(ok));
@@ -167,6 +180,7 @@ impl Code {
                     rx,
                     started: Instant::now(),
                     last: "Starting cargo".into(),
+                    progress: None,
                     export: false,
                 });
                 self.failed = false;
@@ -212,8 +226,8 @@ impl Code {
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let built = export::build(&root, &export.crate_name, |l| {
-                let _ = tx.send(BuildEvent::Line(l));
+            let built = export::build(&root, &export.crate_name, |output| {
+                let _ = tx.send(BuildEvent::from(output));
             });
             let result = built.and_then(|exe| {
                 export.exe = exe;
@@ -228,6 +242,7 @@ impl Code {
             rx,
             started: Instant::now(),
             last: "Starting cargo".into(),
+            progress: None,
             export: true,
         });
         self.failed = false;
@@ -275,6 +290,7 @@ impl Code {
                         build.last = text.to_owned();
                     }
                 }
+                BuildEvent::Progress(progress) => build.progress = Some(progress),
                 BuildEvent::Done(ok) => done = Some(ok),
                 BuildEvent::Exported(result) => exported = Some(result),
             }
@@ -445,17 +461,30 @@ impl Code {
         });
 
         if let Some(build) = &self.build {
-            ui.add(egui::Spinner::new());
             let secs = build.started.elapsed().as_secs();
-            let mut last = build.last.clone();
-            if last.len() > 60 {
-                last.truncate(60);
-                last.push('…');
-            }
             let doing = if build.export { "Exporting" } else { "Compiling" };
-            ui.weak(format!("{doing} {secs}s · {last}")).on_hover_text(
-                "The first build of a project takes a few minutes; later ones are quick.",
-            );
+            let tip = "The first build of a project takes a few minutes; later ones are quick.";
+            match build.progress.as_ref().filter(|p| p.total > 0) {
+                // Cargo's own count of build steps: a bar that fills.
+                Some(progress) => {
+                    ui.add(
+                        egui::ProgressBar::new(progress.fraction())
+                            .desired_width(150.0)
+                            .text(format!("{doing} {}", progress.count())),
+                    )
+                    .on_hover_text(format!("{tip}\n\nBuilding: {}", progress.building));
+                    ui.weak(format!("{secs}s"));
+                }
+                None => {
+                    ui.add(egui::Spinner::new());
+                    let mut last = build.last.clone();
+                    if last.len() > 60 {
+                        last.truncate(60);
+                        last.push('…');
+                    }
+                    ui.weak(format!("{doing} {secs}s · {last}")).on_hover_text(tip);
+                }
+            }
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         } else if self.failed {
             ui.colored_label(egui::Color32::LIGHT_RED, "Build failed: see Console");
