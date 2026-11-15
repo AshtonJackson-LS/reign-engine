@@ -8,7 +8,7 @@
 //! while a 2x or 3x hero or showpiece prop keeps its finer detail, and the
 //! camera can move by less than a world pixel. The target is HDR: lights,
 //! bloom, light shafts and grading are applied as it's copied to the window
-//! (see [`post`]).
+//! (see the `post` module).
 //!
 //! Menus and HUD go on the [`Layer::Overlay`], drawn over the finished
 //! frame so lighting, bloom and grading leave them as drawn.

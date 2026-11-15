@@ -28,12 +28,16 @@ pub fn install_dir() -> PathBuf {
 
 /// Keeps a console program started from a windowed one from opening a
 /// console window of its own (Windows).
-pub fn no_console(mut command: Command) -> Command {
+pub fn no_console(command: Command) -> Command {
+    // Only Windows changes it: a `mut` parameter would be unused elsewhere,
+    // which fails CI's clippy on macOS and Linux.
     #[cfg(windows)]
-    {
+    let command = {
         use std::os::windows::process::CommandExt;
+        let mut command = command;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+        command
+    };
     command
 }
 

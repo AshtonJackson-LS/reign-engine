@@ -9,10 +9,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod intro;
+mod launch;
 mod signing;
 mod snapshot;
 mod theme;
@@ -247,7 +248,7 @@ struct Hub {
     search: String,
     new_project: Option<NewProject>,
     /// Editors the hub started, by project path.
-    running: HashMap<PathBuf, Child>,
+    running: HashMap<PathBuf, launch::Launched>,
     /// Projects whose editor is being built.
     building: HashMap<PathBuf, HubBuild>,
     /// Projects whose last build failed, with the first error.
@@ -368,7 +369,8 @@ impl Hub {
                 "Can't find the reign-engine editor next to the hub (set REIGN_EDITOR to its path)",
             );
         };
-        match command.arg(path).spawn() {
+        command.arg(path);
+        match launch::Launched::spawn(command) {
             Ok(child) => {
                 self.running.insert(path.to_owned(), child);
                 self.remember(path, true);
@@ -452,7 +454,9 @@ impl Hub {
             }
             let Some(name) = project::read_crate_name(&path) else { continue };
             let exe = project::editor_path(&path, &name);
-            match no_console(Command::new(&exe)).arg(&path).spawn() {
+            let mut command = no_console(Command::new(&exe));
+            command.arg(&path);
+            match launch::Launched::spawn(command) {
                 Ok(child) => {
                     let secs = build.started.elapsed().as_secs();
                     self.running.insert(path.clone(), child);
@@ -499,9 +503,25 @@ impl Hub {
         });
     }
 
-    /// Forgets editors that have quit.
+    /// Forgets editors that have quit, and says why when one quit with an
+    /// error (it has no console to say so itself).
     fn reap(&mut self) {
-        self.running.retain(|_, child| matches!(child.try_wait(), Ok(None)));
+        let mut exits = Vec::new();
+        self.running.retain(|path, editor| match editor.poll() {
+            None => true,
+            Some(exit) => {
+                exits.push((path.clone(), exit));
+                false
+            }
+        });
+        for (path, exit) in exits {
+            if let Some(message) = exit.message(&project_name(&path)) {
+                for line in &exit.tail {
+                    log::warn!("{}: {line}", project_name(&path));
+                }
+                self.error(message);
+            }
+        }
     }
 
     // ------------------------------------------------------------- top bar

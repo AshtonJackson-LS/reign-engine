@@ -43,7 +43,7 @@ pub struct GameInfo {
     /// The window's title.
     pub title: String,
     /// The start scene's asset path, such as `scenes/main.scene.ron`. Empty
-    /// picks one with [`choose_scene`].
+    /// picks one with `choose_scene`.
     pub scene: String,
 }
 

@@ -71,6 +71,27 @@ version's editor, downloaded into `versions/` beside the hub when it isn't
 the hub's own. A project with code builds its editor against what its
 Cargo.toml names: a release's git tag, or a local engine checkout.
 
+The hub starts a project's editor with the project folder as its only
+argument. A game that writes its own editor binary around
+`reign::editor::run_editor` and reads its own flags should read them from
+`reign::editor::game_args()`, which leaves that folder out; otherwise the
+editor exits on an argument it doesn't know.
+If an editor the hub started exits with an error, the hub's status bar
+says so with the most telling line of its output (it has no console of its
+own); the rest goes to the hub's log.
+
+The hub (and the editor's Reload and Export Game) builds a project with
+plain `cargo build --bin <crate>-editor` / `--bin <crate>-game`. A project
+that keeps its editor behind a Cargo feature names the features in its
+`Cargo.toml`, and Cargo is asked where the build lands, so a project inside
+a larger workspace or with its own `target-dir` works too:
+
+```toml
+[package.metadata.reign]
+editor-features = ["editor"]   # what the hub and Reload build the editor with
+game-features = []             # what Export Game builds the game with
+```
+
 ## Running the editor directly
 
 ```bash

@@ -98,6 +98,9 @@ The editor can't yet (see the roadmap).
 | Script reload and Export Game | `app/src/code.rs`, `app/src/export.rs` |
 | Editor panels | `engine/reign_editor/src/` |
 | The project launcher | `hub/src/main.rs` |
+| How the hub starts editors and reports one that quits with an error | `hub/src/launch.rs` |
+| Editor fullscreen (F11), Fill, how keys reach the game | `engine/reign_editor/src/shell.rs` (`route_key`, `fullscreen_sync`, `game_view_scale`) |
+| How projects build: features, target dir, engine version rewrite | `engine/reign_build/src/project.rs` (`build_features`, `target_dir`, `set_project_engine`) |
 | Hub updates and release signing | `hub/src/update.rs`, `hub/src/signing.rs`, `.github/workflows/release.yml` |
 | Engine versions per project (picker, downloads) | `hub/src/versions.rs`, `hub/src/main.rs` (`version_dialog`, `open_choice_dialog`) |
 | The Windows installer, uninstall, Settings → Apps entry | `installer/` (`ReignSetup.exe`), `scripts/build-setup.ps1` |

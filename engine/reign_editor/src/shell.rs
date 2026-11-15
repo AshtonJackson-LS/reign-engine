@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
@@ -11,7 +11,7 @@ use reign_app::winit::application::ApplicationHandler;
 use reign_app::winit::event::{ElementState, WindowEvent};
 use reign_app::winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
-use reign_app::winit::window::{Window, WindowId};
+use reign_app::winit::window::{Fullscreen, Window, WindowId};
 use reign_app::{Ctx, Frame, Pads, TickCtx};
 use reign_core::checksum;
 use reign_render::{Renderer, VIEW_HEIGHT, VIEW_WIDTH, view_scale, wgpu};
@@ -91,6 +91,14 @@ struct Panels {
     status: Option<String>,
     /// Ctrl (Cmd on macOS) is held.
     command: bool,
+    /// The Game view fills a borderless fullscreen window (F11 or the
+    /// toolbar's Fullscreen button): no toolbar, no other panels.
+    game_fullscreen: bool,
+    /// When fullscreen began, for the exit hint shown at its start.
+    fullscreen_since: Option<Instant>,
+    /// The Game view fills its space even where no whole-number scale fits
+    /// (the toolbar's Fill), at the cost of slightly uneven pixels.
+    fill_view: bool,
     /// The space the Game tab had last frame, in points; sizes the frame.
     game_space: Option<Rect>,
     /// Where the frame was shown last frame, in points.
@@ -120,6 +128,12 @@ struct Panels {
 }
 
 impl Panels {
+    /// Switches between the full editor and the Game view alone.
+    fn toggle_fullscreen(&mut self) {
+        self.game_fullscreen = !self.game_fullscreen;
+        self.fullscreen_since = self.game_fullscreen.then(Instant::now);
+    }
+
     /// The Game view in physical window pixels: x, y, width, height.
     fn game_rect_px(&self, ppp: f32) -> Option<[f32; 4]> {
         self.game_image.map(|r| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp])
@@ -146,6 +160,11 @@ struct Session<A: EditorApp> {
     egui_wgpu: egui_wgpu::Renderer,
     /// The Game view's texture in egui and its size in pixels.
     game_texture: Option<(egui::TextureId, (u32, u32))>,
+    /// The texture is sampled smoothly: it's being shrunk to fill.
+    game_texture_smooth: bool,
+    /// The fullscreen state last given to the window, and when.
+    fullscreen_applied: bool,
+    fullscreen_applied_at: Instant,
     dock: DockState<Tab>,
     panels: Panels,
     history: History,
@@ -233,6 +252,9 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             egui_winit,
             egui_wgpu,
             game_texture: None,
+            game_texture_smooth: false,
+            fullscreen_applied: false,
+            fullscreen_applied_at: Instant::now(),
             dock,
             panels: Panels {
                 selected: None,
@@ -246,6 +268,9 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
                 rename: None,
                 status: None,
                 command: false,
+                game_fullscreen: false,
+                fullscreen_since: None,
+                fill_view: false,
                 game_space: None,
                 game_image: None,
                 game_focused: false,
@@ -344,23 +369,21 @@ impl<A: EditorApp> Session<A> {
                 )
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Released {
-                    return (true, true);
+                let state = KeyState {
+                    pressed: event.state == ElementState::Pressed,
+                    repeat: event.repeat,
+                    command: self.panels.command,
+                    game_has_keyboard: self.play.mode() == PlayMode::Playing
+                        && (self.panels.game_focused || self.panels.cursor_over_game(ppp))
+                        && !self.egui.egui_wants_keyboard_input(),
+                };
+                match route_key(event.physical_key, state) {
+                    KeyRoute::ToggleFullscreen => {
+                        self.panels.toggle_fullscreen();
+                        (false, false)
+                    }
+                    KeyRoute::To { egui, game } => (egui, game),
                 }
-                // The editor's own shortcuts never reach the game.
-                let shortcut = matches!(
-                    event.physical_key,
-                    PhysicalKey::Code(
-                        KeyCode::KeyZ | KeyCode::KeyY | KeyCode::KeyS | KeyCode::KeyD
-                    )
-                );
-                if self.panels.command && shortcut {
-                    return (true, false);
-                }
-                let game = self.play.mode() == PlayMode::Playing
-                    && (self.panels.game_focused || self.panels.cursor_over_game(ppp))
-                    && !self.egui.egui_wants_keyboard_input();
-                (!game, game)
             }
             WindowEvent::Ime(_) => (true, false),
             _ => (true, true),
@@ -372,6 +395,28 @@ impl<A: EditorApp> Session<A> {
         let elapsed = now - self.last_frame;
         let dt = elapsed.as_secs_f32().min(0.1);
         self.last_frame = now;
+        // The window follows the Game view's fullscreen state when that
+        // changes, and the state follows the window when the user leaves
+        // fullscreen another way (macOS's green button, Ctrl+Cmd+F).
+        let sync = fullscreen_sync(
+            self.panels.game_fullscreen,
+            self.fullscreen_applied,
+            self.window.fullscreen().is_some(),
+            self.fullscreen_applied_at.elapsed(),
+        );
+        match sync {
+            FullscreenSync::Apply(on) => {
+                self.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
+                self.fullscreen_applied = on;
+                self.fullscreen_applied_at = Instant::now();
+            }
+            FullscreenSync::UserLeft => {
+                self.panels.game_fullscreen = false;
+                self.panels.fullscreen_since = None;
+                self.fullscreen_applied = false;
+            }
+            FullscreenSync::Nothing => {}
+        }
         self.fit_game_texture();
         self.reload_assets(event_loop);
         self.app.set_play_mode(self.play.mode());
@@ -416,7 +461,9 @@ impl<A: EditorApp> Session<A> {
         if self.prefab_mode.is_none() {
             self.panels.drawn_scene = None;
             let camera = self.panels.scene_camera;
+            // Fullscreen shows the game as it plays, not the scene tools' view.
             if self.play.mode() != PlayMode::Playing
+                && !self.panels.game_fullscreen
                 && let Some(camera) = camera
                 && self.app.draw_scene(&mut self.renderer, camera)
             {
@@ -476,8 +523,11 @@ impl<A: EditorApp> Session<A> {
         let prefab_name = prefab_mode.as_ref().map(|m| m.name.clone());
         let output = egui.run_ui(input, |ui| {
             shortcuts(ui, app, panels, &mut requests);
-            let state = ToolbarState { history, stashed_history, dirty, dirty_at_play };
-            toolbar(ui, app, play, panels, state, &mut requests);
+            let fullscreen = panels.game_fullscreen;
+            if !fullscreen {
+                let state = ToolbarState { history, stashed_history, dirty, dirty_at_play };
+                toolbar(ui, app, play, panels, state, &mut requests);
+            }
             let mut style = Style::from_egui(ui.style());
             style.tab_bar.fill_tab_bar = true;
             let mut viewer = Viewer {
@@ -495,12 +545,43 @@ impl<A: EditorApp> Session<A> {
                 prefab_mode: prefab_name.as_deref(),
                 dirty,
             };
-            DockArea::new(dock)
-                .style(style)
-                .show_close_buttons(false)
-                .show_leaf_close_all_buttons(false)
-                .show_leaf_collapse_buttons(false)
-                .show_inside(ui, &mut viewer);
+            if fullscreen {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                    viewer.ui(ui, &mut Tab::Game);
+                    let hint_for =
+                        viewer.panels.fullscreen_since.map(|t| t.elapsed().as_secs_f32());
+                    if let Some(t) = hint_for.filter(|t| *t < 3.0) {
+                        // On a dark plate, so it reads over the game's own
+                        // text; fades out over its last second.
+                        let fade = (3.0 - t).min(1.0);
+                        let painter = ui.painter();
+                        let galley = painter.layout_no_wrap(
+                            "F11 to leave fullscreen".into(),
+                            egui::FontId::proportional(16.0),
+                            Color32::from_white_alpha((fade * 255.0) as u8),
+                        );
+                        let top = ui.max_rect().center_top() + Vec2::new(0.0, 16.0);
+                        let text = Rect::from_min_size(
+                            top - Vec2::new(galley.size().x / 2.0, 0.0),
+                            galley.size(),
+                        );
+                        painter.rect_filled(
+                            text.expand2(Vec2::new(14.0, 8.0)),
+                            6.0,
+                            Color32::from_rgba_unmultiplied(16, 16, 20, (fade * 245.0) as u8),
+                        );
+                        painter.galley(text.min, galley, Color32::WHITE);
+                        ui.ctx().request_repaint();
+                    }
+                });
+            } else {
+                DockArea::new(dock)
+                    .style(style)
+                    .show_close_buttons(false)
+                    .show_leaf_close_all_buttons(false)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut viewer);
+            }
         });
         self.app.set_play_mode(self.play.mode());
         self.apply_create();
@@ -556,20 +637,23 @@ impl<A: EditorApp> Session<A> {
         }
     }
 
-    /// Sizes the offscreen frame to the largest whole-number scale of the
-    /// view that fits the Game tab, and keeps egui's texture pointing at it.
+    /// Sizes the offscreen frame for the Game tab (see [`game_view_scale`])
+    /// and keeps egui's texture pointing at it.
     fn fit_game_texture(&mut self) {
         let ppp = self.egui.pixels_per_point();
-        let scale = self.panels.game_space.map_or(1, |space| {
-            view_scale((space.width() * ppp) as u32, (space.height() * ppp) as u32)
+        let (scale, smooth) = self.panels.game_space.map_or((1, false), |space| {
+            let size = ((space.width() * ppp) as u32, (space.height() * ppp) as u32);
+            game_view_scale(size, self.panels.fill_view)
         });
         let size = (VIEW_WIDTH * scale, VIEW_HEIGHT * scale);
-        if self.game_texture.is_some_and(|(_, current)| current == size) {
+        if self.game_texture.is_some_and(|(_, current)| current == size)
+            && self.game_texture_smooth == smooth
+        {
             return;
         }
         let offscreen = self.renderer.create_offscreen(size.0, size.1);
         let device = self.renderer.device();
-        let filter = wgpu::FilterMode::Nearest;
+        let filter = if smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
         let id = match self.game_texture {
             Some((id, _)) => {
                 self.egui_wgpu.update_egui_texture_from_wgpu_texture(
@@ -583,8 +667,96 @@ impl<A: EditorApp> Session<A> {
             None => self.egui_wgpu.register_native_texture(device, &offscreen.view, filter),
         };
         self.game_texture = Some((id, size));
+        self.game_texture_smooth = smooth;
         self.renderer.set_offscreen(Some(offscreen));
     }
+}
+
+/// What to do about the window's fullscreen state this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullscreenSync {
+    /// The Game view's fullscreen state changed: give it to the window.
+    Apply(bool),
+    /// The window left fullscreen by other means: the Game view follows.
+    UserLeft,
+    Nothing,
+}
+
+/// Compares the fullscreen state the Game view `wanted`, the one last
+/// `applied` to the window `since` ago, and whether the window `is`
+/// fullscreen now. The window is only told when the wanted state changes,
+/// so a window the user made fullscreen themselves (macOS) is left alone,
+/// and leaving fullscreen by other means is noticed rather than undone.
+/// A second's grace covers platforms that switch fullscreen asynchronously.
+fn fullscreen_sync(wanted: bool, applied: bool, is: bool, since: Duration) -> FullscreenSync {
+    if wanted != applied {
+        FullscreenSync::Apply(wanted)
+    } else if applied && !is && since > Duration::from_secs(1) {
+        FullscreenSync::UserLeft
+    } else {
+        FullscreenSync::Nothing
+    }
+}
+
+/// What the editor knows about a key event besides the key.
+#[derive(Clone, Copy, Debug)]
+struct KeyState {
+    pressed: bool,
+    repeat: bool,
+    /// Ctrl (Cmd on macOS) is held.
+    command: bool,
+    /// Playing, with the Game view focused or hovered and no text field
+    /// taking keys.
+    game_has_keyboard: bool,
+}
+
+/// Where a key event goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyRoute {
+    /// F11 pressed: the editor switches fullscreen; nobody else sees it.
+    ToggleFullscreen,
+    /// To egui (the editor's panels), the game, or both.
+    To { egui: bool, game: bool },
+}
+
+/// Routes a key: releases reach both (so nothing stays held), F11 is the
+/// editor's even while the game has the keyboard (a hosted game can't change
+/// the window), the editor's Ctrl shortcuts never reach the game, and the
+/// rest goes to the game when it has the keyboard, else to the editor.
+fn route_key(key: PhysicalKey, state: KeyState) -> KeyRoute {
+    if !state.pressed {
+        return KeyRoute::To { egui: true, game: true };
+    }
+    if key == PhysicalKey::Code(KeyCode::F11) {
+        if state.repeat {
+            // Held down: swallowed, so it doesn't flicker in and out.
+            return KeyRoute::To { egui: false, game: false };
+        }
+        return KeyRoute::ToggleFullscreen;
+    }
+    let shortcut = matches!(
+        key,
+        PhysicalKey::Code(KeyCode::KeyZ | KeyCode::KeyY | KeyCode::KeyS | KeyCode::KeyD)
+    );
+    if state.command && shortcut {
+        return KeyRoute::To { egui: true, game: false };
+    }
+    let game = state.game_has_keyboard;
+    KeyRoute::To { egui: !game, game }
+}
+
+/// The scale to render the frame at for a Game view of `space` physical
+/// pixels, and whether to sample it smoothly. Normally the largest whole
+/// number that fits, drawn with crisp pixels. With `fill`, where no whole
+/// number fits exactly, the next scale up, shrunk smoothly onto the view so
+/// it fills it (the view keeps 16:9; only a different aspect leaves bars).
+fn game_view_scale(space: (u32, u32), fill: bool) -> (u32, bool) {
+    let whole = view_scale(space.0, space.1);
+    let fits_exactly = (VIEW_WIDTH * whole == space.0 && VIEW_HEIGHT * whole <= space.1)
+        || (VIEW_HEIGHT * whole == space.1 && VIEW_WIDTH * whole <= space.0);
+    // Smaller than the view at 1x: it's shrunk either way.
+    let bigger_than_view = space.0 > VIEW_WIDTH && space.1 > VIEW_HEIGHT;
+    if fill && !fits_exactly && bigger_than_view { (whole + 1, true) } else { (whole, false) }
 }
 
 impl<A: EditorApp> Session<A> {
@@ -1230,6 +1402,17 @@ fn toolbar<A: EditorApp>(
                 log::info!("stop: restored the state from before Play");
             }
             ui.separator();
+            if ui
+                .selectable_label(panels.game_fullscreen, "⛶ Fullscreen")
+                .on_hover_text("Game view fills the screen  (F11)")
+                .clicked()
+            {
+                panels.toggle_fullscreen();
+            }
+            ui.checkbox(&mut panels.fill_view, "Fill").on_hover_text(
+                "Scale the Game view to fill its space even when no whole-number                  scale fits (pixels may be slightly uneven). Off: crisp pixels,                  with borders where the space isn't a multiple of the view.",
+            );
+            ui.separator();
             ui.label("Time scale");
             let mut scale = play.scale();
             egui::ComboBox::from_id_salt("time scale").selected_text(format!("{scale}x")).show_ui(
@@ -1500,6 +1683,11 @@ impl<A: EditorApp> Viewer<'_, A> {
             }
         }
         self.panels.view_map = map;
+        // Fullscreen is for looking at the game: no gizmos, no drops.
+        if self.panels.game_fullscreen {
+            self.panels.view_map = None;
+            return;
+        }
         if !playing
             && let (Some(map), Some(drag)) = (map, response.dnd_release_payload::<AssetDrag>())
             && let Some(p) = response.interact_pointer_pos().or(response.hover_pos())
@@ -1582,4 +1770,112 @@ fn console(ui: &mut egui::Ui, panels: &mut Panels) {
             }
         },
     );
+}
+
+#[cfg(test)]
+mod view_scale_tests {
+    use super::game_view_scale;
+
+    #[test]
+    fn whole_number_scale_by_default() {
+        assert_eq!(game_view_scale((1920, 1080), false), (3, false));
+        assert_eq!(game_view_scale((1600, 900), false), (2, false), "bars: 1280x720 in 1600x900");
+        assert_eq!(game_view_scale((1366, 768), false), (2, false));
+        assert_eq!(game_view_scale((300, 200), false), (1, false));
+    }
+
+    #[test]
+    fn fill_goes_one_up_and_shrinks_smoothly_only_when_needed() {
+        // An exact fit stays crisp.
+        assert_eq!(game_view_scale((1920, 1080), true), (3, false));
+        assert_eq!(game_view_scale((2560, 1440), true), (4, false));
+        // Width fits exactly on a 16:10 screen: bars above and below either way.
+        assert_eq!(game_view_scale((1920, 1200), true), (3, false));
+        // Otherwise the next scale up, shrunk onto the screen.
+        assert_eq!(game_view_scale((1600, 900), true), (3, true));
+        assert_eq!(game_view_scale((1366, 768), true), (3, true));
+        // Ultrawide: the height fits 4x exactly, so the sides have bars
+        // either way; it stays crisp.
+        assert_eq!(game_view_scale((3440, 1440), true), (4, false));
+        // Smaller than the view: unchanged.
+        assert_eq!(game_view_scale((300, 200), true), (1, false));
+    }
+}
+
+#[cfg(test)]
+mod key_route_tests {
+    use super::{KeyRoute, KeyState, route_key};
+    use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
+
+    const F11: PhysicalKey = PhysicalKey::Code(KeyCode::F11);
+    const SPACE: PhysicalKey = PhysicalKey::Code(KeyCode::Space);
+    const S: PhysicalKey = PhysicalKey::Code(KeyCode::KeyS);
+
+    fn press(game_has_keyboard: bool) -> KeyState {
+        KeyState { pressed: true, repeat: false, command: false, game_has_keyboard }
+    }
+
+    #[test]
+    fn f11_toggles_fullscreen_whoever_has_the_keyboard() {
+        assert_eq!(route_key(F11, press(false)), KeyRoute::ToggleFullscreen);
+        // Playing with the Game view focused: still the editor's, and the
+        // game never sees it (it used to, and couldn't change the window).
+        assert_eq!(route_key(F11, press(true)), KeyRoute::ToggleFullscreen);
+        let ctrl = KeyState { command: true, ..press(true) };
+        assert_eq!(route_key(F11, ctrl), KeyRoute::ToggleFullscreen);
+    }
+
+    #[test]
+    fn a_held_f11_does_not_flicker() {
+        let held = KeyState { repeat: true, ..press(true) };
+        assert_eq!(route_key(F11, held), KeyRoute::To { egui: false, game: false });
+    }
+
+    #[test]
+    fn releases_reach_everyone() {
+        for key in [F11, SPACE, S] {
+            let up = KeyState { pressed: false, ..press(true) };
+            assert_eq!(route_key(key, up), KeyRoute::To { egui: true, game: true });
+        }
+    }
+
+    #[test]
+    fn other_keys_go_where_the_keyboard_is() {
+        assert_eq!(route_key(SPACE, press(true)), KeyRoute::To { egui: false, game: true });
+        assert_eq!(route_key(SPACE, press(false)), KeyRoute::To { egui: true, game: false });
+        // Ctrl+S saves, even while the game has the keyboard.
+        let save = KeyState { command: true, ..press(true) };
+        assert_eq!(route_key(S, save), KeyRoute::To { egui: true, game: false });
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_sync_tests {
+    use super::{FullscreenSync, fullscreen_sync};
+    use std::time::Duration;
+
+    const NOW: Duration = Duration::from_millis(0);
+    const LATER: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn changes_are_applied_once() {
+        assert_eq!(fullscreen_sync(true, false, false, LATER), FullscreenSync::Apply(true));
+        assert_eq!(fullscreen_sync(false, true, true, LATER), FullscreenSync::Apply(false));
+        // Applied and in effect: nothing more to do, frame after frame.
+        assert_eq!(fullscreen_sync(true, true, true, LATER), FullscreenSync::Nothing);
+        assert_eq!(fullscreen_sync(false, false, false, LATER), FullscreenSync::Nothing);
+    }
+
+    #[test]
+    fn a_window_made_fullscreen_by_the_user_is_left_alone() {
+        // macOS's green button: not ours to undo.
+        assert_eq!(fullscreen_sync(false, false, true, LATER), FullscreenSync::Nothing);
+    }
+
+    #[test]
+    fn leaving_fullscreen_another_way_is_followed_not_fought() {
+        assert_eq!(fullscreen_sync(true, true, false, LATER), FullscreenSync::UserLeft);
+        // Just asked for: the window may not have switched yet.
+        assert_eq!(fullscreen_sync(true, true, false, NOW), FullscreenSync::Nothing);
+    }
 }

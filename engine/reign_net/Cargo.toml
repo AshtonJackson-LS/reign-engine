@@ -10,4 +10,3 @@ publish.workspace = true
 [dependencies]
 reign_core.workspace = true
 ggrs = "0.13"
-log.workspace = true

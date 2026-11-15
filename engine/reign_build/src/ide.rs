@@ -47,8 +47,20 @@ impl Ide {
         if let Some(file) = file {
             command.arg(file);
         }
-        command.spawn().map(drop).map_err(|e| format!("can't start {}: {e}", self.name))
+        spawn_detached(&mut command)
+            .map(drop)
+            .map_err(|e| format!("can't start {}: {e}", self.name))
     }
+}
+
+/// Starts `command` with no stdin, stdout or stderr of its own. A code
+/// editor or file browser outlives whatever started it and has no business
+/// holding its output: an editor opened from Reign Hub writes its stderr
+/// into a pipe the hub reads, and an IDE inheriting that pipe would keep it
+/// open for as long as the IDE runs.
+pub fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
 }
 
 /// The installed editors, in [`KNOWN`] order.
@@ -84,9 +96,7 @@ pub fn open_project(root: &Path, file: Option<&Path>) -> Result<String, String> 
             } else {
                 "xdg-open"
             };
-            Command::new(opener)
-                .arg(target)
-                .spawn()
+            spawn_detached(Command::new(opener).arg(target))
                 .map(|_| "the system default".to_owned())
                 .map_err(|e| format!("no code editor found, and {opener} failed: {e}"))
         }
@@ -167,6 +177,24 @@ fn on_path(cli: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A detached program runs, and writing its output goes nowhere rather
+    /// than failing (it has no pipe of ours to write into).
+    #[test]
+    fn detached_programs_run_without_our_output() {
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo to stdout & echo to stderr 1>&2 & exit 0"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "echo to stdout; echo to stderr >&2; exit 0"]);
+            c
+        };
+        let mut child = spawn_detached(&mut command).unwrap();
+        assert!(child.stdout.is_none() && child.stderr.is_none());
+        assert!(child.wait().unwrap().success());
+    }
 
     #[test]
     fn preferences_round_trip() {

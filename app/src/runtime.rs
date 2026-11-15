@@ -184,7 +184,7 @@ impl World {
 
     /// One fixed tick: input, then the schedule. Returns the sounds it
     /// made. A scene change a script asked for waits in
-    /// [`World::take_scene_request`]; [`tick`] does both.
+    /// [`World::take_scene_request`]; `tick` does both.
     pub fn step(
         &mut self,
         input: InputFrame,

@@ -65,20 +65,40 @@ impl EngineSource {
     }
 }
 
-/// The engine crates a project depends on, and where each lives in the
-/// engine's repository.
-const ENGINE_CRATES: [(&str, &str); 3] =
-    [("reign_engine", "app"), ("reign", "engine/reign"), ("reign_build", "engine/reign_build")];
+/// Every crate in the engine's repository a project may depend on, and
+/// where each lives there. A new project uses the first three; a hand-made
+/// one (like Exreign) may name any of them. Kept in step with the
+/// workspace's members by a test.
+const ENGINE_CRATES: [(&str, &str); 15] = [
+    ("reign_engine", "app"),
+    ("reign", "engine/reign"),
+    ("reign_build", "engine/reign_build"),
+    ("reign_app", "engine/reign_app"),
+    ("reign_assets", "engine/reign_assets"),
+    ("reign_audio", "engine/reign_audio"),
+    ("reign_behaviour", "engine/reign_behaviour"),
+    ("reign_combat", "engine/reign_combat"),
+    ("reign_core", "engine/reign_core"),
+    ("reign_derive", "engine/reign_derive"),
+    ("reign_editor", "engine/reign_editor"),
+    ("reign_net", "engine/reign_net"),
+    ("reign_physics", "engine/reign_physics"),
+    ("reign_render", "engine/reign_render"),
+    ("reign_scene", "engine/reign_scene"),
+];
 
-/// Where a project with code gets its engine, read from its Cargo.toml.
+/// The keys of a dependency that say where it comes from; the rest
+/// (`features`, `optional`, `default-features`, ...) are kept when the
+/// engine moves.
+const SOURCE_KEYS: [&str; 6] = ["path", "git", "tag", "branch", "rev", "version"];
+
+/// Where a project with code gets its engine, read from its Cargo.toml: the
+/// `reign` dependency, inline (`reign = { path = ".." }`) or as a table
+/// (`[dependencies.reign]`).
 pub fn project_engine(root: &Path) -> Option<EngineSource> {
     let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    let line =
-        text.lines().find(|l| l.split_once('=').is_some_and(|(k, _)| k.trim() == "reign"))?;
-    let value = |key: &str| -> Option<String> {
-        let rest = line.split(&format!("{key} = \"")[..]).nth(1)?;
-        Some(rest.split('"').next()?.to_owned())
-    };
+    let entries = manifest_dependency(&text, "reign")?;
+    let value = |key: &str| entries.iter().find(|(k, _)| k == key).map(|(_, v)| unquote(v));
     if let Some(path) = value("path") {
         let path = PathBuf::from(path);
         let root = path.parent().and_then(Path::parent).map(Path::to_owned).unwrap_or(path);
@@ -87,30 +107,311 @@ pub fn project_engine(root: &Path) -> Option<EngineSource> {
     Some(EngineSource::Git { url: value("git")?, tag: value("tag")? })
 }
 
-/// Points a project's engine dependencies at `source`. Rebuilding the
-/// project's editor afterwards uses that engine.
+/// Points a project's engine dependencies at `source`: every engine crate
+/// (see `ENGINE_CRATES`) in any dependency table, written inline
+/// (`reign = { .. }`) or as its own table (`[dependencies.reign]`), keeping
+/// each one's other settings (features, optional, ..), comments and line
+/// endings. A crate inherited from a workspace (`workspace = true`) is left
+/// to the workspace. Rebuilding the project's editor afterwards uses that
+/// engine.
 pub fn set_project_engine(root: &Path, source: &EngineSource) -> std::io::Result<()> {
     let file = root.join("Cargo.toml");
     let text = std::fs::read_to_string(&file)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
     let mut changed = 0;
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|line| {
-            let key = line.split_once('=').map(|(k, _)| k.trim());
-            match ENGINE_CRATES.iter().find(|(name, _)| Some(*name) == key) {
-                Some((name, dir)) => {
-                    changed += 1;
-                    let end = if line.ends_with('\r') { "\r" } else { "" };
-                    format!("{name} = {}{end}", source.dependency(dir))
-                }
-                None => line.to_owned(),
+    let mut table = Table::Other;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        let (body, end) = match line.strip_suffix('\r') {
+            Some(body) => (body, "\r"),
+            None => (line, ""),
+        };
+        if let Some(header) = table_header(body) {
+            table = Table::of(header);
+            out.push(line.to_owned());
+            let Table::Crate(name) = &table else { continue };
+            let Some(dir) = engine_dir(name) else { continue };
+            // The table's own lines, up to the next header.
+            let start = i;
+            while i < lines.len() && table_header(lines[i].trim_end_matches('\r')).is_none() {
+                i += 1;
             }
-        })
-        .collect();
+            let own = &lines[start..i];
+            let key_of = |l: &&str| key_value(l.trim_end_matches('\r')).map(|(k, _, _)| k);
+            let inherits = own.iter().any(|l| {
+                key_value(l.trim_end_matches('\r'))
+                    .is_some_and(|(k, v, _)| k == "workspace" && unquote(&v) == "true")
+            });
+            if !inherits {
+                changed += 1;
+                let new = source.dependency(dir);
+                for entry in inline_body(&new).map(split_top_level).unwrap_or_default() {
+                    out.push(format!("{}{end}", entry.trim()));
+                }
+            }
+            for l in own {
+                let source_key = key_of(l).is_some_and(|k| SOURCE_KEYS.contains(&k.as_str()));
+                if inherits || !source_key {
+                    out.push((*l).to_owned());
+                }
+            }
+            continue;
+        }
+        if matches!(table, Table::Dependencies)
+            && let Some((key, value, eq)) = key_value(body)
+            && let Some(dir) = engine_dir(&key)
+            && let Some(new) = with_source(&value, &source.dependency(dir))
+        {
+            changed += 1;
+            out.push(format!("{}= {new}{end}", &body[..eq]));
+            continue;
+        }
+        out.push(line.to_owned());
+    }
     if changed == 0 {
         return Err(std::io::Error::other("Cargo.toml has no Reign engine dependencies"));
     }
-    std::fs::write(file, lines.join("\n"))
+    std::fs::write(file, out.join("\n"))
+}
+
+/// The kind of Cargo.toml table a header opens.
+enum Table {
+    /// `[dependencies]`, `[build-dependencies]`, `[dev-dependencies]`,
+    /// `[target.'cfg(..)'.dependencies]`, `[workspace.dependencies]`.
+    Dependencies,
+    /// One dependency as a table: `[dependencies.reign]`.
+    Crate(String),
+    Other,
+}
+
+impl Table {
+    fn of(header: &str) -> Table {
+        if header.ends_with("dependencies") {
+            return Table::Dependencies;
+        }
+        match header.rsplit_once('.') {
+            Some((tables, name)) if tables.trim().ends_with("dependencies") => {
+                Table::Crate(unquote(name))
+            }
+            _ => Table::Other,
+        }
+    }
+}
+
+/// The table name a header line opens (`[dependencies] # x` →
+/// `dependencies`, `[[bin]]` → `bin`), or `None` if it isn't a header.
+fn table_header(line: &str) -> Option<&str> {
+    let inner = line.trim().strip_prefix('[')?.trim_start_matches('[');
+    Some(inner.split(']').next()?.trim())
+}
+
+fn engine_dir(name: &str) -> Option<&'static str> {
+    ENGINE_CRATES.iter().find(|(crate_name, _)| *crate_name == name).map(|(_, dir)| *dir)
+}
+
+/// The engine dependency `name` in a manifest's dependency tables, as its
+/// key/value entries (`path`, `git`, `tag`, `features`, ..).
+fn manifest_dependency(text: &str, name: &str) -> Option<Vec<(String, String)>> {
+    let mut table = Table::Other;
+    let mut found: Option<Vec<(String, String)>> = None;
+    for line in text.lines() {
+        if let Some(header) = table_header(line) {
+            if found.is_some() {
+                return found;
+            }
+            table = Table::of(header);
+            if matches!(&table, Table::Crate(c) if c == name) {
+                found = Some(Vec::new());
+            }
+            continue;
+        }
+        let Some((key, value, _)) = key_value(line) else { continue };
+        match (&table, found.as_mut()) {
+            (Table::Crate(_), Some(entries)) => entries.push((key, value)),
+            (Table::Dependencies, None) if key == name => {
+                let body = inline_body(&value)?;
+                return Some(
+                    split_top_level(body)
+                        .into_iter()
+                        .filter_map(|e| key_value(e).map(|(k, v, _)| (k, v)))
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// A dependency's value (`"1"` or `{ path = "..", features = [..] }`, and
+/// any comment after it) with its source swapped for `source` (an inline
+/// table, as [`EngineSource::dependency`] writes) and every other setting
+/// kept. `None` when it inherits from the workspace (`workspace = true`).
+fn with_source(value: &str, source: &str) -> Option<String> {
+    let new = inline_body(source)?.trim();
+    let value = value.trim();
+    let Some(body) = value.strip_prefix('{') else {
+        // A bare version string: nothing else to keep, but keep a comment.
+        let comment = comment_start(value).map_or("", |at| &value[at..]);
+        let gap = if comment.is_empty() { "" } else { "  " };
+        return Some(format!("{{ {new} }}{gap}{comment}"));
+    };
+    let close = top_level_end(body)?;
+    let (inner, after) = (&body[..close], &body[close + 1..]);
+    let entries = split_top_level(inner);
+    let inherits = entries
+        .iter()
+        .any(|e| key_value(e).is_some_and(|(k, v, _)| k == "workspace" && unquote(&v) == "true"));
+    if inherits {
+        return None;
+    }
+    let kept = entries.into_iter().map(str::trim).filter(|entry| {
+        let key = key_value(entry).map(|(k, _, _)| k).unwrap_or_default();
+        !entry.is_empty() && !SOURCE_KEYS.contains(&key.as_str())
+    });
+    let all: Vec<&str> = std::iter::once(new).chain(kept).collect();
+    Some(format!("{{ {} }}{after}", all.join(", ")))
+}
+
+/// Calls `f(index, char, depth)` for each character of TOML text outside a
+/// string (basic `".."` with escapes, or literal `'..'`), with the bracket
+/// depth before it, until `f` returns true.
+fn scan_toml(text: &str, mut f: impl FnMut(usize, char, i32) -> bool) {
+    let mut depth = 0;
+    let mut chars = text.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' => {
+                while let Some((_, d)) = chars.next() {
+                    match d {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '\'' => {
+                for (_, d) in chars.by_ref() {
+                    if d == '\'' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                if f(i, c, depth) {
+                    return;
+                }
+                match c {
+                    '[' | '{' => depth += 1,
+                    ']' | '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Where the inline table whose body starts `body` closes: its `}`.
+fn top_level_end(body: &str) -> Option<usize> {
+    let mut end = None;
+    scan_toml(body, |i, c, depth| {
+        let found = c == '}' && depth == 0;
+        if found {
+            end = Some(i);
+        }
+        found
+    });
+    end
+}
+
+/// Splits an inline table's body at its top-level commas.
+fn split_top_level(body: &str) -> Vec<&str> {
+    let mut cuts = Vec::new();
+    scan_toml(body, |i, c, depth| {
+        if c == ',' && depth == 0 {
+            cuts.push(i);
+        }
+        false
+    });
+    let mut parts = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for cut in cuts {
+        parts.push(&body[start..cut]);
+        start = cut + 1;
+    }
+    parts.push(&body[start..]);
+    parts
+}
+
+/// The body of an inline table value (`{ a = 1 }` → ` a = 1 `).
+fn inline_body(value: &str) -> Option<&str> {
+    let body = value.trim().strip_prefix('{')?;
+    Some(&body[..top_level_end(body)?])
+}
+
+/// Where a `#` comment starts in a line, outside strings.
+fn comment_start(text: &str) -> Option<usize> {
+    let mut at = None;
+    scan_toml(text, |i, c, _| {
+        let found = c == '#';
+        if found {
+            at = Some(i);
+        }
+        found
+    });
+    at
+}
+
+/// A `key = value` line or entry: the key (unquoted), the value (as written,
+/// with any comment), and where the `=` is. `None` for anything else.
+fn key_value(text: &str) -> Option<(String, String, usize)> {
+    if text.trim_start().starts_with('#') || text.trim_start().starts_with('[') {
+        return None;
+    }
+    let mut eq = None;
+    scan_toml(text, |i, c, depth| {
+        let found = c == '=' && depth == 0;
+        if found {
+            eq = Some(i);
+        }
+        found
+    });
+    let eq = eq?;
+    let key = unquote(&text[..eq]);
+    (!key.is_empty()).then(|| (key, text[eq + 1..].trim().to_owned(), eq))
+}
+
+/// A TOML scalar as text: a basic or literal string unquoted (escapes
+/// resolved), anything else trimmed with its comment dropped.
+fn unquote(text: &str) -> String {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(other) => out.push(other),
+                    None => break,
+                },
+                c => out.push(c),
+            }
+        }
+        out
+    } else if let Some(rest) = text.strip_prefix('\'') {
+        rest.split('\'').next().unwrap_or("").to_owned()
+    } else {
+        let end = comment_start(text).unwrap_or(text.len());
+        text[..end].trim().to_owned()
+    }
 }
 
 /// The engine source a new project builds against: the local checkout when
@@ -230,7 +531,135 @@ pub fn editor_bin(crate_name: &str) -> String {
 /// Where `cargo build` puts the project's editor.
 pub fn editor_path(root: &Path, crate_name: &str) -> PathBuf {
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    root.join("target").join("debug").join(format!("{}{exe}", editor_bin(crate_name)))
+    target_dir(root).join("debug").join(format!("{}{exe}", editor_bin(crate_name)))
+}
+
+/// Where Cargo puts the project's build output. Usually `<project>/target`,
+/// but a project inside a larger workspace, or one whose `.cargo/config.toml`
+/// sets `target-dir`, builds elsewhere: Cargo is asked (`cargo metadata`),
+/// once per project per run (about 50 ms), and `<project>/target` is the
+/// answer when it can't say (no Rust installed, no Cargo.toml yet, a broken
+/// manifest). Only Cargo's answers are remembered, so a project that gains
+/// its Cargo.toml later is asked again.
+pub fn target_dir(root: &Path) -> PathBuf {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(dir) = cache.lock().ok().and_then(|c| c.get(root).cloned()) {
+        return dir;
+    }
+    match query_target_dir(root) {
+        Some(dir) => {
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(root.to_owned(), dir.clone());
+            }
+            dir
+        }
+        None => root.join("target"),
+    }
+}
+
+/// The `target_directory` `cargo metadata` reports for the project.
+fn query_target_dir(root: &Path) -> Option<PathBuf> {
+    if !root.join("Cargo.toml").is_file() {
+        return None;
+    }
+    let mut c = cargo();
+    c.current_dir(root).args(["metadata", "--no-deps", "--format-version", "1", "--offline"]);
+    // The same environment the build gets (see build_bin).
+    c.env_remove("CARGO_TARGET_DIR").env_remove("CARGO_MANIFEST_DIR");
+    // A project's rust-toolchain.toml may name a toolchain that isn't
+    // installed: don't let rustup download it here, where a GUI may be
+    // waiting on the answer. The build (on its own thread) installs it.
+    c.env("RUSTUP_AUTO_INSTALL", "0");
+    c.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let output = c.output().ok().filter(|o| o.status.success())?;
+    json_string(&String::from_utf8_lossy(&output.stdout), "target_directory").map(PathBuf::from)
+}
+
+/// A top-level string field of a JSON document, unescaped. Enough for
+/// `cargo metadata`'s paths without a JSON parser in this crate.
+fn json_string(json: &str, key: &str) -> Option<String> {
+    let start = json.find(&format!("\"{key}\":\""))? + key.len() + 4;
+    let mut out = String::new();
+    let mut chars = json[start..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                }
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The features a project asks for in its `[package.metadata.reign]` table:
+/// `editor-features` for the editor the hub and Reload build, and
+/// `game-features` for the game Export Game builds. A project can keep its
+/// editor (and egui) behind a feature this way and still open from the hub:
+///
+/// ```toml
+/// [package.metadata.reign]
+/// editor-features = ["editor"]
+/// ```
+pub fn build_features(root: &Path, key: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
+    let mut in_table = false;
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(header) = table_header(line) {
+            in_table = header == "package.metadata.reign";
+            continue;
+        }
+        let Some((k, value, _)) = key_value(line).filter(|_| in_table) else { continue };
+        if k != key {
+            continue;
+        }
+        // An array may run over several lines, with comments: read up to its
+        // closing `]`, leaving the comments out.
+        let code = |l: &str| l[..comment_start(l).unwrap_or(l.len())].to_owned();
+        let mut array = code(&value);
+        while !array_closed(&array) {
+            let Some(next) = lines.next() else { break };
+            array.push(' ');
+            array.push_str(&code(next));
+        }
+        let Some(inner) = array.trim().strip_prefix('[') else { return Vec::new() };
+        let mut close = inner.len();
+        scan_toml(inner, |i, c, depth| {
+            let found = c == ']' && depth == 0;
+            if found {
+                close = i;
+            }
+            found
+        });
+        return split_top_level(&inner[..close])
+            .into_iter()
+            .map(unquote)
+            .filter(|f| !f.is_empty())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Whether TOML text that starts an array has reached its closing `]`.
+/// Comments must already be left out.
+fn array_closed(text: &str) -> bool {
+    let mut closed = false;
+    scan_toml(text, |_, c, depth| {
+        closed = c == ']' && depth == 1;
+        closed
+    });
+    closed
 }
 
 /// The project game binary's name for a crate: the game without the
@@ -242,7 +671,7 @@ pub fn game_bin(crate_name: &str) -> String {
 /// Where `cargo build --release` puts the project's game.
 pub fn game_path(root: &Path, crate_name: &str) -> PathBuf {
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    root.join("target").join("release").join(format!("{}{exe}", game_bin(crate_name)))
+    target_dir(root).join("release").join(format!("{}{exe}", game_bin(crate_name)))
 }
 
 /// The `[package] name` in the project's `Cargo.toml`.
@@ -261,21 +690,26 @@ pub fn read_crate_name(root: &Path) -> Option<String> {
     None
 }
 
-/// The command that builds the project's editor.
+/// The command that builds the project's editor, with its
+/// `editor-features` (see [`build_features`]).
 pub fn build_command(root: &Path, crate_name: &str) -> Command {
-    build_bin(root, &editor_bin(crate_name), false)
+    build_bin(root, &editor_bin(crate_name), false, &build_features(root, "editor-features"))
 }
 
-/// The command that builds the project's game, optimised, for export.
+/// The command that builds the project's game, optimised, for export, with
+/// its `game-features` (see [`build_features`]).
 pub fn game_build_command(root: &Path, crate_name: &str) -> Command {
-    build_bin(root, &game_bin(crate_name), true)
+    build_bin(root, &game_bin(crate_name), true, &build_features(root, "game-features"))
 }
 
-fn build_bin(root: &Path, bin: &str, release: bool) -> Command {
+fn build_bin(root: &Path, bin: &str, release: bool, features: &[String]) -> Command {
     let mut c = cargo();
     c.current_dir(root).args(["build", "--bin", bin, "--message-format=short", "--color=never"]);
     if release {
         c.arg("--release");
+    }
+    if !features.is_empty() {
+        c.arg("--features").arg(features.join(","));
     }
     // Don't inherit a parent build's settings when started from one.
     c.env_remove("CARGO_TARGET_DIR")
@@ -313,13 +747,17 @@ pub fn ensure_game_bin(root: &Path, project_name: &str) -> std::io::Result<bool>
     let name = read_crate_name(root)
         .ok_or_else(|| std::io::Error::other("Cargo.toml has no [package] name"))?;
     let mut changed = false;
-    let listed = text.lines().any(|l| {
-        l.trim()
-            .strip_prefix("name")
-            .and_then(|r| r.trim_start().strip_prefix('='))
-            .is_some_and(|v| v.trim().trim_matches('"') == game_bin(&name))
-    });
-    if !listed {
+    // A game binary the project already lists keeps its own source: only
+    // the template's src/game.rs is ever written (Exreign's exreign-game is
+    // src/main.rs, and must not get a stray game.rs).
+    let listed = bin_path(&text, &game_bin(&name));
+    let writes_game_rs = match &listed {
+        None => true,
+        Some(path) => {
+            path.as_deref().map(|p| p.replace('\\', "/")).as_deref() == Some("src/game.rs")
+        }
+    };
+    if listed.is_none() {
         // Next to the other binaries, before [dependencies], else at the end.
         let table = game_bin_table(&name);
         let text = match text.find("\n[dependencies]") {
@@ -330,12 +768,48 @@ pub fn ensure_game_bin(root: &Path, project_name: &str) -> std::io::Result<bool>
         changed = true;
     }
     let main = root.join("src").join("game.rs");
-    if !main.exists() {
+    if writes_game_rs && !main.exists() {
         std::fs::create_dir_all(root.join("src"))?;
         std::fs::write(main, game_main(project_name, &name))?;
         changed = true;
     }
     Ok(changed)
+}
+
+/// Whether the manifest lists a `[[bin]]` named `bin`: `None` if not, else
+/// its `path` (`None` inside when it has none and Cargo's default applies).
+fn bin_path(text: &str, bin: &str) -> Option<Option<String>> {
+    let mut in_bin = false;
+    let (mut name, mut path) = (None::<String>, None::<String>);
+    let mut found = None;
+    let mut finish = |name: &mut Option<String>, path: &mut Option<String>| {
+        if name.as_deref() == Some(bin) && found.is_none() {
+            found = Some(path.clone());
+        }
+        *name = None;
+        *path = None;
+    };
+    for line in text.lines() {
+        if table_header(line).is_some() {
+            if in_bin {
+                finish(&mut name, &mut path);
+            }
+            in_bin = line.trim().starts_with("[[bin]]");
+            continue;
+        }
+        if !in_bin {
+            continue;
+        }
+        match key_value(line) {
+            Some((k, v, _)) if k == "name" => name = Some(unquote(&v)),
+            Some((k, v, _)) if k == "path" => path = Some(unquote(&v)),
+            _ => {}
+        }
+    }
+    if in_bin {
+        finish(&mut name, &mut path);
+    }
+    found
 }
 
 /// Makes the project a crate, if it isn't already. Returns its crate name.
@@ -768,6 +1242,338 @@ mod tests {
     }
 
     #[test]
+    fn json_strings_are_unescaped() {
+        let json =
+            r#"{"packages":[],"target_directory":"C:\\Games\\My \"Game\"\\target","version":1}"#;
+        assert_eq!(json_string(json, "target_directory").unwrap(), r#"C:\Games\My "Game"\target"#);
+        assert_eq!(json_string(r#"{"a":"\u00e9x"}"#, "a").unwrap(), "éx");
+        assert_eq!(json_string(json, "missing"), None);
+    }
+
+    #[test]
+    fn build_features_come_from_package_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("reign-build-features-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"g\"\nversion = \"0.1.0\"\n\n\
+             [features]\neditor-features = [\"not-this-table\"]\n\n\
+             [package.metadata.reign]\neditor-features = [\"editor\", \"debug-ui\"]\n",
+        )
+        .unwrap();
+        assert_eq!(build_features(&root, "editor-features"), ["editor", "debug-ui"]);
+        assert!(build_features(&root, "game-features").is_empty());
+
+        let args = |c: &Command| {
+            c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        let editor = args(&build_command(&root, "g"));
+        assert!(editor.windows(2).any(|w| w == ["--features", "editor,debug-ui"]), "{editor:?}");
+        let game = args(&game_build_command(&root, "g"));
+        assert!(!game.contains(&"--features".to_owned()), "{game:?}");
+
+        // Written over several lines, with comments, under a commented header.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"g\"\n\n[package.metadata.reign]   # for the hub\n\
+             editor-features = [\n    \"editor\",   # the editor shell, egui ]\n\
+             \x20   'tools/x', # another\n]\ngame-features = [] # none\n\n[dependencies]\n",
+        )
+        .unwrap();
+        assert_eq!(build_features(&root, "editor-features"), ["editor", "tools/x"]);
+        assert!(build_features(&root, "game-features").is_empty());
+        // No table, no Cargo.toml: nothing asked for.
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+        assert!(build_features(&root, "editor-features").is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(build_features(&root, "editor-features").is_empty());
+    }
+
+    /// A folder that isn't a crate yet gets the usual place, and is asked
+    /// again once it becomes one (the fallback isn't remembered).
+    #[test]
+    fn a_project_that_gains_code_is_asked_again() {
+        let root =
+            std::env::temp_dir().join(format!("reign-target-later-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert_eq!(target_dir(&root), root.join("target"));
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join(".cargo/config.toml"), "[build]\ntarget-dir = \"elsewhere\"\n")
+            .unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let dir = target_dir(&root).to_string_lossy().replace('\\', "/");
+        assert!(dir.ends_with("/elsewhere"), "{dir}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Cargo is asked where the build goes: `<project>/target` normally,
+    /// elsewhere when `.cargo/config.toml` says so.
+    #[test]
+    fn the_target_dir_is_cargos() {
+        let base =
+            std::env::temp_dir().join(format!("reign-target-dir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let manifest =
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n";
+        let plain = base.join("plain");
+        std::fs::create_dir_all(plain.join("src")).unwrap();
+        std::fs::write(plain.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(plain.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let moved = base.join("moved");
+        std::fs::create_dir_all(moved.join("src")).unwrap();
+        std::fs::create_dir_all(moved.join(".cargo")).unwrap();
+        std::fs::write(moved.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(moved.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(moved.join(".cargo/config.toml"), "[build]\ntarget-dir = \"out\"\n")
+            .unwrap();
+
+        let same = |a: &Path, b: &Path| {
+            let canon =
+                |p: &Path| strip_verbatim(p.canonicalize().unwrap_or_else(|_| p.to_owned()));
+            assert_eq!(
+                canon(a).to_string_lossy().to_lowercase(),
+                canon(b).to_string_lossy().to_lowercase()
+            );
+        };
+        std::fs::create_dir_all(plain.join("target")).unwrap();
+        std::fs::create_dir_all(moved.join("out")).unwrap();
+        same(&target_dir(&plain), &plain.join("target"));
+        same(&target_dir(&moved), &moved.join("out"));
+        assert!(editor_path(&moved, "t").starts_with(target_dir(&moved)));
+        // No manifest: the usual place, without asking.
+        let none = base.join("none");
+        assert_eq!(target_dir(&none), none.join("target"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// ENGINE_CRATES lists every library crate in the engine's workspace, so a
+    /// new engine crate can't be left behind when a project changes version.
+    #[test]
+    fn engine_crates_match_the_workspace() {
+        let root = engine_root();
+        let workspace = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let members: Vec<&str> = workspace
+            .split("members = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap()
+            .split(',')
+            .map(|m| m.trim().trim_matches('"'))
+            .filter(|m| m.starts_with("engine/") || *m == "app")
+            .collect();
+        assert!(!members.is_empty());
+        for dir in &members {
+            let manifest = root.join(dir).join("Cargo.toml");
+            let name = read_crate_name(manifest.parent().unwrap()).unwrap();
+            assert!(
+                ENGINE_CRATES.contains(&(name.as_str(), *dir)),
+                "{name} ({dir}) is missing from ENGINE_CRATES"
+            );
+        }
+        for (name, dir) in ENGINE_CRATES {
+            assert!(members.contains(&dir), "{name} ({dir}) is not a workspace member");
+        }
+    }
+
+    /// Writes `manifest` as a project's Cargo.toml, points it at release
+    /// 0.3.1, and returns the result.
+    fn moved_to_release(test: &str, manifest: &str) -> String {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-edge-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        set_project_engine(&root, &EngineSource::release("0.3.1")).unwrap();
+        let text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        text
+    }
+
+    const TAG: &str = r#"git = "https://github.com/AshtonJackson-LS/reign-engine", tag = "v0.3.1""#;
+
+    #[test]
+    fn workspace_inherited_engine_crates_are_left_to_the_workspace() {
+        let text = moved_to_release(
+            "inherit",
+            "[package]\nname = \"g\"\n\n[dependencies]\n\
+             reign = { workspace = true, features = [\"editor\"] }\n\
+             reign_assets.workspace = true\n\
+             reign_core = { path = \"../e/engine/reign_core\" }\n",
+        );
+        assert!(text.contains("reign = { workspace = true, features = [\"editor\"] }\n"), "{text}");
+        assert!(text.contains("reign_assets.workspace = true\n"), "{text}");
+        assert!(text.contains(&format!("reign_core = {{ {TAG} }}")), "{text}");
+    }
+
+    #[test]
+    fn a_commented_table_header_still_counts() {
+        let text = moved_to_release(
+            "comment",
+            "[package]\nname = \"g\"\n\n[dependencies]   # the engine\n\
+             reign = { path = \"../e/engine/reign\" }  # keep me\n",
+        );
+        assert!(text.contains(&format!("reign = {{ {TAG} }}  # keep me")), "{text}");
+    }
+
+    #[test]
+    fn table_form_dependencies_move_too() {
+        let text = moved_to_release(
+            "table",
+            "[package]\nname = \"g\"\n\n[dependencies.reign]\npath = \"../e/engine/reign\"\n\
+             features = [\"editor\"]\n\n[build-dependencies.reign_assets]\n\
+             git = \"https://example.com/old\"\nbranch = \"dev\"\n\n[dependencies.serde]\nversion = \"1\"\n",
+        );
+        assert!(!text.contains("../e/engine"), "{text}");
+        assert!(!text.contains("branch = \"dev\"") && !text.contains("example.com/old"), "{text}");
+        assert_eq!(text.matches("tag = \"v0.3.1\"").count(), 2, "{text}");
+        assert!(text.contains("features = [\"editor\"]"), "{text}");
+        assert!(
+            text.contains("[dependencies.serde]\nversion = \"1\""),
+            "not an engine crate:\n{text}"
+        );
+        // And project_engine reads the table form.
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-edge-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), &text).unwrap();
+        assert_eq!(project_engine(&root), Some(EngineSource::release("0.3.1")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quotes_and_brackets_inside_settings_are_kept_whole() {
+        let text = moved_to_release(
+            "quotes",
+            "[package]\nname = \"g\"\n\n[dependencies]\n\
+             reign = { path = 'C:\\old\\engine\\reign', features = [\"a,b}\", 'c]'], package = \"reign\" }\n\
+             reign_core = { path = \"../x\\\"y\", optional = true }\n",
+        );
+        assert!(
+            text.contains(&format!(
+                "reign = {{ {TAG}, features = [\"a,b}}\", 'c]'], package = \"reign\" }}"
+            )),
+            "{text}"
+        );
+        assert!(text.contains(&format!("reign_core = {{ {TAG}, optional = true }}")), "{text}");
+    }
+
+    #[test]
+    fn versions_quoted_keys_and_target_tables() {
+        let text = moved_to_release(
+            "misc",
+            "[package]\nname = \"g\"\n\n[dependencies]\nreign = \"0.1\"  # from crates.io one day\n\
+             \"reign_core\" = { path = \"../e/engine/reign_core\" }\n\n\
+             [target.'cfg(target_os = \"macos\")'.dependencies]\nreign_audio = { path = \"../e/engine/reign_audio\" }\n\n\
+             [features]\nreign = []\n",
+        );
+        assert!(text.contains(&format!("reign = {{ {TAG} }}  # from crates.io one day")), "{text}");
+        assert!(text.contains(&format!("\"reign_core\" = {{ {TAG} }}")), "{text}");
+        assert!(text.contains(&format!("reign_audio = {{ {TAG} }}")), "{text}");
+        assert!(
+            text.contains("[features]\nreign = []"),
+            "a feature named reign isn't a dependency:\n{text}"
+        );
+    }
+
+    #[test]
+    fn no_engine_crates_is_an_error_and_changes_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-edge-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = "[package]\nname = \"g\"\n\n[dependencies]\nserde = \"1\"\n";
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        assert!(set_project_engine(&root, &EngineSource::release("0.3.1")).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), manifest);
+        assert_eq!(project_engine(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn crlf_manifests_stay_crlf() {
+        let text = moved_to_release(
+            "crlf",
+            "[package]\r\nname = \"g\"\r\n\r\n[dependencies]\r\nreign = { path = \"../e/engine/reign\" }\r\nserde = \"1\"\r\n",
+        );
+        assert!(text.contains(&format!("reign = {{ {TAG} }}\r\n")), "{text:?}");
+        assert!(!text.replace("\r\n", "").contains('\n'), "only CRLF line ends: {text:?}");
+    }
+
+    /// A hand-made project (like Exreign) depends on more engine crates than
+    /// a new one, some as build dependencies, some with features: switching
+    /// versions moves every one of them and keeps their other settings.
+    #[test]
+    fn every_engine_crate_moves_with_the_engine_version() {
+        let root =
+            std::env::temp_dir().join(format!("reign-engine-crates-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = "[package]
+name = \"game\"
+version = \"0.1.0\"
+
+            [features]
+editor = [\"reign/editor\"]
+
+            [dependencies]
+            reign = { path = \"../reign-engine/engine/reign\" }
+            reign_editor = { path = \"../reign-engine/engine/reign_editor\", optional = true, features = [\"a\", \"b\"] }
+            reign_of_terror = \"1\"
+            serde = { version = \"1\", features = [\"derive\"] }
+
+            [build-dependencies]
+            reign_assets = { path = \"../reign-engine/engine/reign_assets\" }
+";
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+
+        let release = EngineSource::release("0.3.1");
+        set_project_engine(&root, &release).unwrap();
+        let text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert_eq!(project_engine(&root), Some(release.clone()));
+        assert_eq!(text.matches("tag = \"v0.3.1\"").count(), 3, "{text}");
+        assert!(
+            !text.contains("reign-engine/engine"),
+            "no crate left on the old path:
+{text}"
+        );
+        assert!(
+            text.contains("optional = true, features = [\"a\", \"b\"] }"),
+            "other settings are kept:
+{text}"
+        );
+        assert!(
+            text.contains(
+                "reign_of_terror = \"1\"
+"
+            ),
+            "not an engine crate:
+{text}"
+        );
+        assert!(text.contains("serde = { version = \"1\", features = [\"derive\"] }"));
+        assert!(text.contains("editor = [\"reign/editor\"]"), "features table untouched");
+
+        // And back to a checkout: paths into it, settings still kept.
+        let local = EngineSource::Local(PathBuf::from("/src/reign"));
+        set_project_engine(&root, &local).unwrap();
+        let text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(text.contains("reign_assets = { path = \"/src/reign/engine/reign_assets\" }"));
+        assert!(text.contains(
+            "reign_editor = { path = \"/src/reign/engine/reign_editor\", optional = true, features = [\"a\", \"b\"] }"
+        ), "{text}");
+        assert!(!text.contains("tag ="), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn init_writes_the_game_binary() {
         let root =
             std::env::temp_dir().join(format!("reign-init-game-test-{}", std::process::id()));
@@ -806,6 +1612,32 @@ mod tests {
             std::fs::read_to_string(root.join("src/game.rs")).unwrap().contains("old::scripts()")
         );
         assert!(!ensure_game_bin(&root, "Old").unwrap(), "only once");
+        // Deleted later: the listed src/game.rs comes back.
+        std::fs::remove_file(root.join("src/game.rs")).unwrap();
+        assert!(ensure_game_bin(&root, "Old").unwrap());
+        assert!(root.join("src/game.rs").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A hand-made project (Exreign) lists its game binary with its own
+    /// source: Export must not add a template src/game.rs beside it.
+    #[test]
+    fn a_game_binary_with_its_own_source_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("reign-own-game-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = "[package]\nname = \"exreign\"\nversion = \"0.1.0\"\n\n\
+             [[bin]]\nname = \"exreign\"\npath = \"src/main.rs\"\n\n\
+             [[bin]]   # what Export Game builds\nname = \"exreign-game\"\npath = 'src/main.rs'\n\n\
+             [[bin]]\nname = \"exreign-editor\"\npath = \"src/bin/editor.rs\"\n";
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        assert!(!ensure_game_bin(&root, "Exreign").unwrap());
+        assert!(!root.join("src/game.rs").exists());
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), manifest);
+        assert_eq!(bin_path(manifest, "exreign-game"), Some(Some("src/main.rs".into())));
+        assert_eq!(bin_path(manifest, "exreign-editor"), Some(Some("src/bin/editor.rs".into())));
+        assert_eq!(bin_path("[[bin]]\nname = \"a\"\n", "a"), Some(None));
+        assert_eq!(bin_path(manifest, "nope"), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
