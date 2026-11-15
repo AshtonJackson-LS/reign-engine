@@ -75,6 +75,14 @@ instead. **Beta updates** on also takes betas (`v0.3.0-beta.4`), which are
 built from every merge to `main`. Debug builds and builds inside a Cargo
 `target` folder never update on their own. `REIGN_NO_UPDATE_CHECK=1` turns
 the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI checks.
+While an update (or an engine version from **Engine version…**) downloads, a
+window shows a bar, how much has arrived of the whole, the speed and the time
+left, with **Cancel**; closing it doesn't stop the download, and the green
+arrow brings it back. When an update has installed, a window offers **Restart
+now** or **Later**. `REIGN_DOWNLOAD_BASE=http://127.0.0.1:8765` takes release
+files from `<base>/<tag>/<file>` instead of GitHub, to try the window against
+a slow local server (the signature check still applies, so an unsigned file is
+never installed).
 How releases are made, and forks: [RELEASING.md](RELEASING.md).
 
 Each project records its engine version (••• → **Engine version…** changes

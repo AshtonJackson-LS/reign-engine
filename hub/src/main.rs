@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod download;
 mod intro;
 mod launch;
 mod signing;
@@ -269,6 +270,29 @@ struct Hub {
     open_choice: Option<OpenChoice>,
     /// A project to open once its engine version has downloaded.
     open_after_download: Option<(PathBuf, String)>,
+    /// Download windows the user closed; each stays hidden until its
+    /// download ends (the download carries on).
+    closed_downloads: Vec<DownloadKind>,
+    /// An update has finished installing: its window offers a restart.
+    update_done: bool,
+}
+
+/// Which download a progress window is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadKind {
+    /// The hub updating itself.
+    Update,
+    /// An engine version for a project.
+    Engine,
+}
+
+/// What the user did in a download window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadAction {
+    /// Closed the window; the download carries on.
+    Close,
+    Cancel,
+    Restart,
 }
 
 struct VersionDialog {
@@ -310,6 +334,8 @@ impl Hub {
             version_dialog: None,
             open_choice: None,
             open_after_download: None,
+            closed_downloads: Vec::new(),
+            update_done: false,
         }
     }
 
@@ -595,7 +621,14 @@ impl Hub {
         // A green arrow beside the version when a newer release is out.
         let (version, busy, installed, tip) = match self.updater.state.clone() {
             update::State::Available(v) => (v.clone(), false, false, format!("Update to {v}")),
-            update::State::Installing(v) => (v.clone(), true, false, format!("Installing {v}…")),
+            update::State::Installing(v) => {
+                let percent = self
+                    .updater
+                    .progress()
+                    .and_then(|p| p.snapshot().fraction())
+                    .map_or(String::new(), |f| format!(" {:.0}%", f * 100.0));
+                (v.clone(), true, false, format!("Installing {v}…{percent} (click for details)"))
+            }
             update::State::Installed(v) => {
                 (v.clone(), false, true, format!("{v} is installed: click to restart the hub"))
             }
@@ -622,19 +655,30 @@ impl Hub {
         painter.line_segment([center + Vec2::new(-5.0, 0.5), tip_of_arrow], stroke);
         painter.line_segment([center + Vec2::new(5.0, 0.5), tip_of_arrow], stroke);
 
-        if !response.clicked() || busy {
+        if !response.clicked() {
             return;
         }
-        if !installed {
+        if busy {
+            // Bring the progress window back if it was closed.
+            self.closed_downloads.retain(|k| *k != DownloadKind::Update);
+        } else if !installed {
             self.info(format!("Updating to {version}…"));
+            self.closed_downloads.retain(|k| *k != DownloadKind::Update);
             self.updater.install(ui.ctx());
-        } else if !self.running.is_empty() {
-            self.info("Close open editors, then click the arrow to restart");
         } else {
-            match self.updater.restart() {
-                Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(e) => self.error(e),
-            }
+            self.restart_hub(ui.ctx());
+        }
+    }
+
+    /// Starts the updated hub and closes this one, once no editor is open.
+    fn restart_hub(&mut self, ctx: &egui::Context) {
+        if !self.running.is_empty() {
+            self.info("Close open editors, then click the arrow to restart");
+            return;
+        }
+        match self.updater.restart() {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.error(e),
         }
     }
 
@@ -1078,9 +1122,67 @@ impl Hub {
                     self.open(&path);
                 }
             }
+            Err(e) if e == download::CANCELLED => {
+                self.open_after_download = None;
+                self.info(format!("Download of engine {version} cancelled"));
+            }
             Err(e) => {
                 self.open_after_download = None;
                 self.error(format!("Couldn't get engine {version}: {e}"));
+            }
+        }
+    }
+
+    /// The windows for downloads in progress (the hub updating itself, an
+    /// engine version for a project) and for a finished update: a bar, what
+    /// has arrived of the whole, and the speed. Closing one hides it; the
+    /// download carries on and the update arrow brings it back.
+    fn download_windows(&mut self, ctx: &egui::Context) {
+        let update = self.updater.progress();
+        let engine = self.versions.progress.clone();
+        // A closed window stays closed only for its own download.
+        if update.is_none() {
+            self.closed_downloads.retain(|k| *k != DownloadKind::Update);
+        }
+        if engine.is_none() {
+            self.closed_downloads.retain(|k| *k != DownloadKind::Engine);
+        }
+        if update.is_some() || engine.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        let mut actions = Vec::new();
+        for (kind, progress) in [(DownloadKind::Update, update), (DownloadKind::Engine, engine)] {
+            let Some(progress) = progress else { continue };
+            if self.closed_downloads.contains(&kind) {
+                continue;
+            }
+            let snapshot = progress.snapshot();
+            let title = match kind {
+                DownloadKind::Update => format!("Updating to {}", snapshot.label),
+                DownloadKind::Engine => format!("Downloading {}", snapshot.label),
+            };
+            let action =
+                download_window(ctx, ("download", kind as u8), &title, Some(&snapshot), None);
+            actions.push((kind, action));
+        }
+        if self.update_done
+            && let update::State::Installed(version) = self.updater.state.clone()
+        {
+            let done = format!("Reign {version} is installed");
+            let action = download_window(ctx, ("download", 2), &done, None, Some(&version));
+            actions.push((DownloadKind::Update, action));
+        }
+        for (kind, action) in actions {
+            match (kind, action) {
+                (_, None) => {}
+                (DownloadKind::Update, Some(DownloadAction::Cancel)) => self.updater.cancel(),
+                (DownloadKind::Engine, Some(DownloadAction::Cancel)) => self.versions.cancel(),
+                (_, Some(DownloadAction::Close)) if self.update_done => self.update_done = false,
+                (kind, Some(DownloadAction::Close)) => self.closed_downloads.push(kind),
+                (_, Some(DownloadAction::Restart)) => {
+                    self.update_done = false;
+                    self.restart_hub(ctx);
+                }
             }
         }
     }
@@ -1519,11 +1621,15 @@ impl eframe::App for Hub {
             self.updater.check(&ctx);
         }
         match self.updater.poll(&ctx) {
-            Some(Ok(news)) => self.info(news),
+            Some(Ok(news)) => {
+                self.update_done = matches!(self.updater.state, update::State::Installed(_));
+                self.info(news);
+            }
             Some(Err(error)) => self.error(error),
             None => {}
         }
         self.poll_versions();
+        self.download_windows(&ctx);
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
@@ -1621,6 +1727,115 @@ impl eframe::App for Hub {
         self.open_choice_dialog(&ctx);
         self.intro.show(&ctx, &self.grain, VERSION);
     }
+}
+
+/// One download's window: a bar, `12.3 MB of 48.1 MB · 3.2 MB/s · about 11 s
+/// left`, and Cancel. With no `snapshot` and a version, the finished update:
+/// Restart now or Later. Returns what the user did this frame.
+fn download_window(
+    ctx: &egui::Context,
+    id: (&str, u8),
+    title: &str,
+    snapshot: Option<&download::Snapshot>,
+    installed: Option<&str>,
+) -> Option<DownloadAction> {
+    let mut action = None;
+    let height = if installed.is_some() { 170.0 } else { 200.0 };
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of(id),
+        egui::ViewportBuilder::default()
+            .with_title(format!("{title} - Reign Hub"))
+            .with_inner_size([480.0, height])
+            .with_resizable(false),
+        |ui, _| {
+            if ui.input(|i| i.viewport().close_requested()) {
+                action = Some(DownloadAction::Close);
+            }
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(GUTTER as i8, 22)),
+                )
+                .show(ui, |ui| {
+                    ui.label(text(title, Face::Bold, 20.0, TEXT, 0.0));
+                    ui.add_space(14.0);
+                    if let Some(version) = installed {
+                        let mut note = text(
+                            format!(
+                                "Restart the hub to switch to Reign {version}. Open editors \
+                                 need to be closed first."
+                            ),
+                            Face::Regular,
+                            13.5,
+                            MUTED,
+                            -0.1,
+                        );
+                        note.wrap.max_width = ui.available_width();
+                        ui.label(note);
+                        ui.add_space(16.0);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(theme::primary("Restart now")).clicked() {
+                                action = Some(DownloadAction::Restart);
+                            }
+                            if ui.add(theme::secondary("Later")).clicked() {
+                                action = Some(DownloadAction::Close);
+                            }
+                        });
+                        return;
+                    }
+                    let Some(snapshot) = snapshot else { return };
+                    let downloading = matches!(
+                        snapshot.phase,
+                        download::Phase::Starting | download::Phase::Downloading
+                    );
+                    // Full once the download is over: what is left is quick.
+                    let fraction = if downloading { snapshot.fraction() } else { Some(1.0) };
+                    match fraction {
+                        Some(f) => {
+                            let fill = if downloading { GOOD } else { GOOD.gamma_multiply(0.45) };
+                            // The bar's empty track is the "extreme" background,
+                            // which is nearly the window's own colour here.
+                            ui.scope(|ui| {
+                                ui.visuals_mut().extreme_bg_color = HAIRLINE;
+                                ui.add(
+                                    egui::ProgressBar::new(f)
+                                        .desired_width(ui.available_width())
+                                        .desired_height(14.0)
+                                        .fill(fill),
+                                );
+                            });
+                        }
+                        None => {
+                            ui.add(egui::Spinner::new());
+                        }
+                    }
+                    ui.add_space(8.0);
+                    let percent = fraction
+                        .filter(|_| downloading)
+                        .map_or(String::new(), |f| format!("{:.0}%   ", f * 100.0));
+                    let line = if downloading && snapshot.received > 0 {
+                        format!("{percent}{}", snapshot.detail())
+                    } else {
+                        snapshot.phase_text().to_owned()
+                    };
+                    ui.label(text(line, Face::Medium, 13.5, TEXT, -0.1));
+                    ui.add_space(4.0);
+                    ui.label(text(
+                        "Closing this window doesn't stop it.",
+                        Face::Regular,
+                        12.0,
+                        FAINT,
+                        -0.1,
+                    ));
+                    ui.add_space(12.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled(downloading, theme::secondary("Cancel")).clicked() {
+                            action = Some(DownloadAction::Cancel);
+                        }
+                    });
+                });
+        },
+    );
+    action
 }
 
 /// `silent`: no questions (Settings → Apps' QuietUninstallString).

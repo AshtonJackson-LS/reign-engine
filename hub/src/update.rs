@@ -12,15 +12,23 @@
 //! Windows 10+, macOS and Linux all ship.
 //!
 //! `REIGN_NO_UPDATE_CHECK=1` turns checking off; `REIGN_UPDATE_FAKE=1.2.3`
-//! shows the arrow without a real release.
+//! shows the arrow without a real release. `REIGN_DOWNLOAD_BASE=URL` takes
+//! release files from `URL/<tag>/<file>` instead of GitHub (for testing the
+//! download window against a local server; the signature check still applies,
+//! so nothing unsigned is ever installed).
+//!
+//! Downloads report their progress (see `download.rs`): the hub shows a
+//! window with a bar, the size so far and in all, and the speed.
 
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 use reign_setup::{PROGRAMS, system_tool};
 
+use super::download::{CANCELLED, Phase, Progress, download_file};
 use super::signing;
 
 pub use reign_build::release::REPO;
@@ -75,11 +83,26 @@ pub struct Updater {
     rx: Option<Receiver<Message>>,
     /// The new hub, once an update is installed.
     new_hub: Option<PathBuf>,
+    /// How the download in progress is going.
+    progress: Option<Arc<Progress>>,
 }
 
 impl Updater {
     pub fn new(automatic: bool, beta: bool) -> Self {
-        Updater { state: State::Idle, automatic, beta, rx: None, new_hub: None }
+        Updater { state: State::Idle, automatic, beta, rx: None, new_hub: None, progress: None }
+    }
+
+    /// The download in progress, while one is.
+    pub fn progress(&self) -> Option<Arc<Progress>> {
+        self.progress.clone()
+    }
+
+    /// Stops the download in progress. The state goes back to
+    /// [`State::Available`] when it has stopped.
+    pub fn cancel(&self) {
+        if let Some(progress) = &self.progress {
+            progress.cancel();
+        }
     }
 
     /// Switches between stable and beta releases, checking again if
@@ -115,8 +138,10 @@ impl Updater {
             return super::reveal(Path::new(&format!("https://github.com/{REPO}/releases/latest")));
         }
         self.state = State::Installing(version.clone());
+        let progress = Arc::new(Progress::new(format!("Reign {version}")));
+        self.progress = Some(progress.clone());
         self.run(ctx, move || {
-            let result = install(&version);
+            let result = install(&version, &progress);
             Message::Installed(version, result)
         });
     }
@@ -151,6 +176,7 @@ impl Updater {
             // Offline is normal; try again next launch.
             Message::Latest(Err(e)) => log::info!("update check failed: {e}"),
             Message::Installed(version, Ok(hub)) => {
+                self.progress = None;
                 self.new_hub = Some(hub);
                 self.state = State::Installed(version.clone());
                 return Some(Ok(format!(
@@ -158,7 +184,11 @@ impl Updater {
                 )));
             }
             Message::Installed(version, Err(e)) => {
+                self.progress = None;
                 self.state = State::Available(version);
+                if e == CANCELLED {
+                    return Some(Ok("Update cancelled. The green arrow starts it again.".into()));
+                }
                 return Some(Err(format!("Update failed: {e}")));
             }
         }
@@ -239,12 +269,17 @@ fn tag_names(json: &str) -> Vec<String> {
 }
 
 /// Downloads release `version` for this platform, checks its signature and
-/// returns the contents of [`PROGRAMS`], in that order.
-pub fn fetch_release(version: &str) -> Result<Vec<Vec<u8>>, String> {
+/// returns the contents of [`PROGRAMS`], in that order. `progress` follows
+/// the download and the steps after it, and can cancel it.
+pub fn fetch_release(version: &str, progress: &Progress) -> Result<Vec<Vec<u8>>, String> {
     let package = PACKAGE.ok_or("there are no Reign releases for this platform")?;
-    let work = std::env::temp_dir().join(format!("reign-release-{version}-{}", std::process::id()));
+    // One folder per download, not per process: two at once don't collide.
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work =
+        std::env::temp_dir().join(format!("reign-release-{version}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
-    let result = download_and_unpack(&package, version, &work);
+    let result = download_and_unpack(&package, version, &work, progress);
     let _ = std::fs::remove_dir_all(&work);
     result
 }
@@ -253,20 +288,24 @@ fn download_and_unpack(
     package: &Package,
     version: &str,
     work: &Path,
+    progress: &Progress,
 ) -> Result<Vec<Vec<u8>>, String> {
     let unpacked = work.join("unpacked");
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
     let tag = format!("v{version}");
     let archive = work.join(package.asset);
     let sig = work.join(format!("{}.sig", package.asset));
-    download(&tag, package.asset, &archive)?;
-    download(&tag, &format!("{}.sig", package.asset), &sig)?;
+    download(&tag, package.asset, &archive, Some(progress))?;
+    // The signature is a few hundred bytes: nothing to show.
+    download(&tag, &format!("{}.sig", package.asset), &sig, None)?;
 
+    progress.set_phase(Phase::Verifying);
     let bytes = std::fs::read(&archive).map_err(|e| e.to_string())?;
     let signature = std::fs::read_to_string(&sig).map_err(|e| e.to_string())?;
     signing::verify(signing::PUBLIC_KEY, &tag, &bytes, &signature)
         .map_err(|e| format!("the download isn't signed by the Reign release key ({e})"))?;
 
+    progress.set_phase(Phase::Unpacking);
     let status = system_tool("tar")
         .arg("-xf")
         .arg(&archive)
@@ -286,23 +325,27 @@ fn download_and_unpack(
         .collect()
 }
 
-fn download(tag: &str, name: &str, to: &Path) -> Result<(), String> {
-    let url = format!("https://github.com/{REPO}/releases/download/{tag}/{name}");
-    let status = system_tool("curl")
-        .args(["-fsSL", "--max-time", "600", "-o"])
-        .arg(to)
-        .arg(&url)
-        .status()
-        .map_err(|e| format!("can't run curl: {e}"))?;
-    if status.success() { Ok(()) } else { Err(format!("couldn't download {url}")) }
+fn download(tag: &str, name: &str, to: &Path, progress: Option<&Progress>) -> Result<(), String> {
+    download_file(&release_url(tag, name), to, progress)
+}
+
+/// Where a release's file is: GitHub's, or `$REIGN_DOWNLOAD_BASE`'s.
+fn release_url(tag: &str, name: &str) -> String {
+    let base = std::env::var("REIGN_DOWNLOAD_BASE")
+        .ok()
+        .map(|b| b.trim_end_matches('/').to_owned())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| format!("https://github.com/{REPO}/releases/download"));
+    format!("{base}/{tag}/{name}")
 }
 
 /// Downloads release `version` and swaps it in beside the running hub.
 /// Returns the new hub's path.
-fn install(version: &str) -> Result<PathBuf, String> {
+fn install(version: &str, progress: &Progress) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or("the hub has no folder")?;
-    let programs = fetch_release(version)?;
+    let programs = fetch_release(version, progress)?;
+    progress.set_phase(Phase::Installing);
     let files: Vec<(&str, &[u8])> =
         PROGRAMS.iter().copied().zip(programs.iter().map(Vec::as_slice)).collect();
     reign_setup::place_files(dir, &files)?;
@@ -341,6 +384,49 @@ mod tests {
         assert_eq!(tags, ["0.2.0", "0.10.1", "0.10.2-beta.3", "0.1.0"]);
         sort_newest_first(&mut tags);
         assert_eq!(tags, ["0.10.2-beta.3", "0.10.1", "0.2.0", "0.1.0"]);
+    }
+
+    /// A real download of a real, signed release from GitHub, with progress.
+    /// It needs the network, so it only runs on request:
+    /// `cargo test -p reign_hub -- --ignored a_real_release`. It downloads,
+    /// checks the signature and unpacks; it installs nothing.
+    #[test]
+    #[ignore = "downloads a release from GitHub"]
+    fn a_real_release_downloads_with_progress() {
+        use crate::download::{Phase, Progress};
+        let Some(package) = PACKAGE else { return };
+        let progress = std::sync::Arc::new(Progress::new("Reign 0.2.0"));
+        let watcher = {
+            let progress = progress.clone();
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while seen.last().is_none_or(|s: &crate::download::Snapshot| {
+                    !matches!(s.phase, Phase::Verifying | Phase::Unpacking)
+                }) {
+                    seen.push(progress.snapshot());
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                seen
+            })
+        };
+        let programs = fetch_release("0.2.0", &progress).expect("a signed release downloads");
+        let seen = watcher.join().unwrap();
+        assert_eq!(programs.len(), PROGRAMS.len());
+        assert!(programs.iter().all(|p| p.len() > 100_000), "real programs, not stubs");
+        // The total is the archive's real size, known before it finished.
+        let total = seen.iter().rev().find_map(|s| s.total).expect("a total was reported");
+        assert!(total > 1_000_000, "{} is {total} bytes", package.asset);
+        assert!(seen.iter().any(|s| s.total.is_some() && s.received < total), "total known early");
+        let received: Vec<u64> = seen.iter().map(|s| s.received).collect();
+        assert!(received.windows(2).all(|w| w[0] <= w[1]), "never goes backwards");
+        assert_eq!(seen.last().unwrap().received, total, "the bar reaches the end");
+        eprintln!(
+            "{}: {} bytes, {} samples, fastest {:.1} MB/s",
+            package.asset,
+            total,
+            seen.len(),
+            seen.iter().filter_map(|s| s.speed).fold(0.0, f64::max) / 1e6
+        );
     }
 
     #[test]

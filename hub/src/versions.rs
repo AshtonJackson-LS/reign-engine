@@ -7,10 +7,12 @@
 //! this: its Cargo.toml names its engine, and its own editor is built from it.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
 
+use super::download::{Phase, Progress};
 use super::update::{PACKAGE, fetch_release, is_beta, parse_version, releases, sort_newest_first};
 
 /// Where downloaded versions go: `versions/<version>/` beside the hub.
@@ -52,13 +54,15 @@ pub struct Versions {
     pub releases: Option<Result<Vec<String>, String>>,
     /// A version being downloaded.
     pub installing: Option<String>,
+    /// How that download is going.
+    pub progress: Option<Arc<Progress>>,
     listing: Option<Receiver<Result<Vec<String>, String>>>,
     download: Option<Receiver<Result<(), String>>>,
 }
 
 impl Versions {
     pub fn new() -> Self {
-        Versions { releases: None, installing: None, listing: None, download: None }
+        Versions { releases: None, installing: None, progress: None, listing: None, download: None }
     }
 
     /// Fetches the release list in the background, if it isn't already.
@@ -74,8 +78,17 @@ impl Versions {
     pub fn install(&mut self, ctx: &egui::Context, version: &str) {
         if self.installing.is_none() {
             self.installing = Some(version.to_owned());
+            let progress = Arc::new(Progress::new(format!("Reign engine {version}")));
+            self.progress = Some(progress.clone());
             let version = version.to_owned();
-            self.download = Some(background(ctx, move || install_version(&version)));
+            self.download = Some(background(ctx, move || install_version(&version, &progress)));
+        }
+    }
+
+    /// Stops the download in progress, if there is one.
+    pub fn cancel(&self) {
+        if let Some(progress) = &self.progress {
+            progress.cancel();
         }
     }
 
@@ -88,6 +101,7 @@ impl Versions {
         }
         let result = self.download.as_ref()?.try_recv().ok()?;
         self.download = None;
+        self.progress = None;
         Some((self.installing.take()?, result))
     }
 
@@ -119,9 +133,10 @@ pub fn background<T: Send + 'static>(
     rx
 }
 
-fn install_version(version: &str) -> Result<(), String> {
+fn install_version(version: &str, progress: &Progress) -> Result<(), String> {
     let dir = versions_dir().ok_or("the hub has no folder")?.join(version);
-    let programs = fetch_release(version)?;
+    let programs = fetch_release(version, progress)?;
+    progress.set_phase(Phase::Installing);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)
         .and_then(|()| reign_setup::write_program(&dir.join(super::editor_name()), &programs[1]))
