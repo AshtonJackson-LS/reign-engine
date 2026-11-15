@@ -104,7 +104,7 @@ pub use slicer::{fit as grid_fit, slice as slice_grid};
 pub use undo::{Edits, TOOL_HISTORY};
 
 use reign_app::{App, Ctx};
-use reign_assets::{AssetChange, AssetDb, Guid};
+use reign_assets::{AssetChange, AssetDb, Guid, RgbaImage};
 use reign_scene::{ComponentRegistry, ObjectId, Scene};
 
 /// An app the editor can host.
@@ -239,6 +239,13 @@ pub trait EditorApp: App {
         _sprite: Option<&str>,
         _at: (i32, i32),
     ) -> Option<ObjectId> {
+        None
+    }
+
+    /// A new icon for the editor's window, when the app has one to give (a
+    /// setting that changed it). Asked once a frame; the editor shows it and
+    /// forgets it, so give each icon once. macOS has no window icon.
+    fn take_window_icon(&mut self) -> Option<RgbaImage> {
         None
     }
 }

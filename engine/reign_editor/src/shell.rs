@@ -11,7 +11,7 @@ use reign_app::winit::application::ApplicationHandler;
 use reign_app::winit::event::{ElementState, WindowEvent};
 use reign_app::winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
-use reign_app::winit::window::{Fullscreen, Window, WindowId};
+use reign_app::winit::window::{Fullscreen, Icon, Window, WindowId};
 use reign_app::{Ctx, Frame, Pads, TickCtx};
 use reign_core::checksum;
 use reign_render::{Renderer, VIEW_HEIGHT, VIEW_WIDTH, view_scale, wgpu};
@@ -605,6 +605,13 @@ impl<A: EditorApp> Session<A> {
             scene_dialogs(ui.ctx(), app, panels, &mut requests);
         });
         self.app.set_play_mode(self.play.mode());
+        // An icon the app just changed (a project setting): show it now.
+        if let Some(icon) = self.app.take_window_icon() {
+            match Icon::from_rgba(icon.rgba, icon.width, icon.height) {
+                Ok(icon) => self.window.set_window_icon(Some(icon)),
+                Err(e) => log::warn!("can't use that window icon: {e}"),
+            }
+        }
         self.apply_create();
         self.after_panels(selected_before);
         self.prefab_requests();

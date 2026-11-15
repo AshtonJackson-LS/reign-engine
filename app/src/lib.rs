@@ -36,6 +36,7 @@ pub mod icon;
 mod input;
 pub mod physics;
 mod player;
+mod project_settings;
 mod runtime;
 mod starter;
 mod tilemap_assets;

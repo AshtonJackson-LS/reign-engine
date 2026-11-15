@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::Audio;
 use crate::code::Code;
 use crate::components::{Camera, Image, SpriteRenderer, TilemapRenderer, sprite_size};
+use crate::project_settings::ProjectSettings;
 use crate::runtime::{self, Keyboard, Scripts, World, schedule};
 use crate::view::{CLEAR, Sprites};
 use crate::{DB, physics, player, starter};
@@ -104,6 +105,8 @@ pub struct ReignEngine {
     /// Whether the last frame was in Play, to hear it stop.
     was_playing: bool,
     code: Code,
+    /// The Project Settings dialog (the project's app icon).
+    settings: ProjectSettings,
     scene_file: Option<PathBuf>,
     sprites: Sprites,
     view_origin: (f32, f32),
@@ -125,6 +128,7 @@ impl ReignEngine {
             audio: Audio::default(),
             was_playing: false,
             code,
+            settings: ProjectSettings::default(),
             scene_file: None,
             sprites: Sprites::default(),
             view_origin: (0.0, 0.0),
@@ -310,7 +314,13 @@ impl EditorApp for ReignEngine {
 
     fn toolbar_ui(&mut self, ui: &mut egui::Ui) -> EditorRequests {
         let scene_file = self.scene_file.clone();
+        self.settings.menu(ui);
+        self.settings.dialog(ui.ctx(), &self.project.root);
         self.code.toolbar_ui(ui, scene_file.as_deref())
+    }
+
+    fn take_window_icon(&mut self) -> Option<reign::assets::RgbaImage> {
+        self.settings.take_new_icon()
     }
 
     fn debug_ui(&mut self, _ctx: &mut Ctx, ui: &mut egui::Ui) {

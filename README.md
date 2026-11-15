@@ -283,8 +283,11 @@ minutes.
 
 A project's windows (its editor and its game) and its exported game show an
 icon. With none of its own, a project gets the Reign project icon (the hub's
-"R", inverted: dark on crimson). To use your own, put a file named
-**`icon.png`** next to `ReignProject.ron`. It must be:
+"R", inverted: dark on crimson). To use your own, open **Project → Project
+Settings…** in the editor and choose an image (it is copied into the project
+as **`icon.png`**, next to `ReignProject.ron`; you can also put the file there
+yourself). **Use the default** removes it again. The editor's window shows the
+change at once. The image must be:
 
 - a **PNG** (JPEG, GIF and `.ico` are not accepted),
 - **square**,
@@ -292,8 +295,9 @@ icon. With none of its own, a project gets the Reign project icon (the hub's
   is kept), and
 - no larger than **8 MB**.
 
-An image that breaks a rule is not used, and the reason is logged. Export
-Game puts the icon in the game: `icon.png` beside the game (its window icon), the icon of the `.exe`
+An image that breaks a rule is refused with the reason in plain words (and one
+that is already in the project is skipped and logged). Export Game puts the
+icon in the game: `icon.png` beside the game (its window icon), the icon of the `.exe`
 file on Windows, and `AppIcon.icns` in the macOS app. The project's own icon
 always wins; the default only fills a gap, so a game that already embeds an
 icon of its own in its program keeps it.
