@@ -43,8 +43,14 @@ pub fn windows_entries(image: &RgbaImage) -> Vec<IconEntry> {
 /// The resource that groups the sizes: Windows' `GRPICONDIR`, a header and
 /// one 14-byte entry per size naming the resource (1, 2, 3...) that holds
 /// its pixels.
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub fn group_icon(entries: &[IconEntry]) -> Vec<u8> {
+    group_icon_from(entries, 1)
+}
+
+/// [`group_icon`] with the sizes in resources `first`, `first + 1`...
+#[cfg(any(windows, test))]
+fn group_icon_from(entries: &[IconEntry], first: u16) -> Vec<u8> {
     let mut out = Vec::with_capacity(6 + entries.len() * 14);
     out.extend_from_slice(&0u16.to_le_bytes()); // reserved
     out.extend_from_slice(&1u16.to_le_bytes()); // 1 = icon
@@ -59,7 +65,7 @@ pub fn group_icon(entries: &[IconEntry]) -> Vec<u8> {
         out.extend_from_slice(&1u16.to_le_bytes()); // colour planes
         out.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
         out.extend_from_slice(&(entry.png.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(i as u16 + 1).to_le_bytes()); // resource id
+        out.extend_from_slice(&(first + i as u16).to_le_bytes()); // resource id
     }
     out
 }
@@ -87,13 +93,12 @@ pub fn icns(image: &RgbaImage) -> Vec<u8> {
 }
 
 /// Whether the Windows program `exe` already has an icon (a project can
-/// embed its own when it is built). Always false elsewhere, where there is
-/// none to have.
+/// embed its own when it is built), under any id or name. Always false
+/// elsewhere, where there is none to have.
 pub fn has_exe_icon(exe: &std::path::Path) -> bool {
     #[cfg(windows)]
     {
-        windows::resource_size(exe, windows::GROUP, 1).is_some()
-            || windows::resource_size(exe, windows::GROUP, 101).is_some()
+        windows::icon_count(exe) > 0
     }
     #[cfg(not(windows))]
     {
@@ -117,18 +122,22 @@ pub fn set_exe_icon(exe: &std::path::Path, image: &RgbaImage) -> Result<(), Stri
     }
 }
 
+/// Test helpers for real programs: see `windows::probe`.
+#[cfg(all(windows, test))]
+pub(crate) use windows::probe;
+
 #[cfg(windows)]
 mod windows {
-    //! The three resource-update calls of the Windows API, which are the way
-    //! to change a program's resources (there is no safe equivalent in the
-    //! standard library). They are only given pointers to data this module
-    //! owns for the length of each call.
+    //! The Windows API calls behind the icon: the three resource-update calls
+    //! (the way to change a program's resources; there is no safe equivalent
+    //! in the standard library), and the shell's icon count. They are only
+    //! given pointers to data this module owns for the length of each call.
 
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
-    use super::{IconEntry, group_icon};
+    use super::{IconEntry, group_icon_from};
 
     // Resource types, as the Windows API names them (`MAKEINTRESOURCE`).
     const RT_ICON: usize = 3;
@@ -147,14 +156,59 @@ mod windows {
         fn EndUpdateResourceW(update: *mut c_void, discard: i32) -> i32;
     }
 
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ExtractIconExW(
+            file: *const u16,
+            index: i32,
+            large: *mut *mut c_void,
+            small: *mut *mut c_void,
+            count: u32,
+        ) -> u32;
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    /// How many icons the file holds, whatever their ids or names: the
+    /// shell's own count (index -1 asks for it and loads nothing). 0 for a
+    /// file that isn't a program, or isn't there.
+    pub(super) fn icon_count(exe: &Path) -> u32 {
+        let path = wide(exe);
+        // SAFETY: `path` is NUL-terminated and outlives the call; with index
+        // -1 and no output arrays the call only counts.
+        let count = unsafe {
+            ExtractIconExW(path.as_ptr(), -1, std::ptr::null_mut(), std::ptr::null_mut(), 0)
+        };
+        // Some versions return u32::MAX for a file they can't read.
+        if count == u32::MAX { 0 } else { count }
+    }
+
+    /// Writes `entries` as icon group 1 (the one Explorer shows first among
+    /// numbered icons) with icons 1, 2, 3...
     pub(super) fn update(exe: &Path, entries: &[IconEntry]) -> Result<(), String> {
-        if entries.is_empty() {
+        write(exe, entries, 1, 1, false)
+    }
+
+    /// Writes an icon group: `group` names it, its sizes are icons
+    /// `first_icon`, `first_icon + 1`... With `fresh`, every resource the
+    /// program had is removed first (tests use it to make a program with no
+    /// icon).
+    fn write(
+        exe: &Path,
+        entries: &[IconEntry],
+        group: usize,
+        first_icon: usize,
+        fresh: bool,
+    ) -> Result<(), String> {
+        if entries.is_empty() && !fresh {
             return Err("the icon has no sizes to write".into());
         }
-        let wide: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
-        // SAFETY: `wide` is a NUL-terminated path that outlives the call.
-        // `false` keeps the program's other resources.
-        let handle = unsafe { BeginUpdateResourceW(wide.as_ptr(), 0) };
+        let path = wide(exe);
+        // SAFETY: `path` is NUL-terminated and outlives the call. Unless
+        // `fresh`, the program's other resources are kept.
+        let handle = unsafe { BeginUpdateResourceW(path.as_ptr(), i32::from(fresh)) };
         if handle.is_null() {
             return Err(format!("can't open {} to set its icon: {}", exe.display(), os_error()));
         }
@@ -177,10 +231,12 @@ mod windows {
                 result = Err(format!("can't write the icon: {}", os_error()));
             }
         };
-        for (i, entry) in entries.iter().enumerate() {
-            put(RT_ICON, i + 1, &entry.png);
+        if !entries.is_empty() {
+            for (i, entry) in entries.iter().enumerate() {
+                put(RT_ICON, first_icon + i, &entry.png);
+            }
+            put(RT_GROUP_ICON, group, &group_icon_from(entries, first_icon as u16));
         }
-        put(RT_GROUP_ICON, 1, &group_icon(entries));
         // SAFETY: closes the update; `discard` is true when something failed,
         // so a half-written icon is dropped rather than saved.
         let saved = unsafe { EndUpdateResourceW(handle, i32::from(result.is_err())) };
@@ -193,33 +249,56 @@ mod windows {
     fn os_error() -> std::io::Error {
         std::io::Error::last_os_error()
     }
-    unsafe extern "system" {
-        fn LoadLibraryExW(file_name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
-        fn FreeLibrary(module: *mut c_void) -> i32;
-        fn FindResourceW(module: *mut c_void, name: *const u16, kind: *const u16) -> *mut c_void;
-        fn SizeofResource(module: *mut c_void, resource: *mut c_void) -> u32;
-    }
 
-    const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x2;
     #[cfg(test)]
-    pub(super) const ICON: usize = RT_ICON;
-    pub(super) const GROUP: usize = RT_GROUP_ICON;
+    pub(crate) mod probe {
+        //! For the tests: programs with no icon, or one under another id, and
+        //! reading resources back.
 
-    /// The size in bytes of resource `id` of `kind` in `exe`, if it has one.
-    pub(super) fn resource_size(exe: &Path, kind: usize, id: usize) -> Option<u32> {
-        let wide: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
-        // SAFETY: as above; the module is loaded as data only (nothing runs),
-        // freed before returning, and the resource isn't used after that.
-        unsafe {
-            let module =
-                LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_AS_DATAFILE);
-            if module.is_null() {
-                return None;
+        use super::*;
+
+        unsafe extern "system" {
+            fn LoadLibraryExW(file_name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+            fn FreeLibrary(module: *mut c_void) -> i32;
+            fn FindResourceW(
+                module: *mut c_void,
+                name: *const u16,
+                kind: *const u16,
+            ) -> *mut c_void;
+            fn SizeofResource(module: *mut c_void, resource: *mut c_void) -> u32;
+        }
+
+        const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x2;
+        pub const ICON: usize = RT_ICON;
+        pub const GROUP: usize = RT_GROUP_ICON;
+
+        /// Removes every resource from `exe` (a copy): a program with no icon.
+        pub fn strip(exe: &Path) {
+            write(exe, &[], 0, 0, true).expect("resources removed");
+        }
+
+        /// Gives `exe` an icon the way another tool might: group `group`,
+        /// icons from `first_icon`.
+        pub fn put_icon_as(exe: &Path, entries: &[IconEntry], group: usize, first_icon: usize) {
+            write(exe, entries, group, first_icon, false).expect("icon written");
+        }
+
+        /// The size in bytes of resource `id` of `kind` in `exe`, if it has one.
+        pub fn resource_size(exe: &Path, kind: usize, id: usize) -> Option<u32> {
+            let path = wide(exe);
+            // SAFETY: the module is loaded as data only (nothing runs), freed
+            // before returning, and the resource isn't used after that.
+            unsafe {
+                let module =
+                    LoadLibraryExW(path.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_AS_DATAFILE);
+                if module.is_null() {
+                    return None;
+                }
+                let found = FindResourceW(module, id as *const u16, kind as *const u16);
+                let size = (!found.is_null()).then(|| SizeofResource(module, found));
+                FreeLibrary(module);
+                size
             }
-            let found = FindResourceW(module, id as *const u16, kind as *const u16);
-            let size = (!found.is_null()).then(|| SizeofResource(module, found));
-            FreeLibrary(module);
-            size
         }
     }
 }
@@ -323,8 +402,31 @@ mod tests {
         std::fs::write(&fake, b"not really a game").unwrap();
         assert!(!has_exe_icon(&fake), "not a program: no icon");
         assert!(!has_exe_icon(&dir.join("missing.exe")));
-        // This test's own program is built with the engine's icon (see build.rs).
-        assert_eq!(has_exe_icon(&std::env::current_exe().unwrap()), cfg!(windows));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real program with every resource removed has no icon; given one
+    /// under an id other than the usual (the way other tools may write it),
+    /// it is noticed all the same. Made from this test's own program, so it
+    /// doesn't matter whether that was built with an icon.
+    #[cfg(windows)]
+    #[test]
+    fn an_icon_under_any_id_is_noticed() {
+        use windows::probe::{GROUP, put_icon_as, resource_size, strip};
+        let dir = std::env::temp_dir().join(format!("reign-exe-icon-any-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("game.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        strip(&exe);
+        assert!(!has_exe_icon(&exe), "a stripped program has no icon");
+        assert_eq!(resource_size(&exe, GROUP, 1), None);
+
+        let entries = windows_entries(&flat(64, [1, 200, 3, 255]));
+        put_icon_as(&exe, &entries, 77, 500);
+        assert!(has_exe_icon(&exe), "group 77 counts");
+        assert_eq!(resource_size(&exe, GROUP, 77), Some(group_icon(&entries).len() as u32));
+        assert_eq!(resource_size(&exe, GROUP, 1), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -348,13 +450,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The real thing: copy a real Windows program (this test's own, which
-    /// already has the engine's icon), put the project's icon in the copy,
-    /// and read the resources back: they are the new icon's, sizes and all.
+    /// The real thing: copy a real Windows program (this test's own), put
+    /// the project's icon in the copy, and read the resources back: they are
+    /// the new icon's, sizes and all.
     #[cfg(windows)]
     #[test]
     fn a_real_program_gets_the_icon() {
-        use windows::{GROUP, ICON, resource_size};
+        use windows::probe::{GROUP, ICON, resource_size};
         let dir = std::env::temp_dir().join(format!("reign-exe-icon-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

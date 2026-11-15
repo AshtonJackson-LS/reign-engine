@@ -213,11 +213,24 @@ fn an_export_carries_the_games_icon() {
 #[cfg(windows)]
 #[test]
 fn the_default_icon_only_fills_a_gap() {
-    use crate::{exe_icon, icon};
-    // A real program with an icon already in it: this test's own.
-    let real = std::env::current_exe().unwrap();
-    let original = std::fs::read(&real).unwrap();
+    use crate::exe_icon::{self, probe};
+    use crate::icon;
     let (project, root) = project_with_a_level("icon-gap");
+    // Real programs made from this test's own (whether or not it was built
+    // with an icon): one with no resources at all, and one with an icon
+    // under an id of another tool's choosing.
+    let bare = root.join("bare.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &bare).unwrap();
+    probe::strip(&bare);
+    let real = root.join("real.exe");
+    std::fs::copy(&bare, &real).unwrap();
+    let theirs = exe_icon::windows_entries(&reign::assets::RgbaImage {
+        rgba: [9, 99, 199, 255].repeat(64 * 64),
+        width: 64,
+        height: 64,
+    });
+    probe::put_icon_as(&real, &theirs, 77, 500);
+    let original = std::fs::read(&real).unwrap();
     let export = |exe: &Path, own: Option<reign::assets::RgbaImage>, name: &str| {
         let made = export::assemble(&Export {
             title: name.into(),
@@ -246,11 +259,25 @@ fn the_default_icon_only_fills_a_gap() {
     let own = reign::assets::RgbaImage { rgba, width: 64, height: 64 };
     let replaced = export(&real, Some(own), "replaced");
     assert_ne!(std::fs::read(&replaced).unwrap(), original, "the project's icon went in");
+    assert!(probe::resource_size(&replaced, probe::GROUP, 1).is_some());
+
+    // No icon anywhere: the default goes in.
+    assert!(!exe_icon::has_exe_icon(&bare));
+    let filled = export(&bare, None, "filled");
+    assert!(exe_icon::has_exe_icon(&filled));
+    let default = exe_icon::windows_entries(icon::default_icon());
+    assert_eq!(
+        probe::resource_size(&filled, probe::GROUP, 1),
+        Some(exe_icon::group_icon(&default).len() as u32)
+    );
+    assert_eq!(
+        probe::resource_size(&filled, probe::ICON, 7),
+        Some(default[6].png.len() as u32),
+        "the 256 px default"
+    );
 
     // A file that isn't a program can't take an icon: that is a warning, not
-    // a failure, and the game's data and window icon are still written. (A
-    // real program with no icon getting the default is checked by hand, with
-    // a game exported from a new project.)
+    // a failure, and the game's data and window icon are still written.
     let plain = root.join("plain.exe");
     std::fs::write(&plain, b"not really a game").unwrap();
     assert!(!exe_icon::has_exe_icon(&plain));
