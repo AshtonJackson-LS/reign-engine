@@ -135,7 +135,7 @@ fn assemble(layout: Layout, name: &str) -> (PathBuf, PathBuf, PathBuf) {
         assets: project.assets(),
         out_dir: out_dir.clone(),
         layout,
-        icon: crate::icon::project_icon(&root),
+        icon: crate::icon::own_icon(&root),
     };
     let made = export::assemble(&export).expect("assembles");
     // Again, over the first: replaces it.
@@ -199,11 +199,64 @@ fn an_export_carries_the_games_icon() {
         assets: project.assets(),
         out_dir: root.join("Builds"),
         layout: Layout::Folder,
-        icon: icon::project_icon(&root),
+        icon: icon::own_icon(&root),
     };
     let made = export::assemble(&export).unwrap();
     let kept = icon::check(&std::fs::read(made.join(icon::FILE)).unwrap()).unwrap();
     assert_eq!((kept.width, &kept.rgba[..4]), (256, &[12, 34, 56, 255][..]));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// What goes in the game's file when the project has its own icon, has none
+/// but the program already has one, or has none and neither does the
+/// program. (Windows only: elsewhere a program holds no icon.)
+#[cfg(windows)]
+#[test]
+fn the_default_icon_only_fills_a_gap() {
+    use crate::{exe_icon, icon};
+    // A real program with an icon already in it: this test's own.
+    let real = std::env::current_exe().unwrap();
+    let original = std::fs::read(&real).unwrap();
+    let (project, root) = project_with_a_level("icon-gap");
+    let export = |exe: &Path, own: Option<reign::assets::RgbaImage>, name: &str| {
+        let made = export::assemble(&Export {
+            title: name.into(),
+            crate_name: name.into(),
+            exe: exe.to_owned(),
+            assets: project.assets(),
+            out_dir: root.join("Builds"),
+            layout: Layout::Folder,
+            icon: own,
+        })
+        .unwrap();
+        made.join(format!("{name}.exe"))
+    };
+
+    // No icon of the project's own, and the program has one: left exactly as
+    // it was.
+    let kept = export(&real, None, "keeps");
+    assert!(exe_icon::has_exe_icon(&kept));
+    assert_eq!(std::fs::read(&kept).unwrap(), original, "the program's own icon was not touched");
+
+    // The project's own icon replaces it.
+    let mut rgba = Vec::new();
+    for _ in 0..64 * 64 {
+        rgba.extend_from_slice(&[1, 2, 3, 255]);
+    }
+    let own = reign::assets::RgbaImage { rgba, width: 64, height: 64 };
+    let replaced = export(&real, Some(own), "replaced");
+    assert_ne!(std::fs::read(&replaced).unwrap(), original, "the project's icon went in");
+
+    // A file that isn't a program can't take an icon: that is a warning, not
+    // a failure, and the game's data and window icon are still written. (A
+    // real program with no icon getting the default is checked by hand, with
+    // a game exported from a new project.)
+    let plain = root.join("plain.exe");
+    std::fs::write(&plain, b"not really a game").unwrap();
+    assert!(!exe_icon::has_exe_icon(&plain));
+    let made = export(&plain, None, "plain");
+    assert_eq!(std::fs::read(&made).unwrap(), b"not really a game");
+    assert!(made.with_file_name(icon::FILE).is_file());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -222,6 +275,11 @@ fn a_mac_export_is_an_app_bundle() {
     let plist = std::fs::read_to_string(made.join("Contents/Info.plist")).unwrap();
     assert!(plist.contains("<key>CFBundleExecutable</key><string>space_rocks"), "{plist}");
     assert!(plist.contains("<string>Space: Rocks!</string>"), "{plist}");
+    // The app's icon: the file, and the plist naming it (without .icns).
+    assert!(plist.contains("<key>CFBundleIconFile</key><string>AppIcon</string>"), "{plist}");
+    let icns = std::fs::read(resources.join("AppIcon.icns")).unwrap();
+    assert_eq!(&icns[..4], b"icns");
+    assert_eq!(u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize, icns.len());
     check_data(&resources);
     let _ = std::fs::remove_dir_all(root);
 }

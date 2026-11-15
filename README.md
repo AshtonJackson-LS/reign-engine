@@ -279,6 +279,25 @@ project made before export existed gets `src/game.rs` and its `[[bin]]`
 added. The first release build compiles the engine and takes a few
 minutes.
 
+## Project icons
+
+A project's windows (its editor and its game) and its exported game show an
+icon. With none of its own, a project gets the Reign project icon (the hub's
+"R", inverted: dark on crimson). To use your own, put a file named
+**`icon.png`** next to `ReignProject.ron`. It must be:
+
+- a **PNG** (JPEG, GIF and `.ico` are not accepted),
+- **square**,
+- **64 to 1024 pixels** on a side (256 or 512 is a good choice; transparency
+  is kept), and
+- no larger than **8 MB**.
+
+An image that breaks a rule is not used, and the reason is logged. Export
+Game puts the icon in the game: `icon.png` beside the game (its window icon), the icon of the `.exe`
+file on Windows, and `AppIcon.icns` in the macOS app. The project's own icon
+always wins; the default only fills a gap, so a game that already embeds an
+icon of its own in its program keeps it.
+
 The game plays `scenes/main.scene.ron` (else the first scene) with the
 same simulation and drawing as Play mode. F11 toggles fullscreen.
 Flags: `--scene PATH`, `--fullscreen`, `--exit-after SECONDS`, and a

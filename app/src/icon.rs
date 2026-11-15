@@ -96,6 +96,17 @@ impl std::error::Error for IconError {}
 /// image is turned away without being unpacked. Greyscale, RGB, palette and
 /// 16-bit PNGs are all accepted and come back as 8-bit RGBA.
 pub fn check(bytes: &[u8]) -> Result<RgbaImage, IconError> {
+    decode(bytes, true)
+}
+
+/// The PNG's pixels without the size limits, for the small sizes the
+/// engine makes itself (tests read them back).
+#[cfg(test)]
+pub(crate) fn check_any_size(bytes: &[u8]) -> Result<RgbaImage, IconError> {
+    decode(bytes, false)
+}
+
+fn decode(bytes: &[u8], limits: bool) -> Result<RgbaImage, IconError> {
     if bytes.len() > MAX_BYTES {
         return Err(IconError::TooHeavy { bytes: bytes.len() });
     }
@@ -113,10 +124,10 @@ pub fn check(bytes: &[u8]) -> Result<RgbaImage, IconError> {
     if width != height {
         return Err(IconError::NotSquare { width, height });
     }
-    if width < MIN_SIZE {
+    if limits && width < MIN_SIZE {
         return Err(IconError::TooSmall { side: width });
     }
-    if width > MAX_SIZE {
+    if limits && width > MAX_SIZE {
         return Err(IconError::TooBig { side: width });
     }
     let mut buffer = vec![
@@ -171,20 +182,26 @@ pub fn default_icon() -> &'static RgbaImage {
     ICON.get_or_init(|| check(DEFAULT_PNG).expect("the built-in project icon is a valid icon"))
 }
 
-/// The icon for the project in `root`: its own [`FILE`] if there is a good
-/// one, else the default. A bad file is logged and skipped, never fatal.
-pub fn project_icon(root: &Path) -> RgbaImage {
+/// The project in `root`'s own icon: its [`FILE`], if there is a good one. A
+/// bad file is logged and skipped, never fatal.
+pub fn own_icon(root: &Path) -> Option<RgbaImage> {
     let path = root.join(FILE);
     match std::fs::read(&path) {
         Ok(bytes) => match check(&bytes) {
-            Ok(image) => return image,
+            Ok(image) => return Some(image),
             Err(e) => log::warn!("not using {}: {e}", path.display()),
         },
         // No icon file is the normal case.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => log::warn!("can't read {}: {e}", path.display()),
     }
-    default_icon().clone()
+    None
+}
+
+/// The icon for the project in `root`: its own if it has one, else the
+/// default.
+pub fn project_icon(root: &Path) -> RgbaImage {
+    own_icon(root).unwrap_or_else(|| default_icon().clone())
 }
 
 /// `image` scaled to `size` × `size`, averaging the source pixels each new

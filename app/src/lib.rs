@@ -28,6 +28,7 @@ mod audio;
 mod code;
 mod components;
 mod editor;
+mod exe_icon;
 mod export;
 mod font;
 pub mod headless;

@@ -12,8 +12,8 @@ use reign::assets::{AssetKind, Meta, RgbaImage, pack_dir, read_pack};
 use reign_build::progress::{Output, read_output};
 use reign_build::project;
 
-use crate::icon;
 use crate::player::{GAME_FILE, GameInfo, PACK_FILE, choose_scene};
+use crate::{exe_icon, icon};
 
 /// How the export is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,10 +46,15 @@ pub struct Export {
     /// Where `<Title>.app` or `<Title>/` goes.
     pub out_dir: PathBuf,
     pub layout: Layout,
-    /// The game's icon: the project's own, or the Reign default (see
-    /// [`icon::project_icon`]).
-    pub icon: RgbaImage,
+    /// The project's own icon (see [`icon::own_icon`]), if it has one. Without
+    /// it the game keeps an icon already built into it, else gets the Reign
+    /// default.
+    pub icon: Option<RgbaImage>,
 }
+
+/// The name of the macOS app's icon file (`AppIcon.icns`), which
+/// `Info.plist` names.
+const MAC_ICON: &str = "AppIcon";
 
 /// The side of the icon file an export keeps beside the game, which the game
 /// shows as its window icon: big enough for the largest window icon, small
@@ -103,7 +108,7 @@ pub fn export_project(root: &Path, title: &str, out_dir: &Path) -> Result<PathBu
         assets: root.join("assets"),
         out_dir: out_dir.to_owned(),
         layout: Layout::native(),
-        icon: icon::project_icon(root),
+        icon: icon::own_icon(root),
     })
 }
 
@@ -157,6 +162,17 @@ pub fn assemble(export: &Export) -> Result<PathBuf, String> {
     }
     let exe = bin_dir.join(&exe_name);
     std::fs::copy(&export.exe, &exe).map_err(|e| io(&export.exe, e))?;
+    // The icon of the file itself (Windows keeps it in the program). The
+    // project's own icon always goes in; the default only where the program
+    // has none, so a game that embedded its own icon keeps it. The copy is
+    // changed, never the build output; a failure costs only the icon, so it
+    // is reported, not fatal.
+    let shown = export.icon.as_ref().unwrap_or_else(|| icon::default_icon());
+    if (export.icon.is_some() || !exe_icon::has_exe_icon(&exe))
+        && let Err(e) = exe_icon::set_exe_icon(&exe, shown)
+    {
+        log::warn!("the exported game has no file icon: {e}");
+    }
     let pack = data_dir.join(PACK_FILE);
     std::fs::write(&pack, &blob).map_err(|e| io(&pack, e))?;
     let info = GameInfo { title: export.title.clone(), scene };
@@ -165,9 +181,11 @@ pub fn assemble(export: &Export) -> Result<PathBuf, String> {
     // The window icon, which the game reads from here (the pack holds the
     // project's assets, and the icon isn't one).
     let icon_file = data_dir.join(icon::FILE);
-    std::fs::write(&icon_file, icon::encode_png(&icon::resize(&export.icon, EXPORTED_ICON_SIZE)))
+    std::fs::write(&icon_file, icon::encode_png(&icon::resize(shown, EXPORTED_ICON_SIZE)))
         .map_err(|e| io(&icon_file, e))?;
     if export.layout == Layout::MacApp {
+        let icns = data_dir.join(format!("{MAC_ICON}.icns"));
+        std::fs::write(&icns, exe_icon::icns(shown)).map_err(|e| io(&icns, e))?;
         let plist = top.join("Contents").join("Info.plist");
         std::fs::write(&plist, info_plist(&export.title, &export.crate_name, &exe_name))
             .map_err(|e| io(&plist, e))?;
@@ -192,6 +210,7 @@ pub fn info_plist(title: &str, crate_name: &str, exe_name: &str) -> String {
   <key>CFBundleIdentifier</key><string>com.reign-engine.game.{id}</string>
   <key>CFBundleExecutable</key><string>{exe}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>{icon}</string>
   <key>CFBundleVersion</key><string>{version}</string>
   <key>CFBundleShortVersionString</key><string>{version}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
@@ -201,6 +220,7 @@ pub fn info_plist(title: &str, crate_name: &str, exe_name: &str) -> String {
 "#,
         title = escape(title),
         exe = escape(exe_name),
+        icon = MAC_ICON,
     )
 }
 
