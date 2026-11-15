@@ -48,7 +48,6 @@ struct State {
     received: u64,
     total: Option<u64>,
     meter: SpeedMeter,
-    started: Instant,
 }
 
 /// A copy of a [`Progress`] at one moment, for drawing.
@@ -62,7 +61,6 @@ pub struct Snapshot {
     pub total: Option<u64>,
     /// Bytes a second over the last few seconds.
     pub speed: Option<f64>,
-    pub elapsed: Duration,
 }
 
 impl Progress {
@@ -74,7 +72,6 @@ impl Progress {
                 received: 0,
                 total: None,
                 meter: SpeedMeter::default(),
-                started: Instant::now(),
             }),
             cancel: AtomicBool::new(false),
         }
@@ -88,7 +85,6 @@ impl Progress {
             received: state.received,
             total: state.total,
             speed: state.meter.speed(Instant::now()),
-            elapsed: state.started.elapsed(),
         }
     }
 
@@ -399,7 +395,6 @@ mod tests {
             received: 12 * 1024 * 1024,
             total: Some(48 * 1024 * 1024),
             speed: Some(3.0 * 1024.0 * 1024.0),
-            elapsed: Duration::from_secs(4),
         };
         assert_eq!(s.fraction(), Some(0.25));
         assert_eq!(s.eta(), Some(Duration::from_secs(12)));
