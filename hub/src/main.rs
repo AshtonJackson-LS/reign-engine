@@ -236,7 +236,6 @@ struct HubBuild {
     rx: std::sync::mpsc::Receiver<BuildEvent>,
     started: std::time::Instant,
     first_error: Option<String>,
-    hide_progress: bool,
     /// How far cargo says it has got; `None` until it says.
     progress: Option<reign_build::progress::BuildProgress>,
 }
@@ -446,7 +445,6 @@ impl Hub {
                         rx,
                         started: std::time::Instant::now(),
                         first_error: None,
-                        hide_progress: false,
                         progress: None,
                     },
                 );
@@ -1640,37 +1638,6 @@ impl eframe::App for Hub {
         self.download_windows(&ctx);
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
-        }
-        for (path, build) in &mut self.building {
-            // Most builds have nothing to do: don't flash a window for them.
-            if build.hide_progress || build.started.elapsed() < Duration::from_secs(1) {
-                continue;
-            }
-            let name = project_name(path);
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of(("opening", path)),
-                egui::ViewportBuilder::default()
-                    .with_title(format!("{name} - Reign Engine"))
-                    .with_inner_size([480.0, 180.0])
-                    .with_resizable(false),
-                |ui, _| {
-                    if ui.input(|i| i.viewport().close_requested()) {
-                        build.hide_progress = true;
-                    }
-                    egui::CentralPanel::default().show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(24.0);
-                            ui.heading(&name);
-                            ui.spinner();
-                            ui.label(format!(
-                                "Building project scripts… {}s",
-                                build.started.elapsed().as_secs()
-                            ));
-                            ui.weak("The editor will open when the first build finishes.");
-                        });
-                    });
-                },
-            );
         }
         if let Some(step) = self.snapshots.as_mut().and_then(|s| s.poll(&ctx)) {
             use snapshot::Step;
