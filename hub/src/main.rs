@@ -36,8 +36,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The file that marks a folder as a Reign project. The editor writes it too.
 const PROJECT_FILE: &str = "ReignProject.ron";
 
-// ------------------------------------------------------------------- storage
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
@@ -53,6 +51,9 @@ struct Settings {
     default_location: Option<PathBuf>,
     /// Skip the launch intro.
     skip_intro: bool,
+    /// Wait for a click on the update arrow instead of installing updates
+    /// as soon as they're out.
+    manual_updates: bool,
 }
 
 /// What `ReignProject.ron` holds.
@@ -208,8 +209,6 @@ fn reveal(path: &Path) {
     }
 }
 
-// ------------------------------------------------------------------------ ui
-
 /// Space either side of the page content.
 const GUTTER: f32 = 40.0;
 const HERO_HEIGHT: f32 = 236.0;
@@ -290,6 +289,7 @@ impl Hub {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
         let intro = if settings.skip_intro { Intro::finished() } else { Intro::new() };
+        let updater = update::Updater::new(!settings.manual_updates);
         Hub {
             settings,
             page: Page::Projects,
@@ -303,7 +303,7 @@ impl Hub {
             intro,
             grain: theme::grain_texture(&cc.egui_ctx),
             snapshots: snapshot::Snapshots::from_env(),
-            updater: update::Updater::new(),
+            updater,
             versions: versions::Versions::new(),
             version_dialog: None,
             open_choice: None,
@@ -524,15 +524,12 @@ impl Hub {
         }
     }
 
-    // ------------------------------------------------------------- top bar
-
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, BG);
         painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, HAIRLINE));
 
-        // Wordmark: REIGN, a red dot, HUB.
         let mut mark = text("REIGN", Face::Display, 30.0, TEXT, 0.6);
         mark.append(
             "HUB",
@@ -548,7 +545,6 @@ impl Hub {
         let pos = Pos2::new(rect.left() + GUTTER, rect.center().y - galley.size().y / 2.0 + 2.0);
         painter.galley(pos, galley, TEXT);
 
-        // Page links, centred.
         let items = [(Page::Projects, "Projects"), (Page::About, "About")];
         let galleys: Vec<_> =
             items.iter().map(|(_, l)| painter.layout_job(eyebrow(l, TEXT))).collect();
@@ -577,7 +573,6 @@ impl Hub {
             x += size.x + gap;
         }
 
-        // Version, right.
         let v = ui.painter().layout_job(text(
             format!("ENGINE {VERSION}"),
             Face::Display,
@@ -590,47 +585,47 @@ impl Hub {
         ui.painter().galley(at, v, FAINT);
 
         // A green arrow beside the version when a newer release is out.
-        let busy = matches!(self.updater.state, update::State::Installing(_));
-        if let update::State::Available(version) | update::State::Installing(version) =
-            self.updater.state.clone()
-        {
-            let center = Pos2::new(at.x - 28.0, rect.center().y);
-            let hit = Rect::from_center_size(center, Vec2::splat(30.0));
-            let response = ui.interact(hit, Id::new("update"), Sense::click());
-            let tip = if busy {
-                format!("Installing {version}…")
-            } else {
-                format!("Update to {version}")
-            };
-            let response =
-                response.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let fill = if busy {
-                GOOD.gamma_multiply(0.45)
-            } else if response.hovered() {
-                Color32::from_rgb(150, 232, 176)
-            } else {
-                GOOD
-            };
-            let painter = ui.painter();
-            painter.circle_filled(center, 13.0, fill);
-            let stroke = Stroke::new(2.2, BG);
-            painter.line_segment(
-                [center + Vec2::new(0.0, -6.0), center + Vec2::new(0.0, 5.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [center + Vec2::new(-5.0, 0.5), center + Vec2::new(0.0, 5.5)],
-                stroke,
-            );
-            painter
-                .line_segment([center + Vec2::new(5.0, 0.5), center + Vec2::new(0.0, 5.5)], stroke);
-            if response.clicked() && !busy {
-                if !self.running.is_empty() {
-                    self.info("Close open editors before updating");
-                } else {
-                    self.info(format!("Updating to {version}…"));
-                    self.updater.install(ui.ctx());
-                }
+        let (version, busy, installed, tip) = match self.updater.state.clone() {
+            update::State::Available(v) => (v.clone(), false, false, format!("Update to {v}")),
+            update::State::Installing(v) => (v.clone(), true, false, format!("Installing {v}…")),
+            update::State::Installed(v) => {
+                (v.clone(), false, true, format!("{v} is installed: click to restart the hub"))
+            }
+            _ => return,
+        };
+        let center = Pos2::new(at.x - 28.0, rect.center().y);
+        let hit = Rect::from_center_size(center, Vec2::splat(30.0));
+        let response = ui
+            .interact(hit, Id::new("update"), Sense::click())
+            .on_hover_text(tip)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fill = if busy {
+            GOOD.gamma_multiply(0.45)
+        } else if response.hovered() {
+            Color32::from_rgb(150, 232, 176)
+        } else {
+            GOOD
+        };
+        let painter = ui.painter();
+        painter.circle_filled(center, 13.0, fill);
+        let stroke = Stroke::new(2.2, BG);
+        let tip_of_arrow = center + Vec2::new(0.0, 5.5);
+        painter.line_segment([center + Vec2::new(0.0, -6.0), center + Vec2::new(0.0, 5.0)], stroke);
+        painter.line_segment([center + Vec2::new(-5.0, 0.5), tip_of_arrow], stroke);
+        painter.line_segment([center + Vec2::new(5.0, 0.5), tip_of_arrow], stroke);
+
+        if !response.clicked() || busy {
+            return;
+        }
+        if !installed {
+            self.info(format!("Updating to {version}…"));
+            self.updater.install(ui.ctx());
+        } else if !self.running.is_empty() {
+            self.info("Close open editors, then click the arrow to restart");
+        } else {
+            match self.updater.restart() {
+                Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.error(e),
             }
         }
     }
@@ -690,8 +685,6 @@ impl Hub {
         painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, HAIRLINE));
     }
 
-    // -------------------------------------------------------------- projects
-
     fn projects_page(&mut self, ui: &mut egui::Ui) {
         let open_now = self.running.len();
         let last = self.settings.projects.iter().map(|e| e.last_opened).max().unwrap_or(0);
@@ -704,7 +697,6 @@ impl Hub {
         self.hero(ui, "Your workspace", "PROJECTS", &facts);
 
         egui::Frame::NONE.inner_margin(Margin::symmetric(GUTTER as i8, 22)).show(ui, |ui| {
-            // Search on the left, actions on the right.
             ui.horizontal(|ui| {
                 search_field(ui, &mut self.search);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -738,7 +730,6 @@ impl Hub {
             })
             .collect();
 
-        // Section label with a count.
         ui.horizontal(|ui| {
             ui.label(eyebrow("— Recent", MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -830,7 +821,6 @@ impl Hub {
         }
         painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, HAIRLINE));
 
-        // Index, name, path.
         let index =
             painter.layout_job(text(format!("{:02}", i + 1), Face::Display, 24.0, TEXT, 0.5));
         let index_color = if hovered { RED } else { FAINT };
@@ -877,7 +867,6 @@ impl Hub {
         path.wrap.overflow_character = Some('…');
         painter.galley(Pos2::new(left, rect.center().y + 4.0), painter.layout_job(path), MUTED);
 
-        // Right side: when, version, Open, more.
         let mut action = None;
         let controls = Rect::from_min_max(
             Pos2::new(rect.right() - right_block, rect.top()),
@@ -935,8 +924,6 @@ impl Hub {
         action
     }
 
-    // ----------------------------------------------------------------- about
-
     fn about_page(&mut self, ui: &mut egui::Ui) {
         let facts = vec![
             "Deterministic 2D simulation".to_owned(),
@@ -946,7 +933,6 @@ impl Hub {
         self.hero(ui, "About", "REIGN ENGINE", &facts);
 
         egui::Frame::NONE.inner_margin(Margin::symmetric(GUTTER as i8, 28)).show(ui, |ui| {
-            // Big numbers over hairlines.
             let stats = [
                 ("13", "Engine crates", "One facade crate re-exports them all."),
                 ("640×360", "Render target", "Pixel art, scaled up by whole numbers."),
@@ -988,6 +974,19 @@ impl Hub {
             ui.add_space(4.0);
             if ui.add(theme::secondary("Replay intro")).clicked() {
                 self.intro = Intro::new();
+            }
+            ui.add_space(10.0);
+            let mut automatic = !self.settings.manual_updates;
+            if ui
+                .checkbox(
+                    &mut automatic,
+                    text("Install updates automatically", Face::Medium, 14.0, TEXT, -0.2),
+                )
+                .changed()
+            {
+                self.settings.manual_updates = !automatic;
+                self.updater.automatic = automatic;
+                self.settings.save();
             }
             ui.add_space(14.0);
             ui.horizontal(|ui| {
@@ -1042,8 +1041,6 @@ impl Hub {
             }
         });
     }
-
-    // -------------------------------------------------------- engine versions
 
     fn start_version_dialog(&mut self, path: PathBuf) {
         let current = project_version(&path);
@@ -1316,8 +1313,6 @@ impl Hub {
         }
     }
 
-    // ------------------------------------------------------------ new project
-
     fn new_project_dialog(&mut self, ctx: &egui::Context) {
         let Some(np) = &mut self.new_project else { return };
         let mut create = false;
@@ -1481,7 +1476,6 @@ fn search_field(ui: &mut egui::Ui, value: &mut String) {
         .inner_margin(Margin::symmetric(16, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // A magnifier: ring and handle.
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 let c = r.center() - Vec2::splat(1.5);
                 ui.painter().circle_stroke(c, 5.0, Stroke::new(1.6, MUTED));
@@ -1509,16 +1503,12 @@ impl eframe::App for Hub {
         if self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some() {
             self.updater.check(&ctx);
         }
-        if let Some(error) = self.updater.poll() {
-            self.error(error);
+        match self.updater.poll(&ctx) {
+            Some(Ok(news)) => self.info(news),
+            Some(Err(error)) => self.error(error),
+            None => {}
         }
         self.poll_versions();
-        if let Some(hub) = self.updater.restart.take() {
-            match Command::new(&hub).spawn() {
-                Ok(_) => return ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(e) => self.error(format!("Updated, but can't restart {}: {e}", hub.display())),
-            }
-        }
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }

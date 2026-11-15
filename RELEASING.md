@@ -10,9 +10,15 @@ setup, then **double-click `release.bat`** whenever you want to ship.
   use it. Nobody can read it back out, not even the owner.
 - **Pushing to `main` never releases anything.** Only a version tag (like
   `v0.2.0`) does, and `release.bat` is what makes one.
-- **Anyone with write access can start a release**, but it stops before
-  signing and waits for an approver (the owner) to click **Approve**. Until
-  then nothing is signed or published, and the key is never handed out.
+- **Every platform builds at once:** Windows (x64 and ARM64), macOS
+  (one app for Apple Silicon and Intel) and Linux (x64 and ARM64). Nothing
+  is published unless all of them and the tests pass.
+- **Approval is optional.** If the `release` environment has required
+  reviewers, the run stops before signing until one of them clicks
+  **Approve**. Without reviewers it publishes on its own.
+- **Installed hubs update themselves.** Each one finds the new release,
+  checks its signature, installs it in the background and shows a green
+  arrow to restart.
 - **Forks never get the key.** GitHub doesn't copy secrets into forks. A fork
   that wants its own releases makes its own key (see "Shipping your own
   fork"), and its hubs then trust only that fork's releases.
@@ -25,8 +31,10 @@ Only the owner can do these, in the repository's **Settings**:
    people**.
 2. **Make the `release` environment:** **Environments → New environment**,
    name it `release`.
-3. **Require approval:** on that environment, tick **Required reviewers**,
-   add yourself (and anyone else allowed to approve releases), and save.
+3. **Approval (optional):** to review each release before it goes out, tick
+   **Required reviewers** on that environment and add yourself. Leave it
+   off for releases that publish as soon as they're built. If other people
+   can push tags, turn it on.
 4. **Add the key to the environment:** on the same page, under **Environment
    secrets → Add environment secret**, name it `REIGN_RELEASE_KEY`, paste the
    key's one line as the value, and save. Put it here, not under "Repository
@@ -46,16 +54,16 @@ GitHub Actions is already set up (`.github/workflows/release.yml`).
    - puts the version in `Cargo.toml`,
    - commits and tags it (for example `v0.2.0`),
    - pushes both to GitHub.
-3. GitHub runs every test and builds Windows (about 20 minutes). Watch it
-   under the repository's **Actions** tab.
-4. **The approver approves.** The run stops at "Sign and publish", and GitHub
-   emails the approvers. They open the run, click **Review deployments →
+3. GitHub runs the tests and builds all five platforms side by side (about
+   20 minutes). Watch it under the repository's **Actions** tab.
+4. **If approval is on**, the run stops at "Sign and publish" and GitHub
+   emails the approvers. They open the run and click **Review deployments →
    release → Approve and deploy**. Rejecting it ends the release with nothing
    published.
-5. GitHub signs the update, publishes the release, then adds the macOS and
-   Linux builds. New users get it from the README's download link; installed
-   hubs show the green update arrow the next time they open. Projects stay on
-   their engine version until someone changes it (••• → Engine version…).
+5. GitHub signs every archive and publishes the release with all of them.
+   New users get it from the README's download links; installed hubs pick it
+   up the next time they open. Projects stay on their engine version until
+   someone changes it (••• → Engine version…).
 
 ### Picking the version number
 
@@ -70,11 +78,10 @@ GitHub Actions is already set up (`.github/workflows/release.yml`).
 | Problem | Fix |
 | --- | --- |
 | `release.bat` says "pushing failed" | You don't have write access yet (one-time setup, step 1). Your commit and tag are kept: once you have access, run the `git push` line it printed. |
-| The run waits at "Sign and publish" | It's waiting for approval (Every release, step 4). The approvers got an email. |
-| The run fails at "The release key is set" | The `release` environment has no `REIGN_RELEASE_KEY` (one-time setup, step 4). Add it, then on the failed run click **Re-run failed jobs**. The run's summary page lists the steps. |
-| The run fails at "Sign" | The secret isn't the partner of the key the hub trusts. Paste the key file's line into the secret again, then re-run. In a fork, check the `REIGN_UPDATE_PUBKEY` variable. |
-| The Actions run fails at clippy or a test | Nothing was published. Fix it on `main`, then run `release.bat` again with the next version (for example 0.2.1). |
-| Only the macOS or Linux job failed | The Windows release is already out. Fix it later; the next release brings those builds back. |
+| The run waits at "Sign and publish" | It's waiting for approval (Every release, step 4). Approve it, or untick **Required reviewers** on the `release` environment so later releases don't wait. |
+| The run fails at "Sign" with "No REIGN_RELEASE_KEY" | The `release` environment has no `REIGN_RELEASE_KEY` (one-time setup, step 4). Add it, then on the failed run click **Re-run failed jobs**. |
+| The run fails at "Sign" with "doesn't match" | The secret isn't the partner of the key the hub trusts. Paste the key file's line into the secret again, then re-run. In a fork, check the `REIGN_UPDATE_PUBKEY` variable. |
+| A test or a build fails | Nothing was published. Fix it on `main`, then run `release.bat` again with the next version (for example 0.2.1). For a failure that wasn't the code's fault (a GitHub hiccup), **Re-run failed jobs** instead. |
 | Users see "Windows protected your PC" | Normal for an installer that isn't code-signed: **More info → Run anyway**. Code signing removes it (SignPath offers it free to open-source projects). |
 | Lost or leaked key | Make a new key: `cargo run -p reign_hub --bin reign-release -- keygen C:\somewhere\new.key`. Put the printed public key in `OFFICIAL_PUBLIC_KEY` in `hub/src/signing.rs`, replace the environment secret, and release. Hubs from before can't verify the new key, so their users reinstall once with ReignSetup.exe. |
 
@@ -104,7 +111,9 @@ first.
 
 - **`update-reign.bat`** builds everything from your folder and installs it
   on this computer, the same way `ReignSetup.exe` does for users.
-- **`scripts\build-setup.ps1`** only builds `dist\ReignSetup.exe`, so you can
-  try the installer or send it to someone.
+- **`scripts\build-setup.ps1`** builds `dist\ReignSetup.exe` and the update
+  zip, so you can try the installer or send it to someone (`-Arch arm64` for
+  ARM PCs). On a Mac, `scripts/bundle-macos.sh`; on Linux,
+  `scripts/package-linux.sh`.
 - **`scripts\release.ps1 -DryRun`** does a whole release locally (version,
   commit, tag) without pushing. It prints how to undo it.

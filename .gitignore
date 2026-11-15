@@ -1,3 +1,13 @@
+# Build output
 /target
-.DS_Store
 /dist
+
+# Editors and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Release signing keys never belong in the repository
+*.key

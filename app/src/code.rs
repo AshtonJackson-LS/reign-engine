@@ -446,7 +446,6 @@ impl Code {
             }
         });
 
-        // Status, right of the menu.
         if let Some(build) = &self.build {
             ui.add(egui::Spinner::new());
             let secs = build.started.elapsed().as_secs();

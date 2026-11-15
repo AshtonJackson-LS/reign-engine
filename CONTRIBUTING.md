@@ -31,7 +31,8 @@ target/release/reign-hub
 ```
 
 `--play` starts the editor in Play mode and `--exit-after SECONDS` quits on
-its own. `scripts/bundle-macos.sh` builds `dist/Reign Hub.app` with both.
+its own. `scripts/bundle-macos.sh` builds `dist/Reign Hub.app` with both, and
+`scripts/package-linux.sh` the Linux archive.
 
 ## Layout
 

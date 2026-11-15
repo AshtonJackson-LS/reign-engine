@@ -748,8 +748,8 @@ pub fn ensure_game_bin(root: &Path, project_name: &str) -> std::io::Result<bool>
         .ok_or_else(|| std::io::Error::other("Cargo.toml has no [package] name"))?;
     let mut changed = false;
     // A game binary the project already lists keeps its own source: only
-    // the template's src/game.rs is ever written (Exreign's exreign-game is
-    // src/main.rs, and must not get a stray game.rs).
+    // the template's src/game.rs is ever written, never a stray one beside
+    // a game whose main is elsewhere.
     let listed = bin_path(&text, &game_bin(&name));
     let writes_game_rs = match &listed {
         None => true,
