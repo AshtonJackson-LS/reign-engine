@@ -31,6 +31,7 @@ mod editor;
 mod export;
 mod font;
 pub mod headless;
+pub mod icon;
 mod input;
 pub mod physics;
 mod player;
