@@ -215,6 +215,8 @@ opening it; the first build compiles the engine and takes a few minutes.
 While it builds, the hub's status bar shows a bar and `141 / 324` (cargo's
 own count of finished build steps), and the editor's toolbar shows the same
 as `Compiling 141 of 324` while it rebuilds or exports.
+The hub's status bar has a **Cancel** button for a build in progress; it stops
+cargo and the compilers it started, and the project can be opened again later.
 Pick the code editor (VS Code, RustRover, Cursor, Zed, Sublime Text) in the
 hub's About page or Scripts → Code editor. Projects build against this
 checkout (`REIGN_ENGINE_SOURCE` overrides it). Where there's no checkout (a

@@ -236,6 +236,10 @@ struct HubBuild {
     rx: std::sync::mpsc::Receiver<BuildEvent>,
     started: std::time::Instant,
     first_error: Option<String>,
+    /// The cargo process, so the build can be cancelled.
+    pid: u32,
+    /// Cancel was pressed: the build is being stopped, not failing.
+    cancelled: bool,
     /// How far cargo says it has got; `None` until it says.
     progress: Option<reign_build::progress::BuildProgress>,
 }
@@ -421,10 +425,12 @@ impl Hub {
         };
         let mut command = project::build_command(path, &name);
         command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+        launch::own_process_group(&mut command);
         let (tx, rx) = std::sync::mpsc::channel();
         match command.spawn() {
             Ok(mut child) => {
                 let stderr = child.stderr.take();
+                let pid = child.id();
                 std::thread::spawn(move || {
                     use reign_build::progress::{Output, read_output};
                     if let Some(stderr) = stderr {
@@ -445,6 +451,8 @@ impl Hub {
                         rx,
                         started: std::time::Instant::now(),
                         first_error: None,
+                        pid,
+                        cancelled: false,
                         progress: None,
                     },
                 );
@@ -476,6 +484,12 @@ impl Hub {
         }
         for (path, ok) in finished {
             let build = self.building.remove(&path).expect("listed");
+            if build.cancelled {
+                // Stopped on purpose: not a failure, and no editor opens.
+                self.failed.remove(&path);
+                self.info(format!("Build of {} cancelled", project_name(&path)));
+                continue;
+            }
             let Some(name) = project::read_crate_name(&path) else { continue };
             let exe = project::editor_path(&path, &name);
             let failure =
@@ -674,6 +688,16 @@ impl Hub {
         } else {
             self.restart_hub(ui.ctx());
         }
+    }
+
+    /// Stops a project's build (and everything cargo started for it); the
+    /// build's thread then reports it finished, and `poll_builds` says it was
+    /// cancelled.
+    fn cancel_build(&mut self, path: &Path) {
+        let Some(build) = self.building.get_mut(path) else { return };
+        build.cancelled = true;
+        launch::kill_tree(build.pid);
+        self.info(format!("Cancelling the build of {}…", project_name(path)));
     }
 
     /// Starts the updated hub and closes this one, once no editor is open.
@@ -1677,6 +1701,7 @@ impl eframe::App for Hub {
             .exact_size(64.0)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.top_bar(ui));
+        let mut cancel_build: Option<PathBuf> = None;
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -1690,57 +1715,73 @@ impl eframe::App for Hub {
                     Some((msg, false)) => (msg.clone(), MUTED),
                     None => ("Ready".to_owned(), FAINT),
                 };
-                // A project building: how many of cargo's steps are done.
+                // A project building: how many of cargo's steps are done, and
+                // a way to stop it.
                 let building = self
                     .building
-                    .values()
-                    .filter_map(|b| b.progress.as_ref())
-                    .find(|p| p.total > 0);
+                    .iter()
+                    .next()
+                    .map(|(path, build)| (path.clone(), build.progress.clone()));
                 ui.horizontal(|ui| {
                     ui.label(text("●", Face::Bold, 9.0, color, 0.0));
                     ui.label(text(msg, Face::Medium, 12.0, color, -0.1));
-                    if let Some(progress) = building {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            // A fixed slot for the count, so the bar doesn't
-                            // shift when it gains a digit.
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(88.0, 16.0),
-                                Layout::right_to_left(Align::Center),
-                                |ui| {
-                                    // The slot shrinks to its text unless told not to.
-                                    ui.set_min_size(Vec2::new(88.0, 16.0));
-                                    ui.label(text(
-                                        format!("{} / {}", progress.done, progress.total),
-                                        Face::Medium,
-                                        12.0,
-                                        MUTED,
-                                        -0.1,
-                                    ))
-                                    .on_hover_text(
-                                        if progress.building.is_empty() {
-                                            "Cargo's build steps: the engine, its libraries and \
-                                         your scripts."
-                                                .to_owned()
-                                        } else {
-                                            format!("Building: {}", progress.building)
-                                        },
-                                    );
-                                },
-                            );
-                            // The track is the window's own colour unless told.
-                            ui.scope(|ui| {
-                                ui.visuals_mut().extreme_bg_color = HAIRLINE;
-                                ui.add(
-                                    egui::ProgressBar::new(progress.fraction())
-                                        .desired_width(240.0)
-                                        .desired_height(10.0)
-                                        .fill(GOOD),
+                    let Some((path, progress)) = &building else { return };
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(text("Cancel", Face::Medium, 12.0, MUTED, -0.1))
+                                    .small(),
+                            )
+                            .on_hover_text("Stop building this project")
+                            .clicked()
+                        {
+                            cancel_build = Some(path.clone());
+                        }
+                        let Some(progress) = progress.as_ref().filter(|p| p.total > 0) else {
+                            return;
+                        };
+                        // A fixed slot for the count, so the bar doesn't
+                        // shift when it gains a digit.
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(88.0, 16.0),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                // The slot shrinks to its text unless told not to.
+                                ui.set_min_size(Vec2::new(88.0, 16.0));
+                                ui.label(text(
+                                    format!("{} / {}", progress.done, progress.total),
+                                    Face::Medium,
+                                    12.0,
+                                    MUTED,
+                                    -0.1,
+                                ))
+                                .on_hover_text(
+                                    if progress.building.is_empty() {
+                                        "Cargo's build steps: the engine, its libraries and \
+                                     your scripts."
+                                            .to_owned()
+                                    } else {
+                                        format!("Building: {}", progress.building)
+                                    },
                                 );
-                            });
+                            },
+                        );
+                        // The track is the window's own colour unless told.
+                        ui.scope(|ui| {
+                            ui.visuals_mut().extreme_bg_color = HAIRLINE;
+                            ui.add(
+                                egui::ProgressBar::new(progress.fraction())
+                                    .desired_width(240.0)
+                                    .desired_height(10.0)
+                                    .fill(GOOD),
+                            );
                         });
-                    }
+                    });
                 });
             });
+        if let Some(path) = cancel_build {
+            self.cancel_build(&path);
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
             match self.page {
                 Page::Projects => self.projects_page(ui),
