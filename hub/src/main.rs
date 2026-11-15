@@ -901,7 +901,11 @@ impl Hub {
         let title_y = rect.center().y - 20.0;
         painter.galley(Pos2::new(left, title_y), title, TEXT);
 
-        let compiling = building.map(|b| format!("Compiling {}s", b.started.elapsed().as_secs()));
+        // Cargo's own count of build steps when it has given one, else seconds.
+        let compiling = building.map(|b| match b.progress.as_ref().filter(|p| p.total > 0) {
+            Some(p) => format!("Compiling {} / {}", p.done, p.total),
+            None => format!("Compiling {}s", b.started.elapsed().as_secs()),
+        });
         let badge = if running {
             Some(("● Open", GOOD))
         } else if let Some(label) = &compiling {
