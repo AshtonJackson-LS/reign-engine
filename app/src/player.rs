@@ -308,6 +308,13 @@ pub fn run(scripts: Scripts) {
         (true, Some(name)) => name.to_owned(),
         (true, None) => "Reign".to_owned(),
     };
-    let config = AppConfig { title, fullscreen, exit_after, ..AppConfig::default() };
+    // An exported game keeps its icon beside its pack; a project run in
+    // place has it in the project folder: the same file name, so either way
+    // it is `project_icon` of that folder.
+    let icon_dir = match &source {
+        Source::Pack(dir) | Source::Project(dir) => dir,
+    };
+    let icon = Some(crate::icon::window_icon(&crate::icon::project_icon(icon_dir)));
+    let config = AppConfig { title, fullscreen, exit_after, icon, ..AppConfig::default() };
     reign::app::run(config, move |_ctx| Player::new(&scripts, scene));
 }

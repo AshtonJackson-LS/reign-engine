@@ -223,6 +223,7 @@ impl Code {
             assets: self.root.join("assets"),
             out_dir,
             layout: Layout::native(),
+            icon: crate::icon::project_icon(&root),
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {

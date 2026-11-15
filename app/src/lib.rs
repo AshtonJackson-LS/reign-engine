@@ -259,6 +259,7 @@ pub fn run(scripts: Scripts) {
     let mut config = EditorConfig::default();
     config.app = AppConfig {
         title: format!("{} - Reign Engine", project.title()),
+        icon: Some(icon::window_icon(&icon::project_icon(&project.root))),
         exit_after,
         ..config.app
     };

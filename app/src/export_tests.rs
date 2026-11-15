@@ -135,6 +135,7 @@ fn assemble(layout: Layout, name: &str) -> (PathBuf, PathBuf, PathBuf) {
         assets: project.assets(),
         out_dir: out_dir.clone(),
         layout,
+        icon: crate::icon::project_icon(&root),
     };
     let made = export::assemble(&export).expect("assembles");
     // Again, over the first: replaces it.
@@ -163,6 +164,46 @@ fn a_folder_export_has_the_game_and_its_data() {
     assert_eq!(data_dir(&exe).as_deref(), Some(made.as_path()));
     assert!(made.join(GAME_FILE).is_file());
     check_data(&made);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The game's window icon travels with it: the default for a project with
+/// none, the project's own `icon.png` (at the size an export keeps) for one
+/// with its own.
+#[test]
+fn an_export_carries_the_games_icon() {
+    use crate::icon;
+    // No icon of the project's own: the Reign default.
+    let (root, _, made) = assemble(Layout::Folder, "icon-default");
+    let kept = icon::check(&std::fs::read(made.join(icon::FILE)).unwrap()).expect("a valid icon");
+    assert_eq!((kept.width, kept.height), (export::EXPORTED_ICON_SIZE, export::EXPORTED_ICON_SIZE));
+    assert_eq!(kept, icon::resize(icon::default_icon(), export::EXPORTED_ICON_SIZE));
+    // The game finds it where it looks.
+    assert_eq!(icon::project_icon(&made), kept.clone());
+    let _ = std::fs::remove_dir_all(root);
+
+    // A project's own icon, 512 pixels of one flat colour.
+    let (project, root) = project_with_a_level("icon-own");
+    let mut rgba = Vec::new();
+    for _ in 0..512 * 512 {
+        rgba.extend_from_slice(&[12, 34, 56, 255]);
+    }
+    let own = reign::assets::RgbaImage { rgba, width: 512, height: 512 };
+    std::fs::write(root.join(icon::FILE), icon::encode_png(&own)).unwrap();
+    let exe = root.join("fake-game");
+    std::fs::write(&exe, b"not really a game").unwrap();
+    let export = Export {
+        title: "Own".into(),
+        crate_name: "own".into(),
+        exe,
+        assets: project.assets(),
+        out_dir: root.join("Builds"),
+        layout: Layout::Folder,
+        icon: icon::project_icon(&root),
+    };
+    let made = export::assemble(&export).unwrap();
+    let kept = icon::check(&std::fs::read(made.join(icon::FILE)).unwrap()).unwrap();
+    assert_eq!((kept.width, &kept.rgba[..4]), (256, &[12, 34, 56, 255][..]));
     let _ = std::fs::remove_dir_all(root);
 }
 

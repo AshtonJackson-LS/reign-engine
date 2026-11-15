@@ -8,10 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use reign::assets::{AssetKind, Meta, pack_dir, read_pack};
+use reign::assets::{AssetKind, Meta, RgbaImage, pack_dir, read_pack};
 use reign_build::progress::{Output, read_output};
 use reign_build::project;
 
+use crate::icon;
 use crate::player::{GAME_FILE, GameInfo, PACK_FILE, choose_scene};
 
 /// How the export is laid out.
@@ -45,7 +46,15 @@ pub struct Export {
     /// Where `<Title>.app` or `<Title>/` goes.
     pub out_dir: PathBuf,
     pub layout: Layout,
+    /// The game's icon: the project's own, or the Reign default (see
+    /// [`icon::project_icon`]).
+    pub icon: RgbaImage,
 }
+
+/// The side of the icon file an export keeps beside the game, which the game
+/// shows as its window icon: big enough for the largest window icon, small
+/// enough to be a few KB.
+pub const EXPORTED_ICON_SIZE: u32 = 256;
 
 /// Gets a project ready to build its game: makes it a crate if it isn't
 /// one (a project without code has nothing to build the game from) and
@@ -94,6 +103,7 @@ pub fn export_project(root: &Path, title: &str, out_dir: &Path) -> Result<PathBu
         assets: root.join("assets"),
         out_dir: out_dir.to_owned(),
         layout: Layout::native(),
+        icon: icon::project_icon(root),
     })
 }
 
@@ -152,6 +162,11 @@ pub fn assemble(export: &Export) -> Result<PathBuf, String> {
     let info = GameInfo { title: export.title.clone(), scene };
     let game = data_dir.join(GAME_FILE);
     std::fs::write(&game, info.to_ron()).map_err(|e| io(&game, e))?;
+    // The window icon, which the game reads from here (the pack holds the
+    // project's assets, and the icon isn't one).
+    let icon_file = data_dir.join(icon::FILE);
+    std::fs::write(&icon_file, icon::encode_png(&icon::resize(&export.icon, EXPORTED_ICON_SIZE)))
+        .map_err(|e| io(&icon_file, e))?;
     if export.layout == Layout::MacApp {
         let plist = top.join("Contents").join("Info.plist");
         std::fs::write(&plist, info_plist(&export.title, &export.crate_name, &exe_name))
