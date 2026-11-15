@@ -31,6 +31,7 @@ prints one JSON document on stdout; logs go to stderr.
 cargo run -p reign_engine -- PROJECT_DIR --check
 cargo run -p reign_engine -- PROJECT_DIR --describe
 cargo run -p reign_engine -- PROJECT_DIR --simulate 240 --input "Right,Jump@30-45" --watch Player
+cargo run -p reign_engine -- PROJECT_DIR --new-scene scenes/level2.scene.ron
 ```
 
 - `--check` loads every scene and prefab as the game would. Exit code 1
@@ -42,6 +43,8 @@ cargo run -p reign_engine -- PROJECT_DIR --simulate 240 --input "Right,Jump@30-4
   the end. `--every N` adds a snapshot every N ticks; `--watch A,B` keeps
   only those objects. `state_hash` must be identical between two runs with
   the same input: if it isn't, something broke determinism.
+- `--new-scene ASSET_PATH` makes a scene with a Main Camera, as Scene → New
+  Scene does (a bare name goes in `scenes/`), and never overwrites one.
 
 `PROJECT_DIR` can be an empty folder: opening it makes a project there. Use
 your scratch directory, not the repository.

@@ -345,15 +345,12 @@ impl Hub {
         if !path.is_dir() {
             return self.error(format!("{} is missing", path.display()));
         }
-        let mut command = if project::has_code(path) {
-            let cached = project::read_crate_name(path).map(|n| project::editor_path(path, &n));
-            let Some(editor) = cached.filter(|p| p.is_file()) else {
-                return self.build(path);
-            };
-            let mut command = no_console(Command::new(editor));
-            command.env("REIGN_CHECK_BUILD_ON_OPEN", "1");
-            command
-        } else if let Some(version) = project_version(path).filter(|v| v != VERSION) {
+        // Cargo decides whether anything changed (the project's code or the
+        // engine it builds against); with nothing to do it's quick.
+        if project::has_code(path) {
+            return self.build(path);
+        }
+        let mut command = if let Some(version) = project_version(path).filter(|v| v != VERSION) {
             if self.versions.installing.as_deref() == Some(version.as_str()) {
                 return self.info(format!("Engine {version} is still downloading…"));
             }
@@ -378,7 +375,6 @@ impl Hub {
                 self.remember(path, true);
                 self.info(format!("Opened {}", project_name(path)));
             }
-            Err(_) if project::has_code(path) => self.build(path),
             Err(e) => self.error(format!("Can't start the editor: {e}")),
         }
     }
@@ -448,22 +444,32 @@ impl Hub {
         }
         for (path, ok) in finished {
             let build = self.building.remove(&path).expect("listed");
-            if !ok {
-                let first = build.first_error.unwrap_or_else(|| "cargo build failed".to_owned());
-                self.error(format!("{} didn't build: {first}", project_name(&path)));
-                self.failed.insert(path, first);
-                continue;
-            }
             let Some(name) = project::read_crate_name(&path) else { continue };
             let exe = project::editor_path(&path, &name);
+            let failure =
+                (!ok).then(|| build.first_error.unwrap_or_else(|| "cargo build failed".to_owned()));
+            if let Some(first) = &failure {
+                self.failed.insert(path.clone(), first.clone());
+                if !exe.is_file() {
+                    self.error(format!("{} didn't build: {first}", project_name(&path)));
+                    continue;
+                }
+            }
             let mut command = no_console(Command::new(&exe));
             command.arg(&path);
             match launch::Launched::spawn(command) {
                 Ok(child) => {
-                    let secs = build.started.elapsed().as_secs();
                     self.running.insert(path.clone(), child);
                     self.remember(&path, true);
-                    self.info(format!("Opened {} (built in {secs}s)", project_name(&path)));
+                    match failure {
+                        // The last editor that built still opens, so the
+                        // project can be worked on while its code is fixed.
+                        Some(first) => self.error(format!(
+                            "{} didn't build, so its last build opened: {first}",
+                            project_name(&path)
+                        )),
+                        None => self.info(format!("Opened {}", project_name(&path))),
+                    }
                 }
                 Err(e) => self.error(format!("Can't start {}: {e}", exe.display())),
             }
@@ -1522,7 +1528,8 @@ impl eframe::App for Hub {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         for (path, build) in &mut self.building {
-            if build.hide_progress {
+            // Most builds have nothing to do: don't flash a window for them.
+            if build.hide_progress || build.started.elapsed() < Duration::from_secs(1) {
                 continue;
             }
             let name = project_name(path);

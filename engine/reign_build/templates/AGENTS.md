@@ -34,6 +34,7 @@ cargo build --bin <crate>-editor                      # compile; errors name fil
 cargo run --bin <crate>-editor -- . --check           # do all scenes and prefabs load?
 cargo run --bin <crate>-editor -- . --describe        # components, fields, defaults, inputs, assets
 cargo run --bin <crate>-editor -- . --simulate 240    # play 2 seconds, print every object
+cargo run --bin <crate>-editor -- . --new-scene scenes/level2.scene.ron   # a new scene with a camera
 ```
 
 Without code, use the engine's editor instead:

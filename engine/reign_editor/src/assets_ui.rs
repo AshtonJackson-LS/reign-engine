@@ -13,6 +13,7 @@
 //! assets flash in the grid.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -105,6 +106,12 @@ pub enum Open {
     Animation(Guid),
     /// Prefab Mode.
     Prefab(Guid),
+    /// Open this scene in place of the current one.
+    Scene(Guid),
+    /// Ask for a new scene's name, to make it in this asset folder.
+    NewScene {
+        folder: String,
+    },
 }
 
 /// What the Project panel and the asset Inspector keep between frames.
@@ -192,6 +199,80 @@ fn join(dir: &str, name: &str) -> String {
     if dir.is_empty() { name.to_owned() } else { format!("{dir}/{name}") }
 }
 
+/// What [`import`] did.
+#[derive(Debug, Default)]
+pub struct Imported {
+    pub files: usize,
+    pub errors: Vec<String>,
+}
+
+/// Copies files and folders from outside the project (dropped from
+/// Explorer, Finder or a file manager) into the asset folder `folder`. A
+/// name that's taken gets a number (`hero 1.png`). `.meta` files stay
+/// behind, so every copy gets its own GUID.
+pub fn import(db: &AssetDb, folder: &str, sources: &[PathBuf]) -> Imported {
+    let mut imported = Imported::default();
+    let Some(root) = db.root() else {
+        imported.errors.push("packed assets are read-only".into());
+        return imported;
+    };
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    for source in sources {
+        if source.canonicalize().is_ok_and(|s| s.starts_with(&root)) {
+            imported.errors.push(format!("{} is already in the project", source.display()));
+            continue;
+        }
+        import_one(db, &root, folder, source, &mut imported);
+    }
+    imported
+}
+
+fn import_one(db: &AssetDb, root: &Path, folder: &str, source: &Path, out: &mut Imported) {
+    let Some(name) = source.file_name().and_then(|n| n.to_str()) else {
+        out.errors.push(format!("{}: not a file name Reign can use", source.display()));
+        return;
+    };
+    if name.ends_with(".meta") {
+        return;
+    }
+    let target = free_name(root, folder, name);
+    if source.is_dir() {
+        if let Err(e) = db.create_folder(&target) {
+            out.errors.push(format!("{target}: {e}"));
+            return;
+        }
+        let mut entries: Vec<PathBuf> = match std::fs::read_dir(source) {
+            Ok(dir) => dir.filter_map(|e| Some(e.ok()?.path())).collect(),
+            Err(e) => return out.errors.push(format!("{}: {e}", source.display())),
+        };
+        entries.sort();
+        for entry in entries {
+            import_one(db, root, &target, &entry, out);
+        }
+        return;
+    }
+    let copied = std::fs::read(source)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| db.create(&target, &bytes).map_err(|e| e.to_string()));
+    match copied {
+        Ok(_) => out.files += 1,
+        Err(e) => out.errors.push(format!("{target}: {e}")),
+    }
+}
+
+/// `folder/name`, or `folder/stem N.ext` with the first free number.
+fn free_name(root: &Path, folder: &str, name: &str) -> String {
+    let (stem, ext) = match name.find('.') {
+        Some(dot) if dot > 0 => name.split_at(dot),
+        _ => (name, ""),
+    };
+    (0..)
+        .map(|n| if n == 0 { name.to_owned() } else { format!("{stem} {n}{ext}") })
+        .map(|candidate| join(folder, &candidate))
+        .find(|path| !root.join(path).exists())
+        .expect("some number is free")
+}
+
 fn kind_color(kind: AssetKind) -> Color32 {
     match kind {
         AssetKind::Texture => Color32::from_rgb(110, 170, 230),
@@ -236,8 +317,17 @@ pub fn project(ui: &mut Ui, db: &AssetDb, state: &mut ProjectState) {
         {
             state.folder = parent(&state.folder).to_owned();
         }
-        if db.root().is_some() && ui.small_button("+ Folder").clicked() {
-            state.new_folder = Some(String::new());
+        if db.root().is_some() {
+            ui.menu_button("+ Create", |ui| {
+                if ui.button("Folder").clicked() {
+                    state.new_folder = Some(String::new());
+                    ui.close();
+                }
+                if ui.button("Scene").clicked() {
+                    state.open = Some(Open::NewScene { folder: state.folder.clone() });
+                    ui.close();
+                }
+            });
         }
     });
     if let Some(name) = &mut state.new_folder {
@@ -268,6 +358,21 @@ pub fn project(ui: &mut Ui, db: &AssetDb, state: &mut ProjectState) {
         }
     }
     ui.separator();
+    let dragging_in = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+    if dragging_in && db.root().is_some() {
+        let rect = ui.available_rect_before_wrap();
+        let accent = ui.visuals().selection.stroke.color;
+        ui.painter().rect_filled(rect, 4.0, accent.gamma_multiply(0.12));
+        ui.painter().rect_stroke(rect, 4.0, (2.0, accent), egui::StrokeKind::Inside);
+        let into = if state.folder.is_empty() { "assets" } else { &state.folder };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("Drop to copy into {into}"),
+            egui::FontId::proportional(18.0),
+            ui.visuals().strong_text_color(),
+        );
+    }
     let assets = db.assets();
     let folders = db.folders();
     egui::Panel::left("project folders").resizable(true).default_size(170.0).show(ui, |ui| {
@@ -557,6 +662,7 @@ fn asset_cell(
             AssetKind::SpriteSheet | AssetKind::Texture => Some(Open::Slicer(info.guid)),
             AssetKind::AnimationClip => Some(Open::Animation(info.guid)),
             AssetKind::Prefab => Some(Open::Prefab(info.guid)),
+            AssetKind::Scene => Some(Open::Scene(info.guid)),
             _ => None,
         };
     }
@@ -579,6 +685,10 @@ fn asset_cell(
             }
             AssetKind::Prefab if ui.button("Open in Prefab Mode").clicked() => {
                 state.open = Some(Open::Prefab(info.guid));
+                ui.close();
+            }
+            AssetKind::Scene if ui.button("Open scene").clicked() => {
+                state.open = Some(Open::Scene(info.guid));
                 ui.close();
             }
             _ => {}
@@ -888,5 +998,50 @@ fn sprites(
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn importing_copies_files_and_folders_without_their_meta() {
+        let base = std::env::temp_dir().join(format!("reign-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (assets, outside) = (base.join("assets"), base.join("Downloads"));
+        std::fs::create_dir_all(assets.join("art")).unwrap();
+        std::fs::create_dir_all(outside.join("sfx")).unwrap();
+        std::fs::write(assets.join("art/notes.txt"), "already here").unwrap();
+        std::fs::write(outside.join("notes.txt"), "new").unwrap();
+        std::fs::write(outside.join("notes.txt.meta"), "a GUID from elsewhere").unwrap();
+        std::fs::write(outside.join("sfx/jump.txt"), "boing").unwrap();
+        let db = AssetDb::loose(&assets).unwrap();
+
+        let sources = [outside.join("notes.txt"), outside.join("sfx"), assets.join("art")];
+        let imported = import(&db, "art", &sources);
+        assert_eq!(imported.files, 2);
+        assert_eq!(imported.errors.len(), 1, "the project's own folder is refused");
+        assert_eq!(std::fs::read_to_string(assets.join("art/notes 1.txt")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(assets.join("art/notes.txt")).unwrap(), "already here");
+        assert!(db.guid("art/sfx/jump.txt").is_some(), "copied with a fresh .meta");
+        assert_ne!(
+            std::fs::read_to_string(assets.join("art/notes 1.txt.meta")).unwrap(),
+            "a GUID from elsewhere"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn taken_names_get_the_next_number_before_the_extension() {
+        let root = std::env::temp_dir().join(format!("reign-free-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scenes")).unwrap();
+        std::fs::write(root.join("scenes/boss.scene.ron"), "").unwrap();
+        std::fs::write(root.join("scenes/boss 1.scene.ron"), "").unwrap();
+        assert_eq!(free_name(&root, "scenes", "boss.scene.ron"), "scenes/boss 2.scene.ron");
+        assert_eq!(free_name(&root, "", "Makefile"), "Makefile");
+        assert_eq!(free_name(&root, "", ".hidden"), ".hidden");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

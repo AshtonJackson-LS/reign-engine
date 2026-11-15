@@ -118,9 +118,7 @@ impl Code {
         };
         // Opened in an editor without this project's code (the stock one):
         // build it now and switch over.
-        if (code.needs_build() || std::env::var_os("REIGN_CHECK_BUILD_ON_OPEN").is_some())
-            && code.cargo
-        {
+        if code.needs_build() && code.cargo {
             log::info!("this project has code: building its editor");
             code.start_build();
         }
@@ -582,7 +580,6 @@ impl Code {
         let Some(name) = self.crate_name() else { return false };
         let exe = project::editor_path(&self.root, &name);
         let mut command = Command::new(&exe);
-        command.env_remove("REIGN_CHECK_BUILD_ON_OPEN");
         command.arg(&self.root);
         if let Some(scene) = scene_file {
             command.arg("--scene").arg(scene);

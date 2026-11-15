@@ -167,6 +167,15 @@ impl TilemapPainter {
         }
     }
 
+    /// Opens `guid` for a scene that uses it, unless it's open already or
+    /// the open map has unsaved edits.
+    pub fn follow(&mut self, db: &AssetDb, guid: Guid) {
+        match self.editing() {
+            Some((open, dirty)) if open == guid || dirty => {}
+            _ => self.open(db, guid),
+        }
+    }
+
     /// The asset open, if any, and whether it has unsaved changes.
     pub fn editing(&self) -> Option<(Guid, bool)> {
         self.open.as_ref().map(|o| (o.guid, o.map != o.saved))

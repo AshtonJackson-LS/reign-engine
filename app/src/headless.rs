@@ -539,6 +539,11 @@ pub fn simulate(
 pub enum Command {
     Check,
     Describe,
+    /// Make a scene with a Main Camera at an asset path (a bare name goes
+    /// in `scenes/`).
+    NewScene {
+        path: String,
+    },
     Simulate {
         ticks: u64,
         scene: Option<String>,
@@ -546,6 +551,16 @@ pub enum Command {
         every: Option<u64>,
         watch: Vec<String>,
     },
+}
+
+/// Makes a scene with a Main Camera, as Scene > New Scene does. Returns its
+/// asset path.
+fn new_scene(db: &AssetDb, path: &str) -> Result<String, String> {
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("scenes", path));
+    let path = reign::editor::new_scene_path(folder, name)?;
+    let text = crate::editor::new_scene_text()?;
+    db.create(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 /// Runs a command on the project's assets and prints its JSON. Returns the
@@ -561,6 +576,18 @@ pub fn run(command: Command, db: &'static AssetDb, scripts: &Scripts, title: &st
             println!("{}", describe(db, scripts, title).pretty());
             0
         }
+        Command::NewScene { path } => match new_scene(db, &path) {
+            Ok(created) => {
+                let ok = Json::Map(vec![("ok", Json::Bool(true)), ("created", Json::Str(created))]);
+                println!("{}", ok.pretty());
+                0
+            }
+            Err(e) => {
+                let error = Json::Map(vec![("ok", Json::Bool(false)), ("error", Json::Str(e))]);
+                println!("{}", error.pretty());
+                1
+            }
+        },
         Command::Simulate { ticks, scene, input, every, watch } => {
             let fail = |message: String| {
                 let error =
@@ -622,6 +649,20 @@ mod tests {
         std::fs::write(project.scenes().join("main.scene.ron"), scene).unwrap();
         let db = AssetDb::loose(project.assets()).expect("assets load");
         (project, db)
+    }
+
+    #[test]
+    fn new_scenes_have_a_camera_and_never_overwrite() {
+        let (_project, db) = temp_project("new-scene", SCENE);
+        assert_eq!(new_scene(&db, "Level 2"), Ok("scenes/Level 2.scene.ron".into()));
+        assert_eq!(new_scene(&db, "levels/boss.scene.ron"), Ok("levels/boss.scene.ron".into()));
+        assert!(new_scene(&db, "Level 2").unwrap_err().contains("already exists"));
+        assert!(new_scene(&db, "scenes/a?b").is_err());
+        let registry = player::registry(&Scripts::none());
+        let scene = player::load_scene(&db, &registry, "levels/boss.scene.ron").unwrap();
+        let camera = scene.walk()[0];
+        assert_eq!(scene.name(camera), Some("Main Camera"));
+        assert!(scene.get::<crate::Camera>(camera).is_some());
     }
 
     #[test]

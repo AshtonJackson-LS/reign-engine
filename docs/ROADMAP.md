@@ -86,6 +86,23 @@ text or command-line way in, and a way to see the result.
 
 - [x] Two Hierarchy tests panicked on every platform (egui's texture
   updates were dropped unhandled), which kept CI red.
+- [x] Hierarchy search.
+- [x] New scenes from the editor (Scene → New Scene, Project → Create →
+  Scene, `--new-scene`), double-click to open a scene, and "Save changes?"
+  before switching scenes (opening another used to drop unsaved edits).
+- [x] The Tilemap tab opens the scene's tilemap.
+- [x] Drag and drop files from the system's file manager into the Project
+  panel.
+- [x] The hub opened a project's last-built editor and left rebuilding to
+  the engine's own app, so a game with its own `EditorApp` (Exreign) kept
+  running an old engine. The hub now runs `cargo build` before every open.
+- [ ] Drops land in the folder the Project panel shows, not the folder
+  tile under the pointer: Windows doesn't report the pointer during an
+  OS drag.
+- [ ] Linux under Wayland: winit doesn't deliver file drops yet.
+- [ ] `peers_agree_over_a_lossy_jittery_link` fails now and then on macOS
+  CI: it compares ticks a peer has confirmed but not yet simulated. Fix
+  stashed as `net-test-fix`.
 
 - [ ] The README's hub section only describes macOS
   (`scripts/bundle-macos.sh`, `~/Library/...`); Windows and Linux need the

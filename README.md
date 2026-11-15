@@ -224,13 +224,27 @@ already solid: a `TilemapRenderer` (draws the map's layers) plus a
 one-way platform, with the same layers, triggers and collision events as
 BoxColliders). It writes a starter map to `assets/tilemaps/` and a small
 built-in tileset to `assets/Reign/`; double-click the map in the Project
-panel to paint it in the Tilemap tab. Slopes collide as solid blocks for now.
+panel to paint it in the Tilemap tab. Switching to the Tilemap tab opens the
+selected object's map, or else the scene's first one. Slopes collide as solid
+blocks for now.
+
+**Scene → New Scene…** (or **+ Create → Scene** in the Project panel) makes
+a scene with a Main Camera and opens it; double-click a scene in the Project
+panel to open it. When the open scene has unsaved changes, the editor asks
+whether to save them first. A game with its own `EditorApp` gets an empty
+scene unless it overrides `new_scene_text` with its own starting point.
+
+Drag files or folders from Explorer, Finder or a Linux file manager onto the
+editor window to copy them into the folder the Project panel shows. Taken
+names get a number (`hero 1.png`), and each copy gets a fresh `.meta`.
+(Linux under Wayland doesn't pass drops to the window yet; X11 does.)
 
 Create objects from the toolbar's **GameObject** menu or by right-clicking
 the Hierarchy (on an object to make a child). Shortcuts: Ctrl/Cmd+Shift+N
 (or Ctrl/Cmd+N) for an empty object, Alt+Shift+N for an empty child of the
 selection, Ctrl/Cmd+I (or F2, or double-click) to rename the selection in
-the Hierarchy (Enter keeps it, Esc cancels). New objects appear in the middle of the view. Dragging a PNG or
+the Hierarchy (Enter keeps it, Esc cancels). The Hierarchy's search box
+lists only the objects whose names match. New objects appear in the middle of the view. Dragging a PNG or
 sprite sheet from the Project panel into the view also places it. Gameplay
 comes from a game crate that depends on `reign` and implements
 `reign::editor::EditorApp` (`create_items` / `create` fill the Create menus).
@@ -262,13 +276,14 @@ the same export from the command line.
 
 ## Without the window: tools and AI agents
 
-Three commands open no window and print one JSON document on stdout, so
+These commands open no window and print one JSON document on stdout, so
 scripts, CI and AI coding agents can work on a project:
 
 ```bash
 reign-engine PROJECT_DIR --check                 # do all scenes and prefabs load? exit 1 if not
 reign-engine PROJECT_DIR --describe              # components, fields, defaults, inputs, scenes, assets
 reign-engine PROJECT_DIR --simulate 240 --input "Right,Jump@30-45" --watch Player
+reign-engine PROJECT_DIR --new-scene scenes/level2.scene.ron   # a scene with a Main Camera
 ```
 
 `--simulate TICKS` plays the start scene (or `--scene scenes/x.scene.ron`)

@@ -68,11 +68,7 @@ impl Project {
         }
         let main = project.scenes().join("main.scene.ron");
         if !main.exists() {
-            let mut scene = Scene::new();
-            let camera = scene.spawn("Main Camera");
-            scene.insert(camera, Camera::default());
-            let text = scene.to_ron().map_err(|e| std::io::Error::other(e.to_string()))?;
-            std::fs::write(&main, text)?;
+            std::fs::write(&main, new_scene_text().map_err(std::io::Error::other)?)?;
         }
         Ok(project)
     }
@@ -87,6 +83,14 @@ impl Project {
             .or_else(|| self.root.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "Untitled".into())
     }
+}
+
+/// What a new scene starts with: a Main Camera.
+pub(crate) fn new_scene_text() -> Result<String, String> {
+    let mut scene = Scene::new();
+    let camera = scene.spawn("Main Camera");
+    scene.insert(camera, Camera::default());
+    scene.to_ron().map_err(|e| e.to_string())
 }
 
 pub struct ReignEngine {
@@ -258,16 +262,23 @@ impl EditorApp for ReignEngine {
         self.scene_file.clone()
     }
 
+    /// Every scene in the project, in any folder.
     fn scene_files(&self) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(self.project.scenes())
-            .map(|dir| {
-                dir.filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.to_string_lossy().ends_with(".scene.ron"))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let Some(db) = self.db() else { return Vec::new() };
+        let assets = self.project.assets();
+        let mut files: Vec<PathBuf> =
+            player::scene_paths(db).iter().map(|path| assets.join(path)).collect();
         files.sort();
         files
+    }
+
+    fn new_scene_text(&self) -> Option<String> {
+        new_scene_text().ok()
+    }
+
+    fn tilemap_of(&self, object: ObjectId) -> Option<Guid> {
+        let map = self.world.scene.get::<TilemapRenderer>(object)?.tilemap;
+        (map != Handle::NONE).then_some(map.guid)
     }
 
     fn open_scene(&mut self, path: &Path) -> Result<(), String> {
