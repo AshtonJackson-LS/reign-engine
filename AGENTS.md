@@ -37,7 +37,7 @@ cargo run -p reign_engine -- PROJECT_DIR --new-scene scenes/level2.scene.ron
 - `--check` loads every scene and prefab as the game would. Exit code 1
   and an `errors` list if anything fails.
 - `--describe` lists every component with its fields, kinds, defaults,
-  ranges and doc comments, plus input actions, scenes and assets.
+  ranges and doc comments, plus input actions, scenes, tags and assets.
 - `--simulate TICKS` plays the start scene (or `--scene ASSET_PATH`) at 120
   ticks a second and prints every object's position and component values at
   the end. `--every N` adds a snapshot every N ticks; `--watch A,B` keeps
@@ -105,7 +105,8 @@ The editor can't yet (see the roadmap).
 | Download progress (bar, size, speed, cancel) and the windows that show it | `hub/src/download.rs`, `download_windows` and `download_window` in `hub/src/main.rs` |
 | Editor fullscreen (F11), Fill, how keys reach the game | `engine/reign_editor/src/shell.rs` (`route_key`, `fullscreen_sync`, `game_view_scale`) |
 | How projects build: features, target dir, engine version rewrite | `engine/reign_build/src/project.rs` (`build_features`, `target_dir`, `set_project_engine`) |
-| Project icons: the rules, the default, resizing, the exe and macOS icon files, and the Project Settings dialog | `app/src/icon.rs`, `app/src/project_settings.rs`, `app/src/exe_icon.rs` (the one place with `unsafe`: Windows' resource-update calls), `assets/icon/project-512.png` |
+| Project Settings: the dialog, the settings file (start scene, game window, background, version, author, layer names, tags; the Input section only shows `assets/input.ron` and opens `app/src/input/dialog.rs`), renaming; layer fields in the Inspector (`FieldHint`, `#[reflect(layer)]`) | `app/src/project_settings.rs`, `app/src/settings.rs`, `Project::set_title` in `app/src/editor.rs`, `engine/reign_editor/src/inspector.rs` (`layer_ui`, `layer_mask_ui`) |
+| Project icons: the rules, the default, resizing, the exe and macOS icon files | `app/src/icon.rs`, `app/src/exe_icon.rs` (the one place with `unsafe`: Windows' resource-update calls, also used for the exe's version details), `assets/icon/project-512.png` |
 | Build progress (`x / y` in the hub's status bar and the editor's toolbar) | `engine/reign_build/src/progress.rs` (reads cargo's output), `hub/src/main.rs` (status bar), `app/src/code.rs` (toolbar) |
 | Hub updates and release signing | `hub/src/update.rs`, `hub/src/signing.rs`, `.github/workflows/release.yml` |
 | Engine versions per project (picker, downloads) | `hub/src/versions.rs`, `hub/src/main.rs` (`version_dialog`, `open_choice_dialog`) |

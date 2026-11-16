@@ -11,8 +11,11 @@ are the full reference.
 
 ```text
 ReignProject.ron        marks the folder as a project (name, engine version)
+ProjectSettings.ron     start scene, game window, version, author (optional)
+icon.png                the game's icon (optional)
 assets/                 everything the game loads
-  scenes/*.scene.ron    scenes; main.scene.ron is where the game starts
+  scenes/*.scene.ron    scenes; main.scene.ron is where the game starts,
+                        unless ProjectSettings.ron names another
   input.ron             input actions and their keys (optional; has defaults)
   *.prefab.ron, *.tilemap.ron, *.sheet.ron, *.anim.ron, *.png, *.wav
   *.meta                one beside every asset: its GUID. Never delete or
@@ -32,7 +35,7 @@ so your components are known. `<crate>` is the package name in `Cargo.toml`:
 ```bash
 cargo build --bin <crate>-editor                      # compile; errors name file and line
 cargo run --bin <crate>-editor -- . --check           # do all scenes and prefabs load?
-cargo run --bin <crate>-editor -- . --describe        # components, fields, defaults, inputs, assets
+cargo run --bin <crate>-editor -- . --describe        # components, fields, defaults, inputs, tags, assets
 cargo run --bin <crate>-editor -- . --simulate 240    # play 2 seconds, print every object
 cargo run --bin <crate>-editor -- . --new-scene scenes/level2.scene.ron   # a new scene with a camera
 ```
@@ -60,6 +63,28 @@ it's seconds.
 exercises what you changed, read the positions and component values, repeat.
 Run `--describe` first: it tells you every component and field that exists,
 so you never have to guess a name.
+
+## Project Settings
+
+The editor's **Project → Project Settings…** edits these. The game's name is
+`name` in `ReignProject.ron` (keep `engine_version` as it is). The rest is
+`ProjectSettings.ron`; any field left out has the default shown:
+
+```ron
+(
+    start_scene: "",          // an asset path such as "scenes/title.scene.ron"; "" = main.scene.ron
+    window: (width: 1280, height: 720, fullscreen: false),   // at least 640 x 360
+    version: "1.0.0",         // one to four numbers with dots between
+    author: "",               // a person or studio; "" leaves it out
+    background: (24, 24, 32), // red, green, blue (0-255) behind everything
+    layers: {0: "Default"},   // collision layer names by number (0-31), for the Inspector
+    tags: ["Player", "Enemy"],  // tags objects can have; add one here before using it
+)
+```
+
+`--describe` prints them under `settings`; `--check` reports a value that
+can't be used, a start scene that doesn't exist, or an object whose tag
+isn't in `tags` (usually a typo).
 
 ## Scenes
 
@@ -99,6 +124,9 @@ A scene is RON. Objects are listed parents before children.
 - **Fixed-point numbers are quoted decimal strings**: `x: "1.5"`. Unquoted
   `1.5` is an error. Integers such as sizes are plain numbers.
 - Leave out any field to get its default; `"Rigidbody": ()` is all defaults.
+- An object can have a tag for scripts to find it by: `name: "Bat", tag: "Enemy"`.
+  Use one from `ProjectSettings.ron`'s `tags`, adding it there if it's new.
+  A prefab instance gets its prefab root's tag.
 - Positions are in pixels. The view is 640 by 360. **y grows downwards.**
 - Higher `z` draws on top.
 - Assets are named by GUID (32 hex digits), from `--describe`'s `assets`
@@ -142,6 +170,10 @@ What a script can call (`ctx` is the `&mut Ctx`):
 | `ctx.touching(id)` | Objects it's in contact with |
 | `ctx.send(id, Message::with("Hit", 3))`, `ctx.broadcast(Message::new("Reset"))` | Messages, received in `on_message` |
 | `msg.body.is("Hit")`, `msg.body.value()`, `msg.from` | Reading a message |
+| `ctx.find("Player")` | The first object with that name, or `None` |
+| `ctx.find_with_tag("Player")`, `ctx.find_all_with_tag("Enemy")` | The first object, or every object, with that tag |
+| `ctx.has_tag(id, "Enemy")`, `ctx.set_tag(id, "Dead")` | Ask about or change an object's tag |
+| `ctx.spawn("prefabs/bullet.prefab.ron", at)` | A copy of a prefab at `at`, there now: set it up, then it `start`s before its first update |
 | `ctx.commands.spawn("Name")`, `.insert(id, component)`, `.despawn(id)` | Changes applied at the end of the tick |
 | `ctx.play_animation(id, "run")`, `ctx.animation_finished(id)` | Switch an `Animator` to a named clip (safe every tick) |
 | `ctx.set_text(id, format!("Score: {n}"))` | Change what a `Text` says |
@@ -176,7 +208,8 @@ blocking.
 
 ## Input
 
-`assets/input.ron` holds up to 10 named actions with keys and gamepad
+`assets/input.ron` holds up to 10 named actions with `keys`, `mouse`
+buttons (`"Left"`, `"Right"`, `"Middle"`, `"Back"`, `"Forward"`) and `pad`
 buttons. Without the file, the defaults are Left, Right, Up, Down, Jump,
 Attack, Dash, Parry, Interact and Pause. `--describe` prints the ones in use.
 

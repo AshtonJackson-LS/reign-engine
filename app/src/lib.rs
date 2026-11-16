@@ -38,6 +38,7 @@ pub mod physics;
 mod player;
 mod project_settings;
 mod runtime;
+mod settings;
 mod starter;
 mod tilemap_assets;
 mod view;
@@ -245,7 +246,7 @@ pub fn run(scripts: Scripts) {
                 watch: sim_watch,
             },
         };
-        std::process::exit(headless::run(command, db, &scripts, &project.title()));
+        std::process::exit(headless::run(command, db, &scripts, &project.root));
     }
 
     match AssetDb::loose(project.assets()) {
@@ -260,7 +261,7 @@ pub fn run(scripts: Scripts) {
 
     let mut config = EditorConfig::default();
     config.app = AppConfig {
-        title: format!("{} - Reign Engine", project.title()),
+        title: project_settings::editor_title(&project.title()),
         icon: Some(icon::window_icon(&icon::project_icon(&project.root))),
         exit_after,
         ..config.app

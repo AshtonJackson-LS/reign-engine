@@ -29,7 +29,7 @@ use crate::prefab_ui;
 use crate::scenes::{self, Answer, NewScene, SaveChoice, Switch};
 use crate::slicer::Slicer;
 use crate::tilemap_painter::TilemapPainter;
-use crate::{EditorApp, EditorConfig, SceneView, hierarchy, inspector};
+use crate::{EditorApp, EditorConfig, Heard, SceneView, hierarchy, inspector};
 
 /// The tint the editor takes on during a run, like Unity's play-mode tint.
 const PLAY_TINT: Color32 = Color32::from_rgb(70, 110, 170);
@@ -199,6 +199,8 @@ struct Session<A: EditorApp> {
     prefab_mode: Option<prefab_ui::PrefabMode>,
     /// Prefab Mode swapped the scene this frame: not an edit.
     swapped: bool,
+    /// Keys pressed since the last frame, for [`EditorApp::input_heard`].
+    heard_keys: Vec<Heard>,
 }
 
 /// What the toolbar and shortcuts asked for this frame.
@@ -309,6 +311,7 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             prefabs: registry_for_prefabs,
             prefab_mode: None,
             swapped: false,
+            heard_keys: Vec::new(),
             history: History::default(),
             stashed_history: None,
             edit_base: None,
@@ -329,6 +332,15 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             _ => {}
         }
         let (to_egui, to_game) = s.route(&event);
+        // Heard wherever it went; F11 (which went nowhere) is the editor's.
+        if let WindowEvent::KeyboardInput { event, .. } = &event
+            && event.state == ElementState::Pressed
+            && !event.repeat
+            && (to_egui || to_game)
+            && let PhysicalKey::Code(code) = event.physical_key
+        {
+            s.heard_keys.push(Heard::Key(code));
+        }
         if to_egui {
             let _ = s.egui_winit.on_window_event(&s.window, &event);
         }
@@ -444,6 +456,9 @@ impl<A: EditorApp> Session<A> {
             && (self.panels.game_focused || self.panels.cursor_over_game(ppp));
         self.pads.set_enabled(game_input);
         let pads = self.pads.poll(dt);
+        let mut heard = std::mem::take(&mut self.heard_keys);
+        heard.extend(pads.heard.iter().copied().map(Heard::Pad));
+        let keys_taken = self.app.input_heard(&heard);
         if self.prefab_mode.is_some()
             && let Some(snapshot) = self.play.stop()
         {
@@ -517,7 +532,10 @@ impl<A: EditorApp> Session<A> {
         self.panels.game_image = None;
         let selected_before = (self.panels.selected, self.panels.project.selected);
         let assets = self.app.assets();
-        let input = self.egui_winit.take_egui_input(&self.window);
+        let mut input = self.egui_winit.take_egui_input(&self.window);
+        if keys_taken {
+            input.events.retain(|e| !is_key_press(e));
+        }
         let dropped: Vec<PathBuf> =
             input.dropped_files.iter().map(|file| file.path().to_owned()).collect();
         let registry = self.app.registry().cloned();
@@ -550,7 +568,11 @@ impl<A: EditorApp> Session<A> {
             }
             let mut style = Style::from_egui(ui.style());
             style.tab_bar.fill_tab_bar = true;
+            let layer_names = app.layer_names();
+            let tag_names = app.tag_names();
             let mut viewer = Viewer {
+                layer_names: &layer_names,
+                tag_names: &tag_names,
                 app: &mut *app,
                 play: &*play,
                 panels: &mut *panels,
@@ -611,6 +633,11 @@ impl<A: EditorApp> Session<A> {
                 Ok(icon) => self.window.set_window_icon(Some(icon)),
                 Err(e) => log::warn!("can't use that window icon: {e}"),
             }
+        }
+        // A new title (the project was renamed): shown with the next title
+        // update, which compares the whole title.
+        if let Some(title) = self.app.take_window_title() {
+            self.base_title = title;
         }
         self.apply_create();
         self.after_panels(selected_before);
@@ -1382,6 +1409,12 @@ fn file_name(path: &std::path::Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into())
 }
 
+/// A key press, or what egui makes of one (text, copy, paste).
+fn is_key_press(event: &egui::Event) -> bool {
+    use egui::Event::*;
+    matches!(event, Key { pressed: true, .. } | Text(_) | Copy | Cut | Paste(_))
+}
+
 /// Undo, redo, save, create, duplicate and delete from the keyboard.
 fn shortcuts<A: EditorApp>(
     ui: &mut egui::Ui,
@@ -1668,6 +1701,10 @@ struct Viewer<'a, A: EditorApp> {
     /// The prefab being edited in Prefab Mode.
     prefab_mode: Option<&'a str>,
     dirty: bool,
+    /// Collision layers' names, for the Inspector.
+    layer_names: &'a [String],
+    /// The project's tags, for the Inspector.
+    tag_names: &'a [String],
 }
 
 impl<A: EditorApp> Viewer<'_, A> {
@@ -1761,20 +1798,23 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                         (Some(p), Some(db)) => prefab_ui::info(scene, id, &p.with(db), db),
                         _ => None,
                     };
-                    let action = inspector::inspector(
-                        ui,
-                        scene,
-                        self.registry,
-                        id,
-                        true,
-                        self.assets,
-                        info.as_ref(),
-                    );
+                    let lookups = inspector::Lookups {
+                        registry: self.registry,
+                        assets: self.assets,
+                        prefab: info.as_ref(),
+                        layers: self.layer_names,
+                        tags: self.tag_names,
+                    };
+                    let action = inspector::inspector(ui, scene, id, true, lookups);
                     match action {
                         Some(inspector::Action::Edit(label)) => {
                             self.panels.edit_label = Some(label)
                         }
                         Some(inspector::Action::Prefab(a)) => self.panels.prefab_action = Some(a),
+                        Some(inspector::Action::AddTag(tag)) => match self.app.add_tag(&tag) {
+                            Ok(()) => log::info!("added the tag {tag:?} to the project"),
+                            Err(e) => log::error!("couldn't add the tag {tag:?}: {e}"),
+                        },
                         None => {}
                     }
                 }
@@ -2032,7 +2072,7 @@ mod view_scale_tests {
 
 #[cfg(test)]
 mod key_route_tests {
-    use super::{KeyRoute, KeyState, route_key};
+    use super::{KeyRoute, KeyState, is_key_press, route_key};
     use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
 
     const F11: PhysicalKey = PhysicalKey::Code(KeyCode::F11);
@@ -2041,6 +2081,22 @@ mod key_route_tests {
 
     fn press(game_has_keyboard: bool) -> KeyState {
         KeyState { pressed: true, repeat: false, command: false, game_has_keyboard }
+    }
+
+    #[test]
+    fn taken_keys_are_presses_and_what_egui_makes_of_them() {
+        use egui::{Event, Key, Modifiers};
+        let key = |pressed| Event::Key {
+            key: Key::Delete,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(is_key_press(&key(true)));
+        assert!(is_key_press(&Event::Text(" ".into())));
+        assert!(!is_key_press(&key(false)), "releases still reach egui");
+        assert!(!is_key_press(&Event::PointerGone));
     }
 
     #[test]

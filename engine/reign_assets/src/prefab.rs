@@ -8,7 +8,7 @@
 //!   prefab onto that object: the root's components go on it, and the
 //!   prefab's children are made under it (marked `dont_save`, since they
 //!   come from the prefab). The instance's own name and transform stay its
-//!   own.
+//!   own; its tag is the prefab root's, unless overridden.
 //! - **Overrides.** What an instance changes is kept as data on its
 //!   [`PrefabInstance`]: property overrides by `(object path, component,
 //!   field path)` (see [`reign_scene::path`]), added components (as RON) and
@@ -55,7 +55,7 @@ impl Asset for Prefab {
 pub type ObjectPath = Vec<u32>;
 
 /// One changed field. `path` starts with the component's name, or
-/// `GameObject` for the object's `name`, `active` and `transform`.
+/// `GameObject` for the object's `name`, `tag`, `active` and `transform`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Override {
     pub object: ObjectPath,
@@ -213,6 +213,9 @@ fn stamp(scene: &mut Scene, target: ObjectId, template: &Template) -> Vec<(Objec
     let t = &template.scene;
     let own = scene.get::<PrefabInstance>(target).cloned();
     scene.copy_components_from(target, t, template.root);
+    if let (Some(o), Some(from)) = (scene.object_mut(target), t.object(template.root)) {
+        o.tag.clone_from(&from.tag);
+    }
     match own {
         Some(own) => {
             scene.insert(target, own);
@@ -299,7 +302,7 @@ fn apply(scene: &mut Scene, root: ObjectId, registry: &ComponentRegistry) -> Res
     Ok(())
 }
 
-/// Sets `Component.field.sub` (or `GameObject.name`, `.active`,
+/// Sets `Component.field.sub` (or `GameObject.name`, `.tag`, `.active`,
 /// `.transform...`) on an object.
 pub fn set_property(scene: &mut Scene, id: ObjectId, property: &str, value: &Value) -> bool {
     let (head, rest) = property.split_once('.').unwrap_or((property, ""));
@@ -308,6 +311,10 @@ pub fn set_property(scene: &mut Scene, id: ObjectId, property: &str, value: &Val
         return match (rest, value) {
             ("name", Value::Str(s)) => {
                 object.name.clone_from(s);
+                true
+            }
+            ("tag", Value::Str(s)) => {
+                object.tag.clone_from(s);
                 true
             }
             ("active", Value::Bool(b)) => {
@@ -330,6 +337,7 @@ pub fn get_property(scene: &mut Scene, id: ObjectId, property: &str) -> Option<V
         let object = scene.object_mut(id)?;
         return match rest {
             "name" => Some(Value::Str(object.name.clone())),
+            "tag" => Some(Value::Str(object.tag.clone())),
             "active" => Some(Value::Bool(object.active)),
             t => path::get(&mut object.transform, t.strip_prefix("transform")?.trim_matches('.')),
         };
@@ -338,7 +346,7 @@ pub fn get_property(scene: &mut Scene, id: ObjectId, property: &str) -> Option<V
 }
 
 /// Every overridable leaf of an object: its `GameObject` properties
-/// (unless it is the instance root, whose name and place are its own) and
+/// (only the tag for the instance root, whose name and place are its own) and
 /// each component's fields, with ids inside mapped through `ids`.
 fn object_leaves(
     scene: &mut Scene,
@@ -347,6 +355,9 @@ fn object_leaves(
     ids: &dyn Fn(ObjectId) -> ObjectId,
 ) -> Vec<(String, Value)> {
     let mut out = Vec::new();
+    if let Some(o) = scene.object(id) {
+        out.push(("GameObject.tag".to_owned(), Value::Str(o.tag.clone())));
+    }
     if !is_root && let Some(o) = scene.object_mut(id) {
         out.push(("GameObject.name".to_owned(), Value::Str(o.name.clone())));
         out.push(("GameObject.active".to_owned(), Value::Bool(o.active)));

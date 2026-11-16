@@ -4,7 +4,7 @@
 use egui::{Color32, RichText, Ui};
 use reign_assets::{AssetDb, Guid};
 use reign_core::{Fx, FxVec2};
-use reign_scene::reflect::{FieldInfo, Mut, Reflect, ReflectStruct};
+use reign_scene::reflect::{FieldHint, FieldInfo, IntMut, Mut, Reflect, ReflectStruct};
 use reign_scene::{ComponentRegistry, ObjectId, Scene};
 
 use crate::assets_ui::AssetDrag;
@@ -18,6 +18,10 @@ pub(crate) struct Pick<'a> {
     pub overridden: Vec<String>,
     /// A property whose Revert was clicked.
     pub revert: std::cell::RefCell<Option<String>>,
+    /// Collision layers' names by number, for layer and layer-mask fields.
+    pub layers: &'a [String],
+    /// The project's tags, for the tag menu.
+    pub tags: &'a [String],
 }
 
 impl Pick<'_> {
@@ -39,6 +43,8 @@ pub enum Action {
     Edit(String),
     /// Something to do with the selected object's prefab.
     Prefab(PrefabAction),
+    /// Add this tag to the project's tags (the object already has it).
+    AddTag(String),
 }
 
 /// The prefab instance buttons.
@@ -53,17 +59,29 @@ pub enum PrefabAction {
     Revert(ObjectId, ObjectId, String),
 }
 
+/// What the Inspector looks things up in, besides the scene.
+pub struct Lookups<'a> {
+    pub registry: Option<&'a ComponentRegistry>,
+    /// For asset pickers.
+    pub assets: Option<&'a AssetDb>,
+    /// The selected object's prefab, if it's an instance of one.
+    pub prefab: Option<&'a crate::prefab_ui::PrefabInfo>,
+    /// Collision layers' names by number (see `EditorApp::layer_names`).
+    pub layers: &'a [String],
+    /// The project's tags (see `EditorApp::tag_names`).
+    pub tags: &'a [String],
+}
+
 /// Draws the Inspector for `id`. Field edits go straight into the scene;
 /// the editor sees the change and records it for undo.
 pub fn inspector(
     ui: &mut Ui,
     scene: &mut Scene,
-    registry: Option<&ComponentRegistry>,
     id: ObjectId,
     editable: bool,
-    assets: Option<&AssetDb>,
-    prefab: Option<&crate::prefab_ui::PrefabInfo>,
+    lookups: Lookups,
 ) -> Option<Action> {
+    let Lookups { registry, assets, prefab, layers, tags } = lookups;
     let Some(object) = scene.object(id) else {
         ui.weak("The selected object is gone.");
         return None;
@@ -74,7 +92,7 @@ pub fn inspector(
     let objects: Vec<(ObjectId, String)> =
         scene.walk().into_iter().map(|o| (o, label(scene, o))).collect();
     let overridden = prefab.map_or_else(Vec::new, |p| p.overridden.clone());
-    let pick = Pick { objects, assets, overridden, revert: Default::default() };
+    let pick = Pick { objects, assets, overridden, revert: Default::default(), layers, tags };
 
     ui.add_enabled_ui(editable, |ui| {
         ui.horizontal(|ui| {
@@ -82,6 +100,9 @@ pub fn inspector(
             ui.checkbox(&mut object.active, "").on_hover_text("Active");
             ui.add(egui::TextEdit::singleline(&mut object.name).desired_width(f32::INFINITY));
         });
+        if let Some(a) = tag_ui(ui, scene, id, &pick) {
+            action = Some(a);
+        }
         ui.horizontal(|ui| {
             ui.weak(format!("{id}"));
             if runtime {
@@ -191,6 +212,104 @@ pub fn inspector(
     action
 }
 
+/// The object's tag: picked from the project's tags, or typed. Typing a
+/// new one and pressing Enter (or `+ Add`) adds it to the project's tags.
+/// Bold, with Revert on right-click, when a prefab instance overrides its
+/// prefab's tag.
+fn tag_ui(ui: &mut Ui, scene: &mut Scene, id: ObjectId, pick: &Pick) -> Option<Action> {
+    // Tags in the scene that the project doesn't list: offered too, so
+    // they can be picked again or added.
+    let mut stray: Vec<String> = scene
+        .walk()
+        .into_iter()
+        .filter_map(|o| scene.object(o).map(|o| o.tag.trim().to_owned()))
+        .filter(|t| !t.is_empty() && !pick.tags.contains(t))
+        .collect();
+    stray.sort();
+    stray.dedup();
+    let object = scene.object_mut(id)?;
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let overridden = pick.is_overridden("GameObject.tag");
+        let text = if overridden {
+            RichText::new("Tag").strong().color(Color32::WHITE)
+        } else {
+            RichText::new("Tag")
+        };
+        let label = ui
+            .add(egui::Label::new(text).sense(egui::Sense::click()))
+            .on_hover_text("Scripts find objects by tag: ctx.find_with_tag(\"Enemy\")");
+        if overridden {
+            label.on_hover_text("Overrides the prefab. Right-click to revert.").context_menu(
+                |ui| {
+                    if ui.button("Revert to prefab").clicked() {
+                        *pick.revert.borrow_mut() = Some("GameObject.tag".to_owned());
+                        ui.close();
+                    }
+                },
+            );
+        }
+        let edit = egui::TextEdit::singleline(&mut object.tag)
+            .id(tag_edit_id(id))
+            .hint_text("Untagged")
+            .desired_width(140.0);
+        let typed = ui.add(edit);
+        let mut new_tag = false;
+        egui::ComboBox::from_id_salt(("tag", id))
+            .selected_text("")
+            .width(16.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(object.tag.is_empty(), "Untagged").clicked() {
+                    object.tag.clear();
+                }
+                for tag in pick.tags {
+                    if ui.selectable_label(object.tag == *tag, tag).clicked() {
+                        object.tag.clone_from(tag);
+                    }
+                }
+                for tag in &stray {
+                    let label = ui
+                        .selectable_label(object.tag == *tag, RichText::new(tag).weak())
+                        .on_hover_text("Used in this scene, not in the project's tags");
+                    if label.clicked() {
+                        object.tag.clone_from(tag);
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(false, "New tag…").clicked() {
+                    new_tag = true;
+                }
+            })
+            .response
+            .on_hover_text("Pick a tag, or make a new one");
+        if new_tag {
+            object.tag.clear();
+            ui.memory_mut(|m| m.request_focus(tag_edit_id(id)));
+        }
+        let tag = object.tag.trim().to_owned();
+        let unknown = !tag.is_empty() && !pick.tags.contains(&tag);
+        let entered = typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let add = unknown
+            && (entered
+                || ui
+                    .small_button("+ Add")
+                    .on_hover_text(format!(
+                        "Add {tag:?} to the project's tags, so every object can pick it"
+                    ))
+                    .clicked());
+        if add {
+            object.tag = tag.clone();
+            action = Some(Action::AddTag(tag));
+        }
+    });
+    action
+}
+
+/// The tag box's id, so tests can type into it.
+fn tag_edit_id(id: ObjectId) -> egui::Id {
+    egui::Id::new(("tag edit", id))
+}
+
 /// An object's label in pickers and the Hierarchy.
 pub fn label(scene: &Scene, id: ObjectId) -> String {
     format!("{} {id}", scene.name(id).unwrap_or("?"))
@@ -264,6 +383,12 @@ fn value_ui(
     match value.reflect_mut() {
         Mut::Bool(b) => {
             ui.checkbox(b, "");
+        }
+        Mut::Int(int) if info.is_some_and(|i| i.hint == FieldHint::Layer) => {
+            layer_ui(ui, int, objects.layers);
+        }
+        Mut::Int(int) if info.is_some_and(|i| i.hint == FieldHint::LayerMask) => {
+            layer_mask_ui(ui, int, objects.layers);
         }
         Mut::Int(mut int) => {
             let (lo, hi) = int.bounds();
@@ -374,6 +499,107 @@ fn value_ui(
 }
 
 /// A fixed-point number, edited in whole 1/256ths and shown exactly.
+/// How many collision layers there are: one bit each in a `u32` mask.
+const LAYERS: u32 = 32;
+
+/// A layer as the Inspector shows it: its number, and its name if it has
+/// one (`3  Enemies`).
+pub(crate) fn layer_label(layer: u32, names: &[String]) -> String {
+    match names.get(layer as usize).map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{layer}  {name}"),
+        None => format!("{layer}"),
+    }
+}
+
+/// A layer mask in a few words: Everything, Nothing, the layers in it when
+/// there are up to three, else how many.
+pub(crate) fn mask_summary(mask: u32, names: &[String]) -> String {
+    match mask {
+        u32::MAX => "Everything".into(),
+        0 => "Nothing".into(),
+        _ => {
+            let set: Vec<u32> = (0..LAYERS).filter(|l| mask & (1 << l) != 0).collect();
+            if set.len() <= 3 {
+                let name = |l: u32| {
+                    names
+                        .get(l as usize)
+                        .map(|n| n.trim().to_owned())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| format!("Layer {l}"))
+                };
+                set.into_iter().map(name).collect::<Vec<_>>().join(", ")
+            } else {
+                format!("{} layers", set.len())
+            }
+        }
+    }
+}
+
+/// A layer field: a list of the 32 layers by number and name.
+fn layer_ui(ui: &mut Ui, mut int: IntMut, names: &[String]) {
+    let (lo, hi) = int.bounds();
+    let mut layer = int.get().clamp(lo.max(0), hi.min(i128::from(LAYERS) - 1)) as u32;
+    let before = layer;
+    egui::ComboBox::from_id_salt(("layer", ui.next_auto_id()))
+        .selected_text(layer_label(layer, names))
+        .show_ui(ui, |ui| {
+            for l in 0..LAYERS {
+                ui.selectable_value(&mut layer, l, layer_label(l, names));
+            }
+        })
+        .response
+        .on_hover_text("Name layers in Project → Project Settings");
+    if layer != before {
+        int.set(i128::from(layer));
+    }
+}
+
+/// A layer mask field: Everything, Nothing, and a box for each layer, the
+/// named ones first.
+fn layer_mask_ui(ui: &mut Ui, mut int: IntMut, names: &[String]) {
+    let mut mask = int.get().clamp(0, i128::from(u32::MAX)) as u32;
+    let before = mask;
+    let named = |l: u32| names.get(l as usize).is_some_and(|n| !n.trim().is_empty());
+    egui::ComboBox::from_id_salt(("layer mask", ui.next_auto_id()))
+        .selected_text(mask_summary(mask, names))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Everything").clicked() {
+                    mask = u32::MAX;
+                }
+                if ui.button("Nothing").clicked() {
+                    mask = 0;
+                }
+            });
+            ui.separator();
+            let mut tick = |ui: &mut Ui, l: u32, text: String| {
+                let mut on = mask & (1 << l) != 0;
+                if ui.checkbox(&mut on, text).changed() {
+                    mask ^= 1 << l;
+                }
+            };
+            for l in (0..LAYERS).filter(|&l| named(l)) {
+                tick(ui, l, layer_label(l, names));
+            }
+            let unnamed: Vec<u32> = (0..LAYERS).filter(|&l| !named(l)).collect();
+            if !unnamed.is_empty() {
+                egui::CollapsingHeader::new(format!("Unnamed layers ({})", unnamed.len()))
+                    .id_salt("unnamed layers")
+                    .show(ui, |ui| {
+                        for l in unnamed {
+                            tick(ui, l, format!("Layer {l}"));
+                        }
+                    });
+            }
+        })
+        .response
+        .on_hover_text("The layers this collides with. Name layers in Project → Project Settings");
+    if mask != before {
+        int.set(i128::from(mask));
+    }
+}
+
 fn fx_ui(ui: &mut Ui, fx: &mut Fx, range: Option<(f64, f64)>) {
     let mut raw = fx.raw() as f64;
     let (lo, hi) =
@@ -458,4 +684,115 @@ fn asset_picker(ui: &mut Ui, a: &mut dyn reign_scene::reflect::ReflectAsset, db:
 /// An asset path shown by its file name.
 pub(crate) fn file_label(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names() -> Vec<String> {
+        let mut names = vec![String::new(); 32];
+        names[0] = "Default".into();
+        names[3] = "Enemies".into();
+        names[4] = " ".into();
+        names
+    }
+
+    const TAGS: &[String] = &[];
+
+    /// Draws the Inspector for `id` for one frame with `events` as input,
+    /// with `tags` as the project's tags.
+    fn frame(
+        ctx: &egui::Context,
+        scene: &mut Scene,
+        id: ObjectId,
+        tags: &[String],
+        events: Vec<egui::Event>,
+    ) -> Option<Action> {
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut action = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            let lookups = Lookups { registry: None, assets: None, prefab: None, layers: &[], tags };
+            action = inspector(ui, scene, id, true, lookups);
+        });
+        // Nothing draws these frames; egui panics if the font texture it
+        // made is dropped without being uploaded or cleared.
+        output.textures_delta.clear();
+        action
+    }
+
+    fn enter() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Focuses the tag box, types `text` and presses Enter. What the
+    /// Inspector asked for on the way.
+    fn type_tag(
+        ctx: &egui::Context,
+        scene: &mut Scene,
+        id: ObjectId,
+        tags: &[String],
+        text: &str,
+    ) -> Vec<Action> {
+        frame(ctx, scene, id, tags, vec![]);
+        ctx.memory_mut(|m| m.request_focus(tag_edit_id(id)));
+        let mut actions = Vec::new();
+        actions.extend(frame(ctx, scene, id, tags, vec![]));
+        actions.extend(frame(ctx, scene, id, tags, vec![egui::Event::Text(text.into())]));
+        actions.extend(frame(ctx, scene, id, tags, vec![enter()]));
+        actions.extend(frame(ctx, scene, id, tags, vec![]));
+        actions
+    }
+
+    #[test]
+    fn typing_in_the_tag_box_tags_the_object() {
+        let ctx = egui::Context::default();
+        let mut scene = Scene::new();
+        let id = scene.spawn("Goblin");
+        frame(&ctx, &mut scene, id, TAGS, vec![]);
+        ctx.memory_mut(|m| m.request_focus(tag_edit_id(id)));
+        frame(&ctx, &mut scene, id, TAGS, vec![]);
+        frame(&ctx, &mut scene, id, TAGS, vec![egui::Event::Text("Enemy".into())]);
+        assert_eq!(scene.object(id).unwrap().tag, "Enemy");
+    }
+
+    #[test]
+    fn enter_on_a_new_tag_adds_it_to_the_project() {
+        let ctx = egui::Context::default();
+        let tags = vec!["Player".to_owned(), "Enemy".to_owned()];
+        let mut scene = Scene::new();
+        let id = scene.spawn("Dragon");
+        let actions = type_tag(&ctx, &mut scene, id, &tags, " Boss ");
+        assert_eq!(actions, [Action::AddTag("Boss".into())]);
+        assert_eq!(scene.object(id).unwrap().tag, "Boss", "trimmed");
+
+        // A tag the project has already: nothing to add.
+        let other = scene.spawn("Goblin");
+        assert_eq!(type_tag(&ctx, &mut scene, other, &tags, "Enemy"), []);
+        assert_eq!(scene.object(other).unwrap().tag, "Enemy");
+    }
+
+    #[test]
+    fn layers_show_their_names() {
+        let names = names();
+        assert_eq!(layer_label(3, &names), "3  Enemies");
+        assert_eq!(layer_label(4, &names), "4", "a blank name is no name");
+        assert_eq!(layer_label(7, &[]), "7", "no names at all");
+    }
+
+    #[test]
+    fn masks_say_what_is_in_them() {
+        let names = names();
+        assert_eq!(mask_summary(u32::MAX, &names), "Everything");
+        assert_eq!(mask_summary(0, &names), "Nothing");
+        assert_eq!(mask_summary(0b1001, &names), "Default, Enemies");
+        assert_eq!(mask_summary(1 << 9, &names), "Layer 9");
+        assert_eq!(mask_summary(0b11110, &names), "4 layers");
+    }
 }

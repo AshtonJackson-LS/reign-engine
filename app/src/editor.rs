@@ -17,7 +17,7 @@ use crate::code::Code;
 use crate::components::{Camera, Image, SpriteRenderer, TilemapRenderer, sprite_size};
 use crate::project_settings::ProjectSettings;
 use crate::runtime::{self, Keyboard, Scripts, World, schedule};
-use crate::view::{CLEAR, Sprites};
+use crate::view::{self, Sprites};
 use crate::{DB, physics, player, starter};
 
 /// The file that marks a folder as a Reign project (Reign Hub reads it).
@@ -84,6 +84,37 @@ impl Project {
             .or_else(|| self.root.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "Untitled".into())
     }
+
+    /// Renames the game: the name in `ReignProject.ron`, which the hub lists
+    /// and the game's window and export are called. The engine version there
+    /// is kept. The project's folder and its crate keep their names.
+    pub fn set_title(&self, name: &str) -> Result<(), String> {
+        crate::settings::check_text("The name", name, false)?;
+        let path = self.root.join(PROJECT_FILE);
+        let mut file = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| ron::from_str::<ProjectFile>(&text).ok())
+            .unwrap_or_else(|| ProjectFile {
+                engine_version: env!("CARGO_PKG_VERSION").to_owned(),
+                ..ProjectFile::default()
+            });
+        file.name = name.trim().to_owned();
+        let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+            .map_err(|e| e.to_string())?;
+        crate::settings::write_replacing(&path, &text)
+    }
+
+    /// The scene the editor opens on: the start scene in Project Settings if
+    /// there is one and it's there, else `scenes/main.scene.ron`.
+    pub fn start_scene(&self) -> PathBuf {
+        let start = crate::settings::Settings::read(&self.root).start_scene;
+        let path = self.assets().join(&start);
+        if !start.is_empty() && path.is_file() {
+            path
+        } else {
+            self.scenes().join("main.scene.ron")
+        }
+    }
 }
 
 /// What a new scene starts with: a Main Camera.
@@ -105,8 +136,13 @@ pub struct ReignEngine {
     /// Whether the last frame was in Play, to hear it stop.
     was_playing: bool,
     code: Code,
-    /// The Project Settings dialog (the project's app icon).
+    /// The Project Settings dialog.
     settings: ProjectSettings,
+    /// From Project Settings: the colour behind the scene, and the
+    /// collision layers' names and the tags for the Inspector.
+    background: Color,
+    layer_names: Vec<String>,
+    tag_names: Vec<String>,
     scene_file: Option<PathBuf>,
     sprites: Sprites,
     view_origin: (f32, f32),
@@ -114,10 +150,17 @@ pub struct ReignEngine {
 }
 
 impl ReignEngine {
+    /// Takes up what Project Settings say about the editor's views.
+    fn use_settings(&mut self, settings: &crate::settings::Settings) {
+        self.background = view::background(settings.background);
+        self.layer_names = settings.layer_names();
+        self.tag_names = settings.tag_names();
+    }
+
     pub fn new(project: Project, scripts: Scripts, scene: Option<PathBuf>) -> Self {
         let registry = player::registry(&scripts);
         let behaviours = player::behaviours(&scripts);
-        let code = Code::new(project.root.clone(), project.title(), scripts.project);
+        let code = Code::new(project.root.clone(), scripts.project);
         let mut app = ReignEngine {
             project,
             registry,
@@ -129,12 +172,16 @@ impl ReignEngine {
             was_playing: false,
             code,
             settings: ProjectSettings::default(),
+            background: view::background(crate::settings::DEFAULT_BACKGROUND),
+            layer_names: Vec::new(),
+            tag_names: Vec::new(),
             scene_file: None,
             sprites: Sprites::default(),
             view_origin: (0.0, 0.0),
             show_origin: true,
         };
-        let path = scene.unwrap_or_else(|| app.project.scenes().join("main.scene.ron"));
+        app.use_settings(&crate::settings::Settings::read(&app.project.root));
+        let path = scene.unwrap_or_else(|| app.project.start_scene());
         if let Err(e) = app.open_scene(&path) {
             log::error!("{}: {e}", path.display());
         }
@@ -217,7 +264,7 @@ impl App for ReignEngine {
     }
 
     fn draw(&mut self, r: &mut Renderer, _alpha: f32) {
-        self.view_origin = self.sprites.draw_game(r, &self.world.scene, DB.get());
+        self.view_origin = self.sprites.draw_game(r, &self.world.scene, DB.get(), self.background);
     }
 
     fn event(&mut self, _ctx: &mut Ctx, event: &WindowEvent) {
@@ -308,19 +355,53 @@ impl EditorApp for ReignEngine {
             self.sprites.draw_objects(r, &self.world.scene, db, seen);
         }
         self.draw_colliders(r, view);
-        r.present(CLEAR);
+        r.present(self.background);
         true
+    }
+
+    fn input_heard(&mut self, heard: &[reign::editor::Heard]) -> bool {
+        self.code.input_heard(heard)
     }
 
     fn toolbar_ui(&mut self, ui: &mut egui::Ui) -> EditorRequests {
         let scene_file = self.scene_file.clone();
         self.settings.menu(ui);
-        self.settings.dialog(ui.ctx(), &self.project.root);
+        let scenes = DB.get().map(player::scene_paths).unwrap_or_default();
+        self.settings.dialog(ui.ctx(), &self.project.root, &scenes);
+        if let Some(saved) = self.settings.take_saved() {
+            self.use_settings(&saved);
+        }
+        // Drawn after Project Settings, so it shows on top of it.
+        if self.settings.take_edit_input() {
+            self.code.open_input_dialog();
+        }
         self.code.toolbar_ui(ui, scene_file.as_deref())
     }
 
     fn take_window_icon(&mut self) -> Option<reign::assets::RgbaImage> {
         self.settings.take_new_icon()
+    }
+
+    fn take_window_title(&mut self) -> Option<String> {
+        self.settings.take_new_title()
+    }
+
+    fn layer_names(&self) -> Vec<String> {
+        self.layer_names.clone()
+    }
+
+    fn tag_names(&self) -> Vec<String> {
+        self.tag_names.clone()
+    }
+
+    fn add_tag(&mut self, tag: &str) -> Result<(), String> {
+        let root = &self.project.root;
+        let mut settings = crate::settings::Settings::load(root)?;
+        if settings.add_tag(tag)? {
+            settings.save(root)?;
+        }
+        self.use_settings(&settings);
+        Ok(())
     }
 
     fn debug_ui(&mut self, _ctx: &mut Ctx, ui: &mut egui::Ui) {

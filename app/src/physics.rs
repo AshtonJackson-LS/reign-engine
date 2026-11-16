@@ -95,11 +95,13 @@ pub struct BoxCollider {
     pub offset: [i16; 2],
     /// Blocks nothing; reports overlaps as trigger events instead.
     pub is_trigger: bool,
-    /// Which layer (0-31) this collider is on.
-    #[reflect(range(0, 31))]
+    /// Which layer (0-31) this collider is on. Name layers in Project
+    /// Settings.
+    #[reflect(range(0, 31), layer)]
     pub layer: u8,
     /// The layers it collides with, one bit each (bit 0 is layer 0). Two
     /// colliders interact only if each one's mask has the other's layer.
+    #[reflect(layer_mask)]
     pub mask: u32,
 }
 
@@ -131,10 +133,11 @@ pub struct TilemapCollider {
     /// Blocks nothing; reports bodies overlapping any collision tile as
     /// trigger events instead.
     pub is_trigger: bool,
-    /// Which layer (0-31) the tiles are on.
-    #[reflect(range(0, 31))]
+    /// Which layer (0-31) the tiles are on. Name layers in Project Settings.
+    #[reflect(range(0, 31), layer)]
     pub layer: u8,
     /// The layers it collides with, one bit each (bit 0 is layer 0).
+    #[reflect(layer_mask)]
     pub mask: u32,
 }
 

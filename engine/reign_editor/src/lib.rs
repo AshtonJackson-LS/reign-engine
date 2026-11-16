@@ -196,6 +196,16 @@ pub trait EditorApp: App {
         EditorRequests::default()
     }
 
+    /// Every key pressed and pad input since the last frame, whoever had
+    /// the input (the editor's panels, the Game view, or nobody), heard
+    /// before the frame's UI: for a "press the key to bind" listener.
+    /// Called every frame, often with nothing. Returning true takes the
+    /// keys: the editor's panels and shortcuts don't see this frame's key
+    /// presses, so binding Delete doesn't also delete the selection.
+    fn input_heard(&mut self, _heard: &[Heard]) -> bool {
+        false
+    }
+
     /// The app's own debug toggles and actions, shown in the Debug panel.
     fn debug_ui(&mut self, _ctx: &mut Ctx, _ui: &mut egui::Ui) {}
 
@@ -248,6 +258,42 @@ pub trait EditorApp: App {
     fn take_window_icon(&mut self) -> Option<RgbaImage> {
         None
     }
+
+    /// A new title for the editor's window (the scene's file name is added
+    /// after it), when the app has one to give: a project renamed in its
+    /// settings. Asked once a frame, like [`EditorApp::take_window_icon`].
+    fn take_window_title(&mut self) -> Option<String> {
+        None
+    }
+
+    /// The collision layers' names, by number (index 0 is layer 0), for
+    /// fields marked `#[reflect(layer)]` or `#[reflect(layer_mask)]`. An
+    /// empty name, or a layer past the end, is shown by its number.
+    fn layer_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The project's tags, in the order the Inspector's tag menu shows
+    /// them.
+    fn tag_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Adds a tag to the project's list, from the Inspector. An error says
+    /// why it couldn't (shown in the Console).
+    fn add_tag(&mut self, _tag: &str) -> Result<(), String> {
+        Err("this editor keeps no list of tags".into())
+    }
+}
+
+/// A press from a keyboard or a pad, for [`EditorApp::input_heard`].
+/// Mouse buttons aren't here: a listener knows best which clicks are
+/// meant for its own buttons, so it reads them from egui.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heard {
+    /// A key went down (repeats left out), by its place on the keyboard.
+    Key(reign_app::winit::keyboard::KeyCode),
+    Pad(reign_app::PadInput),
 }
 
 /// What an app asked the editor to do from [`EditorApp::toolbar_ui`].

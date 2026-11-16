@@ -1,9 +1,12 @@
 //! What runs in Play: the [`World`] (scene, input, random numbers), each
 //! project's Behaviours on the fixed schedule, physics, and the keyboard.
 
-use reign::app::winit::event::{ElementState, WindowEvent};
+use reign::app::winit::event::{ElementState, MouseButton, WindowEvent};
 use reign::app::winit::keyboard::{KeyCode, PhysicalKey};
-use reign::assets::{AssetDb, AssetKind, Guid};
+use std::sync::Arc;
+
+use reign::assets::prefab::{self, PrefabLookup};
+use reign::assets::{AssetDb, AssetKind, Guid, Handle, Prefabs};
 use reign::behaviour::{
     Behaviour, BehaviourState, Behaviours, Flow, Game, Schedule, Stage, System,
 };
@@ -148,6 +151,31 @@ pub struct World {
     /// The scene a script asked for with `ctx.load_scene`, entered when
     /// the tick ends.
     next_scene: Option<String>,
+    /// Parsed prefabs for `ctx.spawn`, set by [`tick`].
+    prefabs: PrefabCache,
+}
+
+/// The prefabs `ctx.spawn` stamps, parsed once and shared by every copy of
+/// a [`World`]. A cache, not simulation state, so `Eq` and `Hash` skip it.
+#[derive(Clone, Default)]
+struct PrefabCache(Option<Arc<Prefabs>>);
+
+impl PartialEq for PrefabCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for PrefabCache {}
+
+impl std::hash::Hash for PrefabCache {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl std::fmt::Debug for PrefabCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PrefabCache")
+    }
 }
 
 impl World {
@@ -160,6 +188,15 @@ impl World {
             behaviours: BehaviourState::default(),
             contacts: Vec::new(),
             next_scene: None,
+            prefabs: PrefabCache::default(),
+        }
+    }
+
+    /// Lets `ctx.spawn` read prefabs made of `registry`'s components.
+    /// [`tick`] does this for every host.
+    pub fn use_registry(&mut self, registry: &ComponentRegistry) {
+        if self.prefabs.0.is_none() {
+            self.prefabs.0 = Some(Arc::new(Prefabs::new(registry.clone())));
         }
     }
 
@@ -271,6 +308,7 @@ pub fn tick(
     registry: &ComponentRegistry,
     assets: Option<&AssetDb>,
 ) -> Vec<Event> {
+    world.use_registry(registry);
     let events = world.step_with(input, behaviours, schedule, assets);
     if let Some(path) = world.take_scene_request() {
         let loaded = match assets {
@@ -438,6 +476,26 @@ pub trait CtxExt {
     /// Leaves this scene for another when the tick ends, by its path in
     /// `assets/`: `ctx.load_scene("scenes/level2.scene.ron")`.
     fn load_scene(&mut self, path: &str);
+    /// The first object called `name`, active or not, searching parents
+    /// before children: `ctx.find("Player")`. Look it up in `start` and
+    /// keep the id if you need it every tick.
+    fn find(&self, name: &str) -> Option<ObjectId>;
+    /// The first object tagged `tag`, active or not, parents before
+    /// children: `ctx.find_with_tag("Player")`.
+    fn find_with_tag(&self, tag: &str) -> Option<ObjectId>;
+    /// Every object tagged `tag`, active or not, in hierarchy order:
+    /// `for enemy in ctx.find_all_with_tag("Enemy") { ... }`.
+    fn find_all_with_tag(&self, tag: &str) -> Vec<ObjectId>;
+    /// Whether an object is tagged `tag`: `ctx.has_tag(other, "Enemy")`.
+    fn has_tag(&self, id: ObjectId, tag: &str) -> bool;
+    /// Changes an object's tag; `""` untags it.
+    fn set_tag(&mut self, id: ObjectId, tag: &str);
+    /// A new copy of a prefab, by its path in `assets/`, at `at` in world
+    /// pixels: `ctx.spawn("prefabs/bullet.prefab.ron", ctx.position(me))`.
+    /// It's in the scene straight away, so you can change its components
+    /// now; its Behaviours `start` before their first update. `None` (and a
+    /// warning) if there's no prefab at that path.
+    fn spawn(&mut self, path: &str, at: FxVec2) -> Option<ObjectId>;
 }
 
 /// The sound file at `path`, if the project has one.
@@ -581,12 +639,63 @@ impl CtxExt for Ctx<'_> {
     fn load_scene(&mut self, path: &str) {
         self.game.next_scene = Some(path.to_owned());
     }
+
+    fn find(&self, name: &str) -> Option<ObjectId> {
+        let scene = &self.game.scene;
+        scene.walk().into_iter().find(|id| scene.name(*id) == Some(name))
+    }
+
+    fn find_with_tag(&self, tag: &str) -> Option<ObjectId> {
+        let scene = &self.game.scene;
+        scene.walk().into_iter().find(|id| self.has_tag(*id, tag))
+    }
+
+    fn find_all_with_tag(&self, tag: &str) -> Vec<ObjectId> {
+        let scene = &self.game.scene;
+        scene.walk().into_iter().filter(|id| self.has_tag(*id, tag)).collect()
+    }
+
+    fn has_tag(&self, id: ObjectId, tag: &str) -> bool {
+        !tag.is_empty() && self.game.scene.object(id).is_some_and(|o| o.tag == tag)
+    }
+
+    fn set_tag(&mut self, id: ObjectId, tag: &str) {
+        if self.game.scene.object(id).is_some_and(|o| o.tag != tag)
+            && let Some(o) = self.game.scene.object_mut(id)
+        {
+            o.tag = tag.to_owned();
+        }
+    }
+
+    fn spawn(&mut self, path: &str, at: FxVec2) -> Option<ObjectId> {
+        let db = self.assets()?;
+        let Some(guid) = db.guid(path).filter(|g| db.kind(*g) == Some(AssetKind::Prefab)) else {
+            warn_once(format!(
+                "no prefab at {path:?}: paths start in assets/, such as prefabs/bullet.prefab.ron"
+            ));
+            return None;
+        };
+        let Some(prefabs) = self.game.prefabs.0.clone() else {
+            warn_once(
+                "ctx.spawn: the world has no component registry (call World::use_registry)".into(),
+            );
+            return None;
+        };
+        match prefabs.with(db).template(Handle::new(guid)) {
+            Ok(template) => Some(prefab::instantiate(&mut self.game.scene, &template, at, None)),
+            Err(e) => {
+                warn_once(format!("ctx.spawn({path:?}): {e}"));
+                None
+            }
+        }
+    }
 }
 
-/// Keys held on the keyboard, turned into each tick's buttons.
+/// Keys and mouse buttons held, turned into each tick's buttons.
 #[derive(Default)]
 pub struct Keyboard {
     held: Vec<KeyCode>,
+    mouse: Vec<MouseButton>,
 }
 
 impl Keyboard {
@@ -600,13 +709,19 @@ impl Keyboard {
                     _ => {}
                 }
             }
-            WindowEvent::Focused(false) => self.held.clear(),
+            WindowEvent::MouseInput { state, button, .. } => match state {
+                ElementState::Pressed if !self.mouse.contains(button) => self.mouse.push(*button),
+                ElementState::Released => self.mouse.retain(|b| b != button),
+                _ => {}
+            },
+            WindowEvent::Focused(false) => self.clear(),
             _ => {}
         }
     }
 
     pub fn clear(&mut self) {
         self.held.clear();
+        self.mouse.clear();
     }
 
     #[cfg(test)]
@@ -614,10 +729,10 @@ impl Keyboard {
         self.held.extend_from_slice(keys);
     }
 
-    /// The actions the held keys and the pads trigger this tick, by the
-    /// project's `input.ron`.
+    /// The actions the held keys, mouse buttons and the pads trigger this
+    /// tick, by the project's `input.ron`.
     pub fn frame(&self, pads: Option<&reign::app::Pads>) -> InputFrame {
-        crate::input::frame(&self.held, pads)
+        crate::input::frame(&self.held, &self.mouse, pads)
     }
 }
 

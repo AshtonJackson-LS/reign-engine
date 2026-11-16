@@ -886,6 +886,8 @@ pub fn inspector(ui: &mut Ui, db: &AssetDb, state: &mut ProjectState, guid: Guid
             assets: Some(db),
             overridden: Vec::new(),
             revert: Default::default(),
+            layers: &[],
+            tags: &[],
         };
         match &mut meta.importer {
             Importer::Texture(settings) => fields(ui, settings, &pick, ("import", guid)),

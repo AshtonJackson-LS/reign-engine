@@ -35,7 +35,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Icon, Window, WindowId};
 
-pub use pads::{PadFrame, Pads};
+pub use pads::{PadFrame, PadInput, Pads};
 
 /// How the window and loop start.
 #[derive(Clone, Debug)]

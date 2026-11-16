@@ -12,8 +12,10 @@ use reign::assets::{AssetKind, Meta, RgbaImage, pack_dir, read_pack};
 use reign_build::progress::{Output, read_output};
 use reign_build::project;
 
+use crate::exe_icon::{self, VersionInfo};
+use crate::icon;
 use crate::player::{GAME_FILE, GameInfo, PACK_FILE, choose_scene};
-use crate::{exe_icon, icon};
+use crate::settings::Settings;
 
 /// How the export is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +52,9 @@ pub struct Export {
     /// it the game keeps an icon already built into it, else gets the Reign
     /// default.
     pub icon: Option<RgbaImage>,
+    /// Project Settings: the start scene, the window, the version and the
+    /// author.
+    pub settings: Settings,
 }
 
 /// The name of the macOS app's icon file (`AppIcon.icns`), which
@@ -109,6 +114,7 @@ pub fn export_project(root: &Path, title: &str, out_dir: &Path) -> Result<PathBu
         out_dir: out_dir.to_owned(),
         layout: Layout::native(),
         icon: icon::own_icon(root),
+        settings: Settings::load(root)?,
     })
 }
 
@@ -124,9 +130,11 @@ pub fn file_title(title: &str) -> String {
     if joined.is_empty() { "Game".to_owned() } else { joined }
 }
 
-/// Packs the assets and picks the start scene from what's in the pack.
-/// Returns the pack and that scene's path.
-pub fn pack(assets: &Path) -> Result<(Vec<u8>, String), String> {
+/// Packs the assets and picks the start scene from what's in the pack:
+/// `start` (from Project Settings) when it isn't empty, which must then be
+/// there, else `scenes/main.scene.ron` or the first scene. Returns the pack
+/// and that scene's path.
+pub fn pack(assets: &Path, start: &str) -> Result<(Vec<u8>, String), String> {
     let blob = pack_dir(assets).map_err(|e| e.to_string())?;
     let mut scenes = Vec::new();
     for entry in read_pack(&blob).map_err(|e| e.to_string())? {
@@ -135,14 +143,23 @@ pub fn pack(assets: &Path) -> Result<(Vec<u8>, String), String> {
             scenes.push(entry.path.to_owned());
         }
     }
-    let scene = choose_scene(&scenes, None).ok_or("the project has no scenes")?;
+    if !start.is_empty() && !scenes.iter().any(|s| s == start) {
+        return Err(format!(
+            "the start scene {start} isn't in the project: choose another in Project Settings"
+        ));
+    }
+    let scene = choose_scene(&scenes, Some(start)).ok_or("the project has no scenes")?;
     Ok((blob, scene))
 }
 
 /// Writes the export and returns the app or folder it made. Files already
 /// there are replaced; nothing else is removed.
 pub fn assemble(export: &Export) -> Result<PathBuf, String> {
-    let (blob, scene) = pack(&export.assets)?;
+    let settings = &export.settings;
+    if let Some(problem) = settings.problems().into_iter().next() {
+        return Err(format!("Project Settings: {problem}"));
+    }
+    let (blob, scene) = pack(&export.assets, &settings.start_scene)?;
     let name = file_title(&export.title);
     let exe_name = format!("{}{}", export.crate_name, std::env::consts::EXE_SUFFIX);
     let (top, bin_dir, data_dir) = match export.layout {
@@ -173,9 +190,26 @@ pub fn assemble(export: &Export) -> Result<PathBuf, String> {
     {
         log::warn!("the exported game has no file icon: {e}");
     }
+    // Its name, version and author in the file's properties (Windows).
+    let version = VersionInfo {
+        numbers: settings.version_numbers(),
+        version: settings.version.trim().to_owned(),
+        title: export.title.clone(),
+        author: settings.author.trim().to_owned(),
+        exe_name: exe_name.clone(),
+        internal_name: export.crate_name.clone(),
+    };
+    if let Err(e) = exe_icon::set_exe_version(&exe, &version) {
+        log::warn!("the exported game's file has no version details: {e}");
+    }
     let pack = data_dir.join(PACK_FILE);
     std::fs::write(&pack, &blob).map_err(|e| io(&pack, e))?;
-    let info = GameInfo { title: export.title.clone(), scene };
+    let info = GameInfo {
+        title: export.title.clone(),
+        scene,
+        window: settings.window,
+        background: settings.background,
+    };
     let game = data_dir.join(GAME_FILE);
     std::fs::write(&game, info.to_ron()).map_err(|e| io(&game, e))?;
     // The window icon, which the game reads from here (the pack holds the
@@ -187,19 +221,30 @@ pub fn assemble(export: &Export) -> Result<PathBuf, String> {
         let icns = data_dir.join(format!("{MAC_ICON}.icns"));
         std::fs::write(&icns, exe_icon::icns(shown)).map_err(|e| io(&icns, e))?;
         let plist = top.join("Contents").join("Info.plist");
-        std::fs::write(&plist, info_plist(&export.title, &export.crate_name, &exe_name))
+        std::fs::write(&plist, info_plist(&export.title, &export.crate_name, &exe_name, settings))
             .map_err(|e| io(&plist, e))?;
         sign(&top);
     }
     Ok(top)
 }
 
-/// The macOS app's `Info.plist`.
-pub fn info_plist(title: &str, crate_name: &str, exe_name: &str) -> String {
+/// The macOS app's `Info.plist`, with the game's version and author from
+/// Project Settings.
+pub fn info_plist(title: &str, crate_name: &str, exe_name: &str, settings: &Settings) -> String {
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let id: String =
         crate_name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let version = env!("CARGO_PKG_VERSION");
+    let version = escape(settings.version.trim());
+    let author = settings.author.trim();
+    let copyright = if author.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "
+  <key>NSHumanReadableCopyright</key><string>© {}</string>",
+            escape(author)
+        )
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -214,7 +259,7 @@ pub fn info_plist(title: &str, crate_name: &str, exe_name: &str) -> String {
   <key>CFBundleVersion</key><string>{version}</string>
   <key>CFBundleShortVersionString</key><string>{version}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHighResolutionCapable</key><true/>{copyright}
 </dict>
 </plist>
 "#,

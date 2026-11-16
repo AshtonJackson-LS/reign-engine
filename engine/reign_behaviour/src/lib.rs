@@ -282,9 +282,14 @@ impl<G: Game> Behaviours<G> {
             .collect()
     }
 
+    /// Calls every Behaviour that has had `start`: an object spawned during
+    /// this tick waits for its `start`, which runs before its first update.
     fn each(&self, ctx: &mut Ctx<'_, G>, what: fn(&Entry<G>) -> Call<'static, G::Message>) {
         for entry in &self.entries {
             for id in (entry.ids)(ctx.game.scene()) {
+                if !ctx.game.behaviours().is_started(entry.name, id) {
+                    continue;
+                }
                 (entry.call)(ctx, id, what(entry));
             }
         }
@@ -575,9 +580,10 @@ impl<G: Game> Schedule<G> {
                     Flow::Continue
                 }
                 Stage::Commands => {
-                    if behaviours.apply_commands(&mut ctx) {
-                        behaviours.start(&mut ctx);
-                    }
+                    // Also starts objects a script spawned straight into
+                    // the scene; `start` does nothing if nothing changed.
+                    behaviours.apply_commands(&mut ctx);
+                    behaviours.start(&mut ctx);
                     Flow::Continue
                 }
             };

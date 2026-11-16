@@ -77,7 +77,6 @@ struct ExportDialog {
 
 pub struct Code {
     root: PathBuf,
-    project_name: String,
     /// The crate this editor was built from, if any.
     compiled_for: Option<&'static str>,
     cargo: bool,
@@ -105,13 +104,18 @@ pub struct Code {
     mode: PlayMode,
 }
 
+/// The game's name, read each time so a rename in Project Settings is used
+/// straight away.
+fn project_name(root: &Path) -> String {
+    crate::editor::Project { root: root.to_owned() }.title()
+}
+
 impl Code {
-    pub fn new(root: PathBuf, project_name: String, compiled_for: Option<&'static str>) -> Self {
+    pub fn new(root: PathBuf, compiled_for: Option<&'static str>) -> Self {
         let built_at =
             std::env::current_exe().ok().and_then(|p| p.metadata().ok()?.modified().ok());
         let mut code = Code {
             root,
-            project_name,
             compiled_for,
             cargo: project::cargo_available(),
             build: None,
@@ -140,6 +144,19 @@ impl Code {
 
     pub fn set_mode(&mut self, mode: PlayMode) {
         self.mode = mode;
+    }
+
+    /// Opens Input Actions (Scripts menu, or Project Settings' Edit
+    /// bindings…) on the project's `assets/input.ron`.
+    pub fn open_input_dialog(&mut self) {
+        let file = self.root.join("assets").join(crate::input::INPUT_FILE);
+        self.input_dialog = Some(crate::input::dialog::InputDialog::open(file));
+    }
+
+    /// Keys and pad inputs for the Input Actions dialog while it listens.
+    /// True when it took the keys.
+    pub fn input_heard(&mut self, heard: &[reign::editor::Heard]) -> bool {
+        self.input_dialog.as_mut().is_some_and(|d| d.hear(heard))
     }
 
     fn crate_name(&self) -> Option<String> {
@@ -213,17 +230,24 @@ impl Code {
         if !self.cargo {
             return Err("Couldn't find cargo (looked on PATH, in ~/.cargo/bin and Homebrew). Install Rust from rustup.rs, then try again.".into());
         }
-        let (name, had_code) = export::prepare(&self.root, &self.project_name)?;
+        let title = project_name(&self.root);
+        let settings = crate::settings::Settings::load(&self.root)
+            .map_err(|e| format!("Project Settings: {e}"))?;
+        if let Some(problem) = settings.problems().into_iter().next() {
+            return Err(format!("Project Settings: {problem}"));
+        }
+        let (name, had_code) = export::prepare(&self.root, &title)?;
         std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
         let root = self.root.clone();
         let mut export = Export {
-            title: self.project_name.clone(),
+            title: title.clone(),
             crate_name: name,
             exe: PathBuf::new(),
             assets: self.root.join("assets"),
             out_dir,
             layout: Layout::native(),
             icon: crate::icon::own_icon(&root),
+            settings,
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -238,7 +262,7 @@ impl Code {
             });
             let _ = tx.send(BuildEvent::Exported(result));
         });
-        log::info!("exporting {}: building the game (release)", self.project_name);
+        log::info!("exporting {title}: building the game (release)");
         self.build = Some(Build {
             rx,
             started: Instant::now(),
@@ -347,7 +371,7 @@ impl Code {
             dialog.error = Some("Couldn't find cargo (looked on PATH, in ~/.cargo/bin and Homebrew). Install Rust from rustup.rs, then try again.".into());
             return;
         }
-        if let Err(e) = project::init(&self.root, &self.project_name) {
+        if let Err(e) = project::init(&self.root, &project_name(&self.root)) {
             dialog.error = Some(format!("couldn't set up the project's code: {e}"));
             return;
         }
@@ -414,8 +438,7 @@ impl Code {
                 ui.close();
             }
             if ui.button("Input Actions…").clicked() {
-                let file = self.root.join("assets").join(crate::input::INPUT_FILE);
-                self.input_dialog = Some(crate::input::dialog::InputDialog::open(file));
+                self.open_input_dialog();
                 ui.close();
             }
             let ide_name = ide::preferred().map_or("folder", |i| i.name);
@@ -535,7 +558,13 @@ impl Code {
     fn export_dialog_ui(&mut self, ctx: &egui::Context) -> bool {
         let Some(dialog) = &mut self.export_dialog else { return false };
         let has_code = project::has_code(&self.root);
-        let title = export::file_title(&self.project_name);
+        let title = export::file_title(&project_name(&self.root));
+        let start = crate::settings::Settings::read(&self.root).start_scene;
+        let start = if start.is_empty() {
+            "scenes/main.scene.ron, else the first scene".to_owned()
+        } else {
+            start
+        };
         let mut go = false;
         let mut cancel = false;
         let modal = egui::Modal::new(egui::Id::new("export game")).show(ctx, |ui| {
@@ -568,7 +597,7 @@ impl Code {
                 );
                 ui.add_space(4.0);
             }
-            ui.weak("The game is built with --release: the first time takes a few minutes. It plays the start scene (scenes/main.scene.ron, else the first scene).");
+            ui.weak(format!("The game is built with --release: the first time takes a few minutes. It plays the start scene ({start}), set in Project → Project Settings."));
             if let Some(e) = &dialog.error {
                 ui.colored_label(egui::Color32::LIGHT_RED, e);
             }

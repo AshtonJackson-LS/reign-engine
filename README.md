@@ -169,8 +169,12 @@ shortcuts such as `ctx.get::<T>(me)`, `ctx.translate(me, delta)`,
 `ctx.axis_x()` and `ctx.pressed(Button::Jump)` (arrows/WASD, Space, J/K/L).
 
 **Input** is a list of named actions in `assets/input.ron` (up to 10),
-each bound to keys and gamepad buttons; edit them in **Scripts → Input
-Actions…** (press "+ key" and then the key). Scripts read
+each bound to keys, mouse buttons and gamepad buttons and sticks; edit them
+in **Scripts → Input Actions…** (or **Edit bindings…** in the Input section
+of **Project → Project Settings…**, which lists them): press **+** and then the key, pad button
+or stick direction (or click a mouse button in the box), or click a binding
+to change it. An input belongs to one action: binding it elsewhere moves it,
+and changing a binding to another action's swaps the two. Scripts read
 `ctx.action("Jump")`, `ctx.action_pressed("Interact")`,
 `ctx.action_buffered(..)` and `ctx.axis_x()`. The simulation only ever sees
 which actions are held each tick, so rebinding never affects replays.
@@ -203,6 +207,22 @@ from `assets/`; `ctx.play_music("music/theme.wav")` loops one and
 that plays when it appears (`play_on_start`) or on `ctx.play(me)`. Sounds
 are presentation: they never feed back into the simulation, and Stop
 silences them.
+
+**Finding and spawning:** `ctx.find("Player")` is the first object with
+that name (look it up in `start` and keep the id). `ctx.spawn("prefabs/bullet.prefab.ron", at)`
+makes a copy of a prefab at a world position and returns its id straight
+away, so you can set it up on the same tick; its Behaviours `start` before
+their first update. A wrong path gives `None` and a warning in the Console.
+
+**Tags:** every object can have one tag, picked under its name in the
+Inspector (`tag: "Enemy"` in a scene file). The menu lists the project's
+tags (a new project has Player and Enemy). To make one, choose **New tag…**,
+type it and press Enter; it joins the list for every object. Project
+Settings can rename or remove them. `ctx.find_with_tag("Player")`
+is the first object with it, `ctx.find_all_with_tag("Enemy")` all of them,
+`ctx.has_tag(other, "Enemy")` asks about one (handy in `on_message` when
+something hits you) and `ctx.set_tag(id, "Dead")` changes it. Copies of a
+prefab get its root's tag.
 
 **Scenes:** `ctx.load_scene("scenes/level2.scene.ron")` moves to another
 scene when the tick ends. Input, the tick count and the random numbers
@@ -272,12 +292,46 @@ macOS `<Project>.app`, elsewhere a `<Project>/` folder with the
 executable. It saves the scene, builds the project's second binary,
 `<crate>-game` (`src/game.rs`, which calls `reign_engine::play`), with
 `--release` in the background (output in the Console), packs `assets/`
-into `assets.rpak` and writes `game.ron` (title and start scene) beside
+into `assets.rpak` and writes `game.ron` (title, start scene and window) beside
 it, inside `Contents/Resources` in the app. A game needs the project's
 own crate, so a project without code is set up as one first, and a
 project made before export existed gets `src/game.rs` and its `[[bin]]`
 added. The first release build compiles the engine and takes a few
 minutes.
+
+## Project Settings
+
+**Project → Project Settings…** in the editor holds what describes the game
+rather than a scene. Edit the fields, then **Save** (the icon is saved as soon
+as it's chosen):
+
+- **Name**: the game's window title and the name of what Export Game makes.
+  It is `name` in `ReignProject.ron`, and the hub lists the project by it; the
+  project's folder and crate keep their names.
+- **Version** (`1.0.0`; one to four numbers) and **Author** (optional): put in
+  the exported game's file details on Windows (Properties → Details) and its
+  `Info.plist` on macOS.
+- **Start scene**: what the exported game and `--simulate` play first and what
+  the editor opens on. Automatic is `scenes/main.scene.ron`, else the first
+  scene. Export Game stops if the chosen scene has been deleted.
+- **Game window**: its size when the game starts (at least the 640 × 360
+  view) and whether it starts fullscreen. F11 still switches while it runs.
+- **Background**: the colour behind everything, where nothing is drawn, in
+  the game and in the editor's views.
+- **Collision layers**: names for the layers (0 to 31) colliders are on. The
+  Inspector shows a collider's `layer` by name and its `mask` as a list of
+  named layers to tick, with Everything and Nothing. Names are only for
+  people: scenes keep the numbers, so renaming a layer changes nothing in the
+  game. Your own components can show a field this way with
+  `#[reflect(layer)]` (a `u8`) or `#[reflect(layer_mask)]` (a `u32`).
+- **Tags**: the tags the Inspector's tag menu offers. Taking one off the
+  list leaves objects that have it alone; `--check` then warns about them.
+- **App icon**: see below.
+
+All but the name and icon are kept in `ProjectSettings.ron` beside
+`ReignProject.ron`, a RON file you can also edit by hand (a missing field takes
+its default). `--describe` prints the settings and `--check` reports any that
+can't be used.
 
 ## Project icons
 
@@ -302,8 +356,9 @@ file on Windows, and `AppIcon.icns` in the macOS app. The project's own icon
 always wins; the default only fills a gap, so a game that already embeds an
 icon of its own in its program keeps it.
 
-The game plays `scenes/main.scene.ron` (else the first scene) with the
-same simulation and drawing as Play mode. F11 toggles fullscreen.
+The game plays its start scene (Project Settings; by default
+`scenes/main.scene.ron`, else the first scene) with the same simulation and
+drawing as Play mode, in the window Project Settings describes. F11 toggles fullscreen.
 Flags: `--scene PATH`, `--fullscreen`, `--exit-after SECONDS`, and a
 project folder to play its loose assets instead of a pack (with no pack
 beside it, `cargo run --bin <crate>-game` plays the project it was built
@@ -317,7 +372,7 @@ scripts, CI and AI coding agents can work on a project:
 
 ```bash
 reign-engine PROJECT_DIR --check                 # do all scenes and prefabs load? exit 1 if not
-reign-engine PROJECT_DIR --describe              # components, fields, defaults, inputs, scenes, assets
+reign-engine PROJECT_DIR --describe              # components, fields, defaults, inputs, scenes, tags, assets
 reign-engine PROJECT_DIR --simulate 240 --input "Right,Jump@30-45" --watch Player
 reign-engine PROJECT_DIR --new-scene scenes/level2.scene.ron   # a scene with a Main Camera
 ```

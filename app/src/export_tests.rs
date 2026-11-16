@@ -14,6 +14,7 @@ use crate::player::{
     self, GAME_FILE, GameInfo, PACK_FILE, choose_scene, data_dir, load_scene, scene_paths,
 };
 use crate::runtime::{Scripts, World, schedule};
+use crate::settings::{Settings, Window};
 use crate::{SpriteRenderer, starter};
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -82,7 +83,7 @@ fn the_start_scene_is_main_then_the_first_in_scenes() {
 #[test]
 fn a_packed_project_plays_like_the_loose_one() {
     let (project, root) = project_with_a_level("roundtrip");
-    let (blob, start) = export::pack(&project.assets()).expect("packs");
+    let (blob, start) = export::pack(&project.assets(), "").expect("packs");
     assert_eq!(start, "scenes/main.scene.ron");
     let packed = AssetDb::packed(leak(blob)).expect("pack reads");
     let loose = AssetDb::loose(project.assets()).expect("loose reads");
@@ -119,7 +120,7 @@ fn packing_needs_a_scene() {
     std::fs::create_dir_all(&dir).unwrap();
     starter::install(&dir).unwrap();
     AssetDb::loose(&dir).unwrap();
-    assert_eq!(export::pack(&dir).unwrap_err(), "the project has no scenes");
+    assert_eq!(export::pack(&dir, "").unwrap_err(), "the project has no scenes");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -136,6 +137,7 @@ fn assemble(layout: Layout, name: &str) -> (PathBuf, PathBuf, PathBuf) {
         out_dir: out_dir.clone(),
         layout,
         icon: crate::icon::own_icon(&root),
+        settings: Settings::default(),
     };
     let made = export::assemble(&export).expect("assembles");
     // Again, over the first: replaces it.
@@ -147,7 +149,12 @@ fn check_data(dir: &Path) {
     let info = GameInfo::read(dir).expect("game.ron");
     assert_eq!(
         info,
-        GameInfo { title: "Space: Rocks!".into(), scene: "scenes/main.scene.ron".into() }
+        GameInfo {
+            title: "Space: Rocks!".into(),
+            scene: "scenes/main.scene.ron".into(),
+            window: Window::default(),
+            background: crate::settings::DEFAULT_BACKGROUND,
+        }
     );
     let blob = std::fs::read(dir.join(PACK_FILE)).unwrap();
     let db = AssetDb::packed(leak(blob)).expect("the exported pack reads");
@@ -200,6 +207,7 @@ fn an_export_carries_the_games_icon() {
         out_dir: root.join("Builds"),
         layout: Layout::Folder,
         icon: icon::own_icon(&root),
+        settings: Settings::default(),
     };
     let made = export::assemble(&export).unwrap();
     let kept = icon::check(&std::fs::read(made.join(icon::FILE)).unwrap()).unwrap();
@@ -240,16 +248,23 @@ fn the_default_icon_only_fills_a_gap() {
             out_dir: root.join("Builds"),
             layout: Layout::Folder,
             icon: own,
+            settings: Settings::default(),
         })
         .unwrap();
         made.join(format!("{name}.exe"))
     };
 
-    // No icon of the project's own, and the program has one: left exactly as
-    // it was.
+    // No icon of the project's own, and the program has one: its icon is
+    // left as it was (only the version details go in).
     let kept = export(&real, None, "keeps");
     assert!(exe_icon::has_exe_icon(&kept));
-    assert_eq!(std::fs::read(&kept).unwrap(), original, "the program's own icon was not touched");
+    assert_eq!(
+        probe::resource_size(&kept, probe::GROUP, 77),
+        probe::resource_size(&real, probe::GROUP, 77),
+        "the program's own icon was not touched"
+    );
+    assert_eq!(probe::resource_size(&kept, probe::GROUP, 1), None, "no default icon added");
+    assert!(probe::resource_size(&kept, probe::VERSION, 1).is_some(), "the version went in");
 
     // The project's own icon replaces it.
     let mut rgba = Vec::new();
@@ -317,4 +332,100 @@ fn titles_make_safe_file_names() {
     assert_eq!(file_title("  A/B: C?  "), "A B C");
     assert_eq!(file_title("..."), "Game");
     assert_eq!(file_title(""), "Game");
+}
+
+/// Project Settings go with the game: its start scene, its window, and (on
+/// macOS) its version and author in the app.
+#[test]
+fn an_export_carries_the_project_settings() {
+    let (project, root) = project_with_a_level("settings");
+    let exe = root.join("fake-game");
+    std::fs::write(&exe, b"not really a game").unwrap();
+    let settings = Settings {
+        start_scene: "scenes/another.scene.ron".into(),
+        window: Window { width: 1920, height: 1080, fullscreen: true },
+        version: "2.4.1".into(),
+        author: "Small & Co".into(),
+        background: [10, 120, 200],
+        ..Settings::default()
+    };
+    let mut export = Export {
+        title: "Set".into(),
+        crate_name: "set".into(),
+        exe,
+        assets: project.assets(),
+        out_dir: root.join("Builds"),
+        layout: Layout::MacApp,
+        icon: None,
+        settings: settings.clone(),
+    };
+    let made = export::assemble(&export).expect("assembles");
+    let resources = made.join("Contents/Resources");
+    let info = GameInfo::read(&resources).unwrap();
+    assert_eq!(info.scene, "scenes/another.scene.ron");
+    assert_eq!(info.window, settings.window);
+    assert_eq!(info.background, settings.background);
+    let plist = std::fs::read_to_string(made.join("Contents/Info.plist")).unwrap();
+    assert!(plist.contains("<key>CFBundleShortVersionString</key><string>2.4.1</string>"));
+    assert!(plist.contains("<key>CFBundleVersion</key><string>2.4.1</string>"));
+    assert!(plist.contains("<string>© Small &amp; Co</string>"), "{plist}");
+
+    // No author: no copyright line.
+    export.settings.author.clear();
+    export::assemble(&export).unwrap();
+    let plist = std::fs::read_to_string(made.join("Contents/Info.plist")).unwrap();
+    assert!(!plist.contains("NSHumanReadableCopyright"), "{plist}");
+
+    // A start scene that isn't there stops the export rather than starting
+    // the game somewhere else.
+    export.settings.start_scene = "scenes/gone.scene.ron".into();
+    let error = export::assemble(&export).unwrap_err();
+    assert!(
+        error.contains("scenes/gone.scene.ron") && error.contains("Project Settings"),
+        "{error}"
+    );
+    // Settings that can't be used, too.
+    export.settings = Settings { version: "soon".into(), ..settings };
+    assert!(export::assemble(&export).unwrap_err().contains("version"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The settings file is read where the game and the tools read it.
+#[test]
+fn the_start_scene_setting_is_used_by_the_editor_and_simulate() {
+    let (project, root) = project_with_a_level("start-scene");
+    assert_eq!(project.start_scene(), project.scenes().join("main.scene.ron"));
+    Settings { start_scene: "scenes/another.scene.ron".into(), ..Settings::default() }
+        .save(&root)
+        .unwrap();
+    assert_eq!(project.start_scene(), project.scenes().join("another.scene.ron"));
+    // One that isn't there: the editor still opens on main.
+    Settings { start_scene: "scenes/gone.scene.ron".into(), ..Settings::default() }
+        .save(&root)
+        .unwrap();
+    assert_eq!(project.start_scene(), project.scenes().join("main.scene.ron"));
+    // And --check says so.
+    let db = AssetDb::loose(project.assets()).unwrap();
+    let mut report = crate::headless::Report::default();
+    crate::headless::check_settings(Settings::load(&root), &db, &mut report);
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert!(report.errors[0].message.contains("gone.scene.ron"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Renaming keeps the engine version the hub wrote, and the folder.
+#[test]
+fn renaming_the_game_keeps_the_rest_of_the_project_file() {
+    let root = temp_dir("rename");
+    let project = Project::open(root.clone()).unwrap();
+    let file = root.join(crate::editor::PROJECT_FILE);
+    let before = std::fs::read_to_string(&file).unwrap();
+    assert!(before.contains(env!("CARGO_PKG_VERSION")));
+    project.set_title("  Space Rocks 2  ").unwrap();
+    assert_eq!(project.title(), "Space Rocks 2");
+    assert!(std::fs::read_to_string(&file).unwrap().contains(env!("CARGO_PKG_VERSION")));
+    assert!(project.set_title("   ").unwrap_err().contains("empty"));
+    assert!(project.set_title("a\nb").is_err());
+    assert_eq!(project.title(), "Space Rocks 2", "a refused name changes nothing");
+    let _ = std::fs::remove_dir_all(root);
 }

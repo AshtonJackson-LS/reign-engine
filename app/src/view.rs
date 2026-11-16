@@ -12,8 +12,10 @@ use crate::components::{Animator, Camera, Image, SpriteRenderer, Text, TilemapRe
 use crate::font::glyph_rect;
 use crate::physics::TILE;
 
-/// The colour behind everything.
-pub const CLEAR: Color = Color::rgb8(24, 24, 32);
+/// The colour behind everything, from Project Settings' `background`.
+pub fn background(rgb: [u8; 3]) -> Color {
+    Color::rgb8(rgb[0], rgb[1], rgb[2])
+}
 
 /// The world pixel at the view's top-left, from the first camera.
 pub fn camera_origin(scene: &Scene) -> (f32, f32) {
@@ -235,12 +237,14 @@ impl Sprites {
     }
 
     /// The game's frame, as Play shows it: everything from the first
-    /// camera, presented. Returns the view's origin in world pixels.
+    /// camera, over `clear`, presented. Returns the view's origin in world
+    /// pixels.
     pub fn draw_game(
         &mut self,
         r: &mut Renderer,
         scene: &Scene,
         db: Option<&AssetDb>,
+        clear: Color,
     ) -> (f32, f32) {
         let origin = camera_origin(scene);
         r.set_offset(-origin.0, -origin.1);
@@ -248,7 +252,7 @@ impl Sprites {
             let view = [origin.0, origin.1, VIEW_WIDTH as f32, VIEW_HEIGHT as f32];
             self.draw_objects(r, scene, db, view);
         }
-        r.present(CLEAR);
+        r.present(clear);
         origin
     }
 }

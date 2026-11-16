@@ -10,7 +10,8 @@ as they land; add what you find along the way.
   `ctx.touching`.
 - Tilemaps in physics: solid tiles, one-way platforms, collision events.
 - Input actions and gamepads: `input.ron`, the Input Actions dialog,
-  `ctx.action("Jump")`.
+  `ctx.action("Jump")`. Mouse buttons bind too, and the dialog listens for
+  the next key, pad input or mouse click and swaps bindings between actions.
 - Messages: physics events and name-and-number messages through `on_message`.
 - Open-source prep: MPL-2.0, CI, CONTRIBUTING.
 - Windows: new projects get engine paths Cargo can read; script reload can
@@ -60,8 +61,15 @@ text or command-line way in, and a way to see the result.
   backgrounds.
 - [x] **Camera follow**: smooth follow with bounds; more than one camera.
 - [ ] **Scale and rotation** on `Transform`.
-- [ ] **Scripting conveniences**: `ctx.find("Name")`, tags, spawning a prefab
-  in one call, friction, circle colliders, colliders on child objects.
+- [x] **Finding and spawning**: `ctx.find("Name")` and
+  `ctx.spawn("prefabs/x.prefab.ron", at)`, ready to set up on the same tick.
+- [x] **Tags**: one per object, in the Inspector and scene files, from a
+  prefab's root; `ctx.find_with_tag`, `find_all_with_tag`, `has_tag`,
+  `set_tag`; `--describe` lists the tags in use. A project tag list in
+  Project Settings; the Inspector's New tag… adds to it; `--check` warns
+  about tags not on it.
+- [ ] **Scripting conveniences**: friction, circle colliders, colliders
+  on child objects.
 
 ## 3. Rough edges
 
@@ -93,6 +101,9 @@ text or command-line way in, and a way to see the result.
 - [x] The Tilemap tab opens the scene's tilemap.
 - [x] Drag and drop files from the system's file manager into the Project
   panel.
+- [x] Project Settings: the game's name, start scene, window size and
+  fullscreen, background colour, version and author, and collision layer
+  names (`ProjectSettings.ron`), beside its icon.
 - [x] The hub opened a project's last-built editor and left rebuilding to
   the engine's own app, so a game with its own `EditorApp` (Exreign) kept
   running an old engine. The hub now runs `cargo build` before every open.
@@ -107,7 +118,8 @@ text or command-line way in, and a way to see the result.
 - [ ] The README's hub section only describes macOS
   (`scripts/bundle-macos.sh`, `~/Library/...`); Windows and Linux need the
   same.
-- [ ] `Camera` has no zoom, no background colour (`CLEAR` is fixed).
+- [ ] `Camera` has no zoom. The background colour is project-wide (Project
+  Settings); a camera can't override it yet.
 - [ ] Only player 0 has input (`World::input`); local multiplayer needs more.
 - [ ] `ctx.touching` allocates a `Vec` on every call.
 - [ ] Prefab variants and per-frame hurtboxes (see ENGINE.md's known

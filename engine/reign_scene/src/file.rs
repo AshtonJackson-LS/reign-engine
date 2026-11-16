@@ -9,6 +9,7 @@
 //!         (
 //!             id: (0, 0),
 //!             name: "Lamp",
+//!             tag: "Light",
 //!             transform: (position: (x: "136", y: "800")),
 //!             components: {"Lamp": (lit: false)},
 //!         ),
@@ -26,7 +27,7 @@
 //! Objects are listed parents first, in hierarchy order; a child's place
 //! among its siblings is its place in the list. `id` is the object's
 //! `(index, generation)`, so ids stored inside components keep pointing at
-//! the same objects. Defaults are left out: `parent: None`, `active: true`,
+//! the same objects. Defaults are left out: no `tag`, `parent: None`, `active: true`,
 //! empty components, zero `z`, no flips. `Fx` values are exact decimal
 //! strings. Objects marked `dont_save` (and everything under them) are not
 //! written. A scene that has despawned objects also lists its free slots,
@@ -90,6 +91,8 @@ struct TransformFile {
 struct ObjectOut<'a> {
     id: ObjectId,
     name: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    tag: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent: Option<ObjectId>,
     #[serde(skip_serializing_if = "is_true")]
@@ -113,6 +116,8 @@ struct SceneOut<'a> {
 struct ObjectIn {
     id: ObjectId,
     name: String,
+    #[serde(default)]
+    tag: String,
     #[serde(default)]
     parent: Option<ObjectId>,
     #[serde(default = "yes")]
@@ -161,6 +166,7 @@ impl Scene {
             objects.push(ObjectOut {
                 id,
                 name: &object.name,
+                tag: &object.tag,
                 parent: object.parent(),
                 active: object.active,
                 transform: TransformFile {
@@ -212,6 +218,9 @@ impl Scene {
                 let t = object.transform;
                 Transform { position: t.position, z: t.z, flip_x: t.flip_x, flip_y: t.flip_y }
             });
+            if let Some(o) = scene.object_mut(id) {
+                o.tag = object.tag;
+            }
             for (name, raw) in object.components {
                 let info = registry.get(&name).ok_or_else(|| {
                     SceneError(format!("unknown component {name:?} (is it registered?)"))
