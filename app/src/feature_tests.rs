@@ -54,6 +54,57 @@ impl Behaviour<World> for Probe {
     }
 }
 
+/// Fires `prefab` at the object called "Target" on its first two ticks.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+struct Gun {
+    prefab: String,
+    /// What `ctx.spawn` gave back, in order.
+    shots: Vec<Option<ObjectId>>,
+}
+
+impl Behaviour<World> for Gun {
+    fn fixed_update(ctx: &mut Ctx, me: ObjectId) {
+        assert_eq!(ctx.find("Nobody"), None);
+        if ctx.tick() >= 2 {
+            return;
+        }
+        let Some(gun) = ctx.get::<Gun>(me).cloned() else { return };
+        let target = ctx.find("Target").expect("finds the target by name");
+        let at = ctx.position(target);
+        let shot = ctx.spawn(&gun.prefab, at);
+        // It's in the scene already, so it can be set up straight away.
+        if let Some(bullet) = shot.and_then(|b| ctx.get_mut::<Bullet>(b)) {
+            bullet.speed = 7;
+        }
+        ctx.get_mut::<Gun>(me).unwrap().shots.push(shot);
+    }
+}
+
+/// Counts its updates, and the ones that came before its `start`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+struct Bullet {
+    speed: i32,
+    started: bool,
+    updates: u32,
+    before_start: u32,
+}
+
+impl Behaviour<World> for Bullet {
+    fn start(ctx: &mut Ctx, me: ObjectId) {
+        ctx.get_mut::<Bullet>(me).unwrap().started = true;
+    }
+
+    fn fixed_update(ctx: &mut Ctx, me: ObjectId) {
+        let b = ctx.get_mut::<Bullet>(me).unwrap();
+        b.updates += 1;
+        if !b.started {
+            b.before_start += 1;
+        }
+    }
+}
+
 /// A project on disk with its assets open, and what plays it.
 struct Game {
     project: Project,
@@ -77,10 +128,12 @@ impl Game {
         let db = AssetDb::loose(project.assets()).expect("assets load");
         let mut registry = ComponentRegistry::new();
         register_builtins(&mut registry);
-        registry.register::<Probe>();
+        registry.register::<Probe>().register::<Gun>().register::<Bullet>();
         let mut behaviours = Behaviours::new();
         register_builtin_behaviours(&mut behaviours);
-        behaviours.behaviour::<Probe>();
+        // Bullet after Gun: a bullet fired this tick comes up later in
+        // the same FixedUpdate, and must wait for its `start`.
+        behaviours.behaviour::<Probe>().behaviour::<Gun>().behaviour::<Bullet>();
         Game { project, db, registry, behaviours, schedule: schedule() }
     }
 
@@ -295,4 +348,113 @@ fn a_script_changes_scene_and_changes_text() {
     let mut world = World::new(scene);
     game.run(&mut world, 2);
     assert_eq!(world.scene.name(door), Some("Door"));
+}
+
+#[test]
+fn a_script_finds_objects_by_name_and_spawns_prefabs() {
+    let mut prefab = Scene::new();
+    let root = prefab.spawn("Bullet");
+    prefab.insert(root, Bullet::default());
+    let prefab = prefab.to_ron().unwrap();
+    let game = Game::new("spawn", &[("prefabs/bullet.prefab.ron", prefab.into_bytes())]);
+
+    let play = |path: &str| {
+        let mut scene = Scene::new();
+        let target = scene.spawn("Target");
+        scene.transform_mut(target).unwrap().position = FxVec2::from_px(40, -16);
+        let gun = scene.spawn("Gun");
+        scene.insert(gun, Gun { prefab: path.into(), ..Gun::default() });
+        let mut world = World::new(scene);
+        game.run(&mut world, 3);
+        let shots = world.scene.get::<Gun>(gun).unwrap().shots.clone();
+        (world, shots)
+    };
+
+    let (world, shots) = play("prefabs/bullet.prefab.ron");
+    let shots: Vec<ObjectId> = shots.into_iter().map(|s| s.expect("spawned")).collect();
+    assert_eq!(shots.len(), 2);
+    for (shot, updates) in shots.iter().zip([2, 1]) {
+        assert_eq!(world.scene.name(*shot), Some("Bullet"));
+        assert_eq!(world.scene.world_position(*shot), FxVec2::from_px(40, -16));
+        let bullet = world.scene.get::<Bullet>(*shot).unwrap();
+        assert_eq!(bullet.speed, 7, "set up on the tick it was spawned");
+        assert!(bullet.started);
+        assert_eq!(bullet.before_start, 0, "no update before start");
+        // Started at the end of the tick it was fired in, updated after.
+        assert_eq!(bullet.updates, updates);
+    }
+
+    // The same game twice is the same game.
+    let (again, _) = play("prefabs/bullet.prefab.ron");
+    assert_eq!(world, again);
+
+    // A path with no prefab gives nothing, and the game goes on.
+    let (world, shots) = play("prefabs/nothing.prefab.ron");
+    assert_eq!(shots, vec![None, None]);
+    assert_eq!(world.scene.len(), 2);
+}
+
+/// Tags every object it finds tagged "Enemy" "Seen", and counts them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+struct Spotter {
+    first: Option<ObjectId>,
+    count: u32,
+}
+
+impl Behaviour<World> for Spotter {
+    fn start(ctx: &mut Ctx, me: ObjectId) {
+        let first = ctx.find_with_tag("Enemy");
+        let enemies = ctx.find_all_with_tag("Enemy");
+        for enemy in &enemies {
+            assert!(ctx.has_tag(*enemy, "Enemy"));
+            ctx.set_tag(*enemy, "Seen");
+        }
+        assert!(!ctx.has_tag(me, ""), "nothing is tagged the empty string");
+        assert_eq!(ctx.find_with_tag(""), None);
+        let spotter = ctx.get_mut::<Spotter>(me).unwrap();
+        spotter.first = first;
+        spotter.count = enemies.len() as u32;
+    }
+}
+
+#[test]
+fn a_script_finds_objects_by_tag_and_retags_them() {
+    let game = Game::new("tags", &[]);
+    let mut scene = Scene::new();
+    let tagged = |scene: &mut Scene, name: &str, tag: &str, parent: Option<ObjectId>| {
+        let id = match parent {
+            Some(p) => scene.spawn_child(p, name),
+            None => scene.spawn(name),
+        };
+        scene.object_mut(id).unwrap().tag = tag.into();
+        id
+    };
+    let pack = tagged(&mut scene, "Pack", "", None);
+    let a = tagged(&mut scene, "Goblin", "Enemy", Some(pack));
+    let b = tagged(&mut scene, "Bat", "Enemy", None);
+    let player = tagged(&mut scene, "Hero", "Player", None);
+    scene.object_mut(b).unwrap().active = false;
+    let spotter = scene.spawn("Spotter");
+    scene.insert(spotter, Spotter::default());
+
+    let mut world = World::new(scene);
+    let mut behaviours = Behaviours::new();
+    behaviours.behaviour::<Spotter>();
+    let mut registry = game.registry.clone();
+    registry.register::<Spotter>();
+    runtime::tick(
+        &mut world,
+        InputFrame::default(),
+        &behaviours,
+        &game.schedule,
+        &registry,
+        Some(&game.db),
+    );
+    let spotter = world.scene.get::<Spotter>(spotter).unwrap();
+    // Hierarchy order (the goblin is under the first root), inactive too.
+    assert_eq!((spotter.first, spotter.count), (Some(a), 2));
+    for (id, tag) in [(a, "Seen"), (b, "Seen"), (player, "Player"), (pack, "")] {
+        assert_eq!(world.scene.object(id).unwrap().tag, tag);
+    }
 }

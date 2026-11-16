@@ -12,7 +12,6 @@
 //! `export.rs`). That needs the project to be a crate, so a project without
 //! code is set up as one first.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -20,15 +19,27 @@ use std::time::{Duration, Instant, SystemTime};
 
 use reign::editor::{EditorRequests, PlayMode, egui};
 use reign_build::ide;
+use reign_build::progress::{BuildProgress, Output, read_output};
 use reign_build::project::{self, Template};
 
 use crate::export::{self, Export, Layout};
 
 enum BuildEvent {
     Line(String),
+    /// Cargo's count of finished build steps.
+    Progress(BuildProgress),
     Done(bool),
     /// An export finished packing and copying: the app or folder it made.
     Exported(Result<PathBuf, String>),
+}
+
+impl From<Output> for BuildEvent {
+    fn from(output: Output) -> Self {
+        match output {
+            Output::Line(line) => BuildEvent::Line(line),
+            Output::Progress(progress) => BuildEvent::Progress(progress),
+        }
+    }
 }
 
 struct Build {
@@ -36,6 +47,8 @@ struct Build {
     started: Instant,
     /// The last line cargo printed, for the toolbar.
     last: String,
+    /// How far cargo says it has got; `None` until it says.
+    progress: Option<BuildProgress>,
     /// Building the game for Export Game, not this project's editor.
     export: bool,
 }
@@ -64,7 +77,6 @@ struct ExportDialog {
 
 pub struct Code {
     root: PathBuf,
-    project_name: String,
     /// The crate this editor was built from, if any.
     compiled_for: Option<&'static str>,
     cargo: bool,
@@ -92,13 +104,18 @@ pub struct Code {
     mode: PlayMode,
 }
 
+/// The game's name, read each time so a rename in Project Settings is used
+/// straight away.
+fn project_name(root: &Path) -> String {
+    crate::editor::Project { root: root.to_owned() }.title()
+}
+
 impl Code {
-    pub fn new(root: PathBuf, project_name: String, compiled_for: Option<&'static str>) -> Self {
+    pub fn new(root: PathBuf, compiled_for: Option<&'static str>) -> Self {
         let built_at =
             std::env::current_exe().ok().and_then(|p| p.metadata().ok()?.modified().ok());
         let mut code = Code {
             root,
-            project_name,
             compiled_for,
             cargo: project::cargo_available(),
             build: None,
@@ -118,9 +135,7 @@ impl Code {
         };
         // Opened in an editor without this project's code (the stock one):
         // build it now and switch over.
-        if (code.needs_build() || std::env::var_os("REIGN_CHECK_BUILD_ON_OPEN").is_some())
-            && code.cargo
-        {
+        if code.needs_build() && code.cargo {
             log::info!("this project has code: building its editor");
             code.start_build();
         }
@@ -129,6 +144,19 @@ impl Code {
 
     pub fn set_mode(&mut self, mode: PlayMode) {
         self.mode = mode;
+    }
+
+    /// Opens Input Actions (Scripts menu, or Project Settings' Edit
+    /// bindings…) on the project's `assets/input.ron`.
+    pub fn open_input_dialog(&mut self) {
+        let file = self.root.join("assets").join(crate::input::INPUT_FILE);
+        self.input_dialog = Some(crate::input::dialog::InputDialog::open(file));
+    }
+
+    /// Keys and pad inputs for the Input Actions dialog while it listens.
+    /// True when it took the keys.
+    pub fn input_heard(&mut self, heard: &[reign::editor::Heard]) -> bool {
+        self.input_dialog.as_mut().is_some_and(|d| d.hear(heard))
     }
 
     fn crate_name(&self) -> Option<String> {
@@ -158,9 +186,9 @@ impl Code {
                 let stderr = child.stderr.take();
                 std::thread::spawn(move || {
                     if let Some(stderr) = stderr {
-                        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                            let _ = tx.send(BuildEvent::Line(line));
-                        }
+                        read_output(stderr, |output| {
+                            let _ = tx.send(BuildEvent::from(output));
+                        });
                     }
                     let ok = child.wait().is_ok_and(|s| s.success());
                     let _ = tx.send(BuildEvent::Done(ok));
@@ -169,6 +197,7 @@ impl Code {
                     rx,
                     started: Instant::now(),
                     last: "Starting cargo".into(),
+                    progress: None,
                     export: false,
                 });
                 self.failed = false;
@@ -201,21 +230,29 @@ impl Code {
         if !self.cargo {
             return Err("Couldn't find cargo (looked on PATH, in ~/.cargo/bin and Homebrew). Install Rust from rustup.rs, then try again.".into());
         }
-        let (name, had_code) = export::prepare(&self.root, &self.project_name)?;
+        let title = project_name(&self.root);
+        let settings = crate::settings::Settings::load(&self.root)
+            .map_err(|e| format!("Project Settings: {e}"))?;
+        if let Some(problem) = settings.problems().into_iter().next() {
+            return Err(format!("Project Settings: {problem}"));
+        }
+        let (name, had_code) = export::prepare(&self.root, &title)?;
         std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
         let root = self.root.clone();
         let mut export = Export {
-            title: self.project_name.clone(),
+            title: title.clone(),
             crate_name: name,
             exe: PathBuf::new(),
             assets: self.root.join("assets"),
             out_dir,
             layout: Layout::native(),
+            icon: crate::icon::own_icon(&root),
+            settings,
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let built = export::build(&root, &export.crate_name, |l| {
-                let _ = tx.send(BuildEvent::Line(l));
+            let built = export::build(&root, &export.crate_name, |output| {
+                let _ = tx.send(BuildEvent::from(output));
             });
             let result = built.and_then(|exe| {
                 export.exe = exe;
@@ -225,11 +262,12 @@ impl Code {
             });
             let _ = tx.send(BuildEvent::Exported(result));
         });
-        log::info!("exporting {}: building the game (release)", self.project_name);
+        log::info!("exporting {title}: building the game (release)");
         self.build = Some(Build {
             rx,
             started: Instant::now(),
             last: "Starting cargo".into(),
+            progress: None,
             export: true,
         });
         self.failed = false;
@@ -277,6 +315,7 @@ impl Code {
                         build.last = text.to_owned();
                     }
                 }
+                BuildEvent::Progress(progress) => build.progress = Some(progress),
                 BuildEvent::Done(ok) => done = Some(ok),
                 BuildEvent::Exported(result) => exported = Some(result),
             }
@@ -332,7 +371,7 @@ impl Code {
             dialog.error = Some("Couldn't find cargo (looked on PATH, in ~/.cargo/bin and Homebrew). Install Rust from rustup.rs, then try again.".into());
             return;
         }
-        if let Err(e) = project::init(&self.root, &self.project_name) {
+        if let Err(e) = project::init(&self.root, &project_name(&self.root)) {
             dialog.error = Some(format!("couldn't set up the project's code: {e}"));
             return;
         }
@@ -399,8 +438,7 @@ impl Code {
                 ui.close();
             }
             if ui.button("Input Actions…").clicked() {
-                let file = self.root.join("assets").join(crate::input::INPUT_FILE);
-                self.input_dialog = Some(crate::input::dialog::InputDialog::open(file));
+                self.open_input_dialog();
                 ui.close();
             }
             let ide_name = ide::preferred().map_or("folder", |i| i.name);
@@ -447,17 +485,30 @@ impl Code {
         });
 
         if let Some(build) = &self.build {
-            ui.add(egui::Spinner::new());
             let secs = build.started.elapsed().as_secs();
-            let mut last = build.last.clone();
-            if last.len() > 60 {
-                last.truncate(60);
-                last.push('…');
-            }
             let doing = if build.export { "Exporting" } else { "Compiling" };
-            ui.weak(format!("{doing} {secs}s · {last}")).on_hover_text(
-                "The first build of a project takes a few minutes; later ones are quick.",
-            );
+            let tip = "The first build of a project takes a few minutes; later ones are quick.";
+            match build.progress.as_ref().filter(|p| p.total > 0) {
+                // Cargo's own count of build steps: a bar that fills.
+                Some(progress) => {
+                    ui.add(
+                        egui::ProgressBar::new(progress.fraction())
+                            .desired_width(150.0)
+                            .text(format!("{doing} {}", progress.count())),
+                    )
+                    .on_hover_text(format!("{tip}\n\nBuilding: {}", progress.building));
+                    ui.weak(format!("{secs}s"));
+                }
+                None => {
+                    ui.add(egui::Spinner::new());
+                    let mut last = build.last.clone();
+                    if last.len() > 60 {
+                        last.truncate(60);
+                        last.push('…');
+                    }
+                    ui.weak(format!("{doing} {secs}s · {last}")).on_hover_text(tip);
+                }
+            }
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         } else if self.failed {
             ui.colored_label(egui::Color32::LIGHT_RED, "Build failed: see Console");
@@ -507,7 +558,13 @@ impl Code {
     fn export_dialog_ui(&mut self, ctx: &egui::Context) -> bool {
         let Some(dialog) = &mut self.export_dialog else { return false };
         let has_code = project::has_code(&self.root);
-        let title = export::file_title(&self.project_name);
+        let title = export::file_title(&project_name(&self.root));
+        let start = crate::settings::Settings::read(&self.root).start_scene;
+        let start = if start.is_empty() {
+            "scenes/main.scene.ron, else the first scene".to_owned()
+        } else {
+            start
+        };
         let mut go = false;
         let mut cancel = false;
         let modal = egui::Modal::new(egui::Id::new("export game")).show(ctx, |ui| {
@@ -540,7 +597,7 @@ impl Code {
                 );
                 ui.add_space(4.0);
             }
-            ui.weak("The game is built with --release: the first time takes a few minutes. It plays the start scene (scenes/main.scene.ron, else the first scene).");
+            ui.weak(format!("The game is built with --release: the first time takes a few minutes. It plays the start scene ({start}), set in Project → Project Settings."));
             if let Some(e) = &dialog.error {
                 ui.colored_label(egui::Color32::LIGHT_RED, e);
             }
@@ -582,7 +639,6 @@ impl Code {
         let Some(name) = self.crate_name() else { return false };
         let exe = project::editor_path(&self.root, &name);
         let mut command = Command::new(&exe);
-        command.env_remove("REIGN_CHECK_BUILD_ON_OPEN");
         command.arg(&self.root);
         if let Some(scene) = scene_file {
             command.arg("--scene").arg(scene);

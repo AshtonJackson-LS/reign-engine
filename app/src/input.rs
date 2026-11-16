@@ -1,5 +1,5 @@
-//! Input actions: named buttons a project binds to keys and gamepad
-//! buttons, in `assets/input.ron`.
+//! Input actions: named buttons a project binds to keys, mouse buttons and
+//! gamepad buttons, in `assets/input.ron`.
 //!
 //! The simulation never sees a key or a pad, only which actions are held
 //! each tick (an [`InputFrame`]), so replays and rollback work the same
@@ -15,9 +15,10 @@ pub mod dialog;
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use reign::app::Pads;
 use reign::app::gilrs::Button as Pad;
+use reign::app::winit::event::MouseButton;
 use reign::app::winit::keyboard::KeyCode;
+use reign::app::{PadInput, Pads};
 use reign::core::{Button, InputFrame};
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,9 @@ pub struct Action {
     /// Keyboard keys, by their names on a US layout: `"Space"`, `"KeyA"` or
     /// just `"A"`, `"ArrowLeft"`, `"ShiftLeft"`, `"Digit1"` or `"1"`, `"F5"`.
     pub keys: Vec<String>,
+    /// Mouse buttons: `"Left"`, `"Right"`, `"Middle"`, `"Back"`,
+    /// `"Forward"`.
+    pub mouse: Vec<String>,
     /// Gamepad buttons: `"South"` (A on Xbox, Cross on PlayStation),
     /// `"East"`, `"West"`, `"North"`, `"LeftTrigger"`, `"RightTrigger"`,
     /// `"LeftTrigger2"`, `"RightTrigger2"`, `"Start"`, `"Select"`,
@@ -54,6 +58,7 @@ impl Default for InputMap {
         let action = |name: &str, keys: &[&str], pad: &[&str]| Action {
             name: name.to_owned(),
             keys: keys.iter().map(|k| k.to_string()).collect(),
+            mouse: Vec::new(),
             pad: pad.iter().map(|p| p.to_string()).collect(),
         };
         InputMap {
@@ -70,6 +75,27 @@ impl Default for InputMap {
                 action("Pause", &["Escape", "KeyP"], &["Start"]),
             ],
         }
+    }
+}
+
+impl Action {
+    /// Every binding, as the editor shows it: `"Space"`, `"Mouse Left"`,
+    /// `"Pad South"`.
+    pub fn labels(&self) -> Vec<String> {
+        let keys = self.keys.iter().cloned();
+        let mouse = self.mouse.iter().map(|m| format!("Mouse {m}"));
+        let pad = self.pad.iter().map(|p| format!("Pad {p}"));
+        keys.chain(mouse).chain(pad).collect()
+    }
+}
+
+/// The project's map as its file says, for showing it: the defaults when
+/// there's no file, or why the file can't be read.
+pub fn read(file: &std::path::Path) -> Result<InputMap, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => InputMap::parse(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(InputMap::default()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -100,11 +126,13 @@ impl InputMap {
         self.actions.iter().position(|a| a.name == name)
     }
 
-    /// Names in this map that aren't keys or pad buttons it knows.
+    /// Names in this map that aren't keys, mouse buttons or pad buttons it
+    /// knows.
     pub fn unknown_bindings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for a in &self.actions {
             out.extend(a.keys.iter().filter(|k| key_code(k).is_none()).cloned());
+            out.extend(a.mouse.iter().filter(|m| mouse_button(m).is_none()).cloned());
             out.extend(a.pad.iter().filter(|p| pad_input(p).is_none()).cloned());
         }
         out
@@ -163,14 +191,15 @@ pub fn button(name: &str) -> Option<Button> {
     found
 }
 
-/// The input frame for this tick: which actions the held keys and pads
-/// trigger.
-pub fn frame(keys: &[KeyCode], pads: Option<&Pads>) -> InputFrame {
+/// The input frame for this tick: which actions the held keys, mouse
+/// buttons and pads trigger.
+pub fn frame(keys: &[KeyCode], mouse: &[MouseButton], pads: Option<&Pads>) -> InputFrame {
     let map = current();
     let direction = pads.map_or((0, 0), Pads::direction);
     let mut frame = InputFrame::default();
     for (action, button) in map.actions.iter().zip(Button::ALL) {
         let key = action.keys.iter().filter_map(|k| key_code(k)).any(|k| keys.contains(&k));
+        let click = action.mouse.iter().filter_map(|m| mouse_button(m)).any(|m| mouse.contains(&m));
         let pad = pads.is_some_and(|pads| {
             action.pad.iter().filter_map(|p| pad_input(p)).any(|input| match input {
                 PadInput::Button(b) => pads.any_pressed(b),
@@ -179,20 +208,74 @@ pub fn frame(keys: &[KeyCode], pads: Option<&Pads>) -> InputFrame {
                 }
             })
         });
-        if key || pad {
+        if key || click || pad {
             frame.set(button, true);
         }
     }
     frame
 }
 
-enum PadInput {
-    Button(Pad),
-    /// A left-stick (or d-pad) direction: -1, 0 or 1 on each axis, y down.
-    Stick(i32, i32),
+/// The pad buttons and stick directions a binding can name, by their
+/// names in `input.ron`. A stick direction also counts the d-pad.
+const PAD_NAMES: [(&str, PadInput); 21] = [
+    ("South", PadInput::Button(Pad::South)),
+    ("East", PadInput::Button(Pad::East)),
+    ("West", PadInput::Button(Pad::West)),
+    ("North", PadInput::Button(Pad::North)),
+    ("LeftTrigger", PadInput::Button(Pad::LeftTrigger)),
+    ("LeftTrigger2", PadInput::Button(Pad::LeftTrigger2)),
+    ("RightTrigger", PadInput::Button(Pad::RightTrigger)),
+    ("RightTrigger2", PadInput::Button(Pad::RightTrigger2)),
+    ("Select", PadInput::Button(Pad::Select)),
+    ("Start", PadInput::Button(Pad::Start)),
+    ("Mode", PadInput::Button(Pad::Mode)),
+    ("LeftThumb", PadInput::Button(Pad::LeftThumb)),
+    ("RightThumb", PadInput::Button(Pad::RightThumb)),
+    ("DPadUp", PadInput::Button(Pad::DPadUp)),
+    ("DPadDown", PadInput::Button(Pad::DPadDown)),
+    ("DPadLeft", PadInput::Button(Pad::DPadLeft)),
+    ("DPadRight", PadInput::Button(Pad::DPadRight)),
+    ("LeftStickLeft", PadInput::Stick(-1, 0)),
+    ("LeftStickRight", PadInput::Stick(1, 0)),
+    ("LeftStickUp", PadInput::Stick(0, -1)),
+    ("LeftStickDown", PadInput::Stick(0, 1)),
+];
+
+/// Every pad name a binding can use, for menus.
+pub fn pad_names() -> impl Iterator<Item = &'static str> {
+    PAD_NAMES.iter().map(|(name, _)| *name)
 }
 
-fn pad_input(name: &str) -> Option<PadInput> {
+/// The name `input.ron` uses for something a pad did, if a binding can
+/// name it.
+pub fn pad_name(input: PadInput) -> Option<&'static str> {
+    PAD_NAMES.iter().find(|(_, i)| *i == input).map(|(name, _)| *name)
+}
+
+/// The mouse buttons a binding can name.
+pub const MOUSE_NAMES: [&str; 5] = ["Left", "Right", "Middle", "Back", "Forward"];
+
+/// A mouse button by name.
+pub fn mouse_button(name: &str) -> Option<MouseButton> {
+    Some(match name {
+        "Left" => MouseButton::Left,
+        "Right" => MouseButton::Right,
+        "Middle" => MouseButton::Middle,
+        "Back" => MouseButton::Back,
+        "Forward" => MouseButton::Forward,
+        _ => return None,
+    })
+}
+
+/// The name a key goes by in `input.ron`, if a binding can name it.
+pub fn key_name(key: KeyCode) -> Option<String> {
+    let name = format!("{key:?}");
+    (key_code(&name) == Some(key)).then_some(name)
+}
+
+/// A pad button or stick direction by name, with the Xbox and PlayStation
+/// names as well.
+pub fn pad_input(name: &str) -> Option<PadInput> {
     let button = match name {
         "South" | "A" | "Cross" => Pad::South,
         "East" | "B" | "Circle" => Pad::East,
@@ -276,6 +359,35 @@ pub fn key_code(name: &str) -> Option<KeyCode> {
         "BracketRight" => BracketRight,
         "Minus" => Minus,
         "Equal" => Equal,
+        "Backquote" => Backquote,
+        "Backslash" => Backslash,
+        "IntlBackslash" => IntlBackslash,
+        "CapsLock" => CapsLock,
+        "Insert" => Insert,
+        "Delete" => Delete,
+        "Home" => Home,
+        "End" => End,
+        "PageUp" => PageUp,
+        "PageDown" => PageDown,
+        "SuperLeft" => SuperLeft,
+        "SuperRight" => SuperRight,
+        "ContextMenu" => ContextMenu,
+        "Numpad0" => Numpad0,
+        "Numpad1" => Numpad1,
+        "Numpad2" => Numpad2,
+        "Numpad3" => Numpad3,
+        "Numpad4" => Numpad4,
+        "Numpad5" => Numpad5,
+        "Numpad6" => Numpad6,
+        "Numpad7" => Numpad7,
+        "Numpad8" => Numpad8,
+        "Numpad9" => Numpad9,
+        "NumpadAdd" => NumpadAdd,
+        "NumpadSubtract" => NumpadSubtract,
+        "NumpadMultiply" => NumpadMultiply,
+        "NumpadDivide" => NumpadDivide,
+        "NumpadDecimal" => NumpadDecimal,
+        "NumpadEnter" => NumpadEnter,
         _ => return None,
     })
 }
@@ -311,10 +423,53 @@ mod tests {
 
     #[test]
     fn frames_follow_the_bindings() {
-        let f = frame(&[KeyCode::KeyD, KeyCode::Space], None);
+        let f = frame(&[KeyCode::KeyD, KeyCode::Space], &[], None);
         assert!(f.held(Button::Right) && f.held(Button::Jump));
         assert!(!f.held(Button::Left));
-        assert_eq!(frame(&[KeyCode::KeyQ], None), InputFrame::default());
+        assert_eq!(frame(&[KeyCode::KeyQ], &[], None), InputFrame::default());
+    }
+
+    #[test]
+    fn heard_inputs_have_names_the_map_reads_back() {
+        for key in [KeyCode::KeyA, KeyCode::Digit3, KeyCode::ShiftRight, KeyCode::Numpad4] {
+            let name = key_name(key).unwrap();
+            assert_eq!(key_code(&name), Some(key), "{name}");
+        }
+        assert_eq!(key_name(KeyCode::KeyA).as_deref(), Some("KeyA"));
+        assert_eq!(key_name(KeyCode::F24), None, "not a key the map knows");
+        for name in pad_names() {
+            let input = pad_input(name).unwrap();
+            assert_eq!(pad_name(input), Some(name));
+        }
+        assert_eq!(pad_name(PadInput::Button(Pad::Unknown)), None);
+        for name in MOUSE_NAMES {
+            assert!(mouse_button(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn mouse_bindings_load_and_old_files_still_do() {
+        let mut map = InputMap::default();
+        map.actions[5].mouse = vec!["Left".into()];
+        assert_eq!(InputMap::parse(&map.to_text()).unwrap().actions[5].mouse, ["Left"]);
+        let old = r#"(actions: [(name: "Jump", keys: ["Space"], pad: ["South"])])"#;
+        assert!(InputMap::parse(old).unwrap().actions[0].mouse.is_empty());
+        map.actions[5].mouse.push("Thumb".into());
+        assert_eq!(map.unknown_bindings(), ["Thumb"]);
+    }
+
+    #[test]
+    fn labels_name_the_device() {
+        let jump = &InputMap::default().actions[4];
+        assert_eq!(jump.labels(), ["Space", "Pad South"]);
+        let click = Action { mouse: vec!["Left".into()], ..Action::default() };
+        assert_eq!(click.labels(), ["Mouse Left"]);
+    }
+
+    #[test]
+    fn reading_a_missing_file_gives_the_defaults() {
+        let file = std::env::temp_dir().join("reign-input-not-here.ron");
+        assert_eq!(read(&file).unwrap(), InputMap::default());
     }
 
     #[test]

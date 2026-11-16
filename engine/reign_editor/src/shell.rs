@@ -11,7 +11,7 @@ use reign_app::winit::application::ApplicationHandler;
 use reign_app::winit::event::{ElementState, WindowEvent};
 use reign_app::winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
-use reign_app::winit::window::{Fullscreen, Window, WindowId};
+use reign_app::winit::window::{Fullscreen, Icon, Window, WindowId};
 use reign_app::{Ctx, Frame, Pads, TickCtx};
 use reign_core::checksum;
 use reign_render::{Renderer, VIEW_HEIGHT, VIEW_WIDTH, view_scale, wgpu};
@@ -22,13 +22,14 @@ use crate::assets_ui::{self, AssetDrag, Open, ProjectState};
 use crate::console::{ConsoleBuffer, init_logger};
 use crate::create::{self, CreateRequest};
 use crate::gizmo::{self, Drag, ViewMap};
-use crate::hierarchy::Rename;
+use crate::hierarchy::{HierarchyState, Rename};
 use crate::history::History;
 use crate::play::{PlayControl, PlayMode, TIME_SCALES};
 use crate::prefab_ui;
+use crate::scenes::{self, Answer, NewScene, SaveChoice, Switch};
 use crate::slicer::Slicer;
 use crate::tilemap_painter::TilemapPainter;
-use crate::{EditorApp, EditorConfig, SceneView, hierarchy, inspector};
+use crate::{EditorApp, EditorConfig, Heard, SceneView, hierarchy, inspector};
 
 /// The tint the editor takes on during a run, like Unity's play-mode tint.
 const PLAY_TINT: Color32 = Color32::from_rgb(70, 110, 170);
@@ -85,8 +86,18 @@ struct Panels {
     create_items: Vec<String>,
     /// An object a Create menu or shortcut asked for this frame.
     create: Option<CreateRequest>,
-    /// An object being renamed in the Hierarchy.
-    rename: Option<Rename>,
+    /// The Hierarchy's rename box and search.
+    hierarchy: HierarchyState,
+    /// The New Scene box, while open.
+    new_scene: Option<NewScene>,
+    /// A scene to open or make once "Save changes?" is answered, and the
+    /// answer when it comes.
+    pending_switch: Option<Switch>,
+    switch_answer: Option<Answer<SaveChoice>>,
+    /// The Tilemap tab was drawn this frame, and last frame: switching to
+    /// it opens the scene's tilemap.
+    tilemap_visible: bool,
+    tilemap_was_visible: bool,
     /// The last thing the editor did, shown in the toolbar.
     status: Option<String>,
     /// Ctrl (Cmd on macOS) is held.
@@ -188,6 +199,8 @@ struct Session<A: EditorApp> {
     prefab_mode: Option<prefab_ui::PrefabMode>,
     /// Prefab Mode swapped the scene this frame: not an edit.
     swapped: bool,
+    /// Keys pressed since the last frame, for [`EditorApp::input_heard`].
+    heard_keys: Vec<Heard>,
 }
 
 /// What the toolbar and shortcuts asked for this frame.
@@ -197,6 +210,8 @@ struct Requests {
     redo: bool,
     save: bool,
     open: Option<PathBuf>,
+    /// Make a scene file here and open it.
+    new_scene: Option<PathBuf>,
     /// Play started or a run ended: the scene changed, but not by an edit.
     run_changed: bool,
     /// The app asked to close the editor.
@@ -265,7 +280,12 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
                 edit_label: None,
                 create_items: Vec::new(),
                 create: None,
-                rename: None,
+                hierarchy: HierarchyState::default(),
+                new_scene: None,
+                pending_switch: None,
+                switch_answer: None,
+                tilemap_visible: false,
+                tilemap_was_visible: false,
                 status: None,
                 command: false,
                 game_fullscreen: false,
@@ -291,6 +311,7 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             prefabs: registry_for_prefabs,
             prefab_mode: None,
             swapped: false,
+            heard_keys: Vec::new(),
             history: History::default(),
             stashed_history: None,
             edit_base: None,
@@ -311,6 +332,15 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             _ => {}
         }
         let (to_egui, to_game) = s.route(&event);
+        // Heard wherever it went; F11 (which went nowhere) is the editor's.
+        if let WindowEvent::KeyboardInput { event, .. } = &event
+            && event.state == ElementState::Pressed
+            && !event.repeat
+            && (to_egui || to_game)
+            && let PhysicalKey::Code(code) = event.physical_key
+        {
+            s.heard_keys.push(Heard::Key(code));
+        }
         if to_egui {
             let _ = s.egui_winit.on_window_event(&s.window, &event);
         }
@@ -426,6 +456,9 @@ impl<A: EditorApp> Session<A> {
             && (self.panels.game_focused || self.panels.cursor_over_game(ppp));
         self.pads.set_enabled(game_input);
         let pads = self.pads.poll(dt);
+        let mut heard = std::mem::take(&mut self.heard_keys);
+        heard.extend(pads.heard.iter().copied().map(Heard::Pad));
+        let keys_taken = self.app.input_heard(&heard);
         if self.prefab_mode.is_some()
             && let Some(snapshot) = self.play.stop()
         {
@@ -493,12 +526,18 @@ impl<A: EditorApp> Session<A> {
 
         // The editor UI, over the whole window.
         self.panels.tool_hover = self.panels.tool_hover_now.take();
+        self.panels.tilemap_was_visible = std::mem::take(&mut self.panels.tilemap_visible);
         // Set again if the Game tab is shown; a hidden Game view takes no
         // input.
         self.panels.game_image = None;
         let selected_before = (self.panels.selected, self.panels.project.selected);
         let assets = self.app.assets();
-        let input = self.egui_winit.take_egui_input(&self.window);
+        let mut input = self.egui_winit.take_egui_input(&self.window);
+        if keys_taken {
+            input.events.retain(|e| !is_key_press(e));
+        }
+        let dropped: Vec<PathBuf> =
+            input.dropped_files.iter().map(|file| file.path().to_owned()).collect();
         let registry = self.app.registry().cloned();
         self.panels.create_items = self.app.create_items();
         let mut requests = Requests::default();
@@ -529,7 +568,11 @@ impl<A: EditorApp> Session<A> {
             }
             let mut style = Style::from_egui(ui.style());
             style.tab_bar.fill_tab_bar = true;
+            let layer_names = app.layer_names();
+            let tag_names = app.tag_names();
             let mut viewer = Viewer {
+                layer_names: &layer_names,
+                tag_names: &tag_names,
                 app: &mut *app,
                 play: &*play,
                 panels: &mut *panels,
@@ -581,13 +624,28 @@ impl<A: EditorApp> Session<A> {
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, &mut viewer);
             }
+            scene_dialogs(ui.ctx(), app, panels, &mut requests);
         });
         self.app.set_play_mode(self.play.mode());
+        // An icon the app just changed (a project setting): show it now.
+        if let Some(icon) = self.app.take_window_icon() {
+            match Icon::from_rgba(icon.rgba, icon.width, icon.height) {
+                Ok(icon) => self.window.set_window_icon(Some(icon)),
+                Err(e) => log::warn!("can't use that window icon: {e}"),
+            }
+        }
+        // A new title (the project was renamed): shown with the next title
+        // update, which compares the whole title.
+        if let Some(title) = self.app.take_window_title() {
+            self.base_title = title;
+        }
         self.apply_create();
         self.after_panels(selected_before);
         self.prefab_requests();
         let quit = requests.quit;
         self.track_edits(base, base_hash, requests);
+        self.answer_switch();
+        self.import_dropped(dropped);
         if quit {
             event_loop.exit();
         }
@@ -857,6 +915,9 @@ impl<A: EditorApp> Session<A> {
         let tab = match open {
             Open::Tilemap(guid) => {
                 panels.painter.open(db, guid);
+                // Picked by hand: showing the tab mustn't swap in the
+                // scene's tilemap.
+                panels.tilemap_visible = true;
                 Tab::Tilemap
             }
             Open::Slicer(guid) => {
@@ -870,6 +931,20 @@ impl<A: EditorApp> Session<A> {
             Open::Prefab(guid) => {
                 self.enter_prefab_mode(guid);
                 Tab::Hierarchy
+            }
+            Open::Scene(guid) => {
+                if let (Some(root), Some(path)) = (db.root(), db.path(guid)) {
+                    self.request_switch(Switch::Open(root.join(path)));
+                }
+                return;
+            }
+            Open::NewScene { folder } => {
+                if let Some(root) = db.root() {
+                    let dir = root.join(&folder);
+                    let label = scenes::folder_label(&dir, Some(root));
+                    panels.new_scene = Some(NewScene::new(dir, label));
+                }
+                return;
             }
         };
         if let Some(found) = self.dock.find_tab(&tab) {
@@ -920,7 +995,117 @@ impl<A: EditorApp> Session<A> {
             self.save();
         }
         if let Some(path) = requests.open {
-            self.open(&path);
+            self.request_switch(Switch::Open(path));
+        }
+        if let Some(path) = requests.new_scene {
+            self.request_switch(Switch::Create(path));
+        }
+    }
+
+    /// Opens or makes a scene, asking first if unsaved changes would be lost.
+    fn request_switch(&mut self, to: Switch) {
+        if self.unsaved_scene_changes() {
+            self.panels.pending_switch = Some(to);
+        } else {
+            self.switch_scene(to);
+        }
+    }
+
+    fn unsaved_scene_changes(&mut self) -> bool {
+        if self.prefab_mode.is_some() {
+            return false;
+        }
+        if self.play.in_run() {
+            return self.dirty_at_play;
+        }
+        let scene = self.app.scene().cloned();
+        let hash = scene.as_ref().map(checksum);
+        self.dirty(&scene, hash)
+    }
+
+    /// Carries out the "Save changes?" answer, once given.
+    fn answer_switch(&mut self) {
+        let Some(answer) = self.panels.switch_answer.take() else { return };
+        let Some(to) = self.panels.pending_switch.take() else { return };
+        match answer {
+            Answer::Done(SaveChoice::Save) => {
+                self.stop_run();
+                // A failed save says why in the status bar; stay put.
+                if self.save() {
+                    self.switch_scene(to);
+                }
+            }
+            Answer::Done(SaveChoice::DontSave) => self.switch_scene(to),
+            Answer::Cancelled | Answer::Waiting => {}
+        }
+    }
+
+    fn switch_scene(&mut self, to: Switch) {
+        match to {
+            Switch::Open(path) => self.open(&path),
+            Switch::Create(path) => self.create_scene(&path),
+        }
+    }
+
+    /// Writes a new scene file at `path` and opens it.
+    fn create_scene(&mut self, path: &std::path::Path) {
+        let name = file_name(path);
+        let Some(text) = self.app.new_scene_text() else {
+            self.panels.status = Some("This app can't make scenes".into());
+            return;
+        };
+        // Inside the asset folder, through the asset database, so the scene
+        // gets its .meta (GUID) at once.
+        let asset = self.app.assets().and_then(|db| {
+            let relative = path.strip_prefix(db.root()?).ok()?;
+            Some((db, relative.to_string_lossy().replace('\\', "/")))
+        });
+        let written = match asset {
+            Some((db, asset)) => {
+                db.create(&asset, text.as_bytes()).map(drop).map_err(|e| e.to_string())
+            }
+            None if path.exists() => Err("it already exists".into()),
+            None => path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(path, text))
+                .map_err(|e| e.to_string()),
+        };
+        match written {
+            Ok(()) => {
+                log::info!("created the scene {}", path.display());
+                self.open(path);
+            }
+            Err(e) => self.panels.status = Some(format!("Couldn't create {name}: {e}")),
+        }
+    }
+
+    /// Copies files dropped from the system's file manager into the folder
+    /// the Project panel shows, and brings the panel up.
+    fn import_dropped(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let Some(db) = self.app.assets() else { return };
+        if db.root().is_none() {
+            self.panels.status =
+                Some("Packed assets are read-only: run the editor on the asset folder".into());
+            return;
+        }
+        let folder = self.panels.project.folder.clone();
+        let imported = assets_ui::import(db, &folder, &paths);
+        for error in &imported.errors {
+            log::warn!("import: {error}");
+        }
+        let into = if folder.is_empty() { "assets".to_owned() } else { format!("assets/{folder}") };
+        let mut status = format!("Imported {} file(s) into {into}", imported.files);
+        if let Some(first) = imported.errors.first() {
+            status += &format!("; {} failed ({first})", imported.errors.len());
+        }
+        log::info!("{status}");
+        self.panels.status = Some(status);
+        if let Some(found) = self.dock.find_tab(&Tab::Project) {
+            let _ = self.dock.set_active_tab(found);
         }
     }
 
@@ -1105,10 +1290,12 @@ impl<A: EditorApp> Session<A> {
         }
     }
 
-    fn save(&mut self) {
+    /// Saves the scene (or the prefab in Prefab Mode). Returns whether the
+    /// scene file was written.
+    fn save(&mut self) -> bool {
         if self.prefab_mode.is_some() {
             self.save_prefab();
-            return;
+            return false;
         }
         let mut wrote = false;
         let status = if self.play.in_run() {
@@ -1142,16 +1329,22 @@ impl<A: EditorApp> Session<A> {
             self.saved = self.app.scene().map(saved_text_hash);
         }
         self.panels.status = Some(status);
+        wrote
     }
 
-    fn open(&mut self, path: &std::path::Path) {
-        self.exit_prefab_mode();
+    /// Ends a run, putting back the scene and history from before Play.
+    fn stop_run(&mut self) {
         if let Some(snapshot) = self.play.stop() {
             self.app.restore(snapshot);
         }
         if let Some(stashed) = self.stashed_history.take() {
             self.history = stashed;
         }
+    }
+
+    fn open(&mut self, path: &std::path::Path) {
+        self.exit_prefab_mode();
+        self.stop_run();
         self.panels.status = Some(match self.app.open_scene(path) {
             Ok(()) => {
                 self.history.clear();
@@ -1216,6 +1409,12 @@ fn file_name(path: &std::path::Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into())
 }
 
+/// A key press, or what egui makes of one (text, copy, paste).
+fn is_key_press(event: &egui::Event) -> bool {
+    use egui::Event::*;
+    matches!(event, Key { pressed: true, .. } | Text(_) | Copy | Cut | Paste(_))
+}
+
 /// Undo, redo, save, create, duplicate and delete from the keyboard.
 fn shortcuts<A: EditorApp>(
     ui: &mut egui::Ui,
@@ -1238,7 +1437,7 @@ fn shortcuts<A: EditorApp>(
         && let Some(id) = panels.selected
         && let Some(scene) = app.scene()
     {
-        panels.rename = Rename::start(scene, id);
+        panels.hierarchy.rename = Rename::start(scene, id);
     }
     let (new_empty, new_child) = ui.input_mut(|i| {
         let shift_n = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
@@ -1298,6 +1497,44 @@ fn shortcuts<A: EditorApp>(
     }
 }
 
+/// Where Scene → New Scene puts a scene: beside the open one, else in the
+/// asset folder's `scenes/`. `None` when there's nowhere to write.
+fn new_scene_box<A: EditorApp>(app: &A) -> Option<NewScene> {
+    let assets = app.assets().and_then(|db| db.root());
+    let dir = app
+        .scene_path()
+        .and_then(|path| Some(path.parent()?.to_owned()))
+        .or_else(|| Some(assets?.join("scenes")))?;
+    let label = scenes::folder_label(&dir, assets);
+    Some(NewScene::new(dir, label))
+}
+
+/// The New Scene box and the "Save changes?" question, while either is up.
+fn scene_dialogs<A: EditorApp>(
+    ctx: &egui::Context,
+    app: &A,
+    panels: &mut Panels,
+    requests: &mut Requests,
+) {
+    if let Some(state) = &mut panels.new_scene {
+        match scenes::new_scene_window(ctx, state) {
+            Answer::Done(path) => {
+                requests.new_scene = Some(path);
+                panels.new_scene = None;
+            }
+            Answer::Cancelled => panels.new_scene = None,
+            Answer::Waiting => {}
+        }
+    }
+    if panels.pending_switch.is_some() {
+        let name = app.scene_path().map_or_else(|| "The scene".into(), |p| file_name(&p));
+        let answer = scenes::save_prompt(ctx, &name);
+        if answer != Answer::Waiting {
+            panels.switch_answer = Some(answer);
+        }
+    }
+}
+
 /// The toolbar's view of the editor's undo and file state.
 struct ToolbarState<'a> {
     history: &'a mut History,
@@ -1324,6 +1561,12 @@ fn toolbar<A: EditorApp>(
     egui::Panel::top("toolbar").frame(frame).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("Scene", |ui| {
+                let new_scene = app.new_scene_text().and_then(|_| new_scene_box(app));
+                let can_create = new_scene.is_some() && !play.in_run();
+                if ui.add_enabled(can_create, egui::Button::new("New Scene…")).clicked() {
+                    panels.new_scene = new_scene;
+                    ui.close();
+                }
                 let can_save = app.scene_path().is_some() && !play.in_run();
                 if ui.add_enabled(can_save, egui::Button::new("Save  (Ctrl+S)")).clicked() {
                     requests.save = true;
@@ -1458,6 +1701,21 @@ struct Viewer<'a, A: EditorApp> {
     /// The prefab being edited in Prefab Mode.
     prefab_mode: Option<&'a str>,
     dirty: bool,
+    /// Collision layers' names, for the Inspector.
+    layer_names: &'a [String],
+    /// The project's tags, for the Inspector.
+    tag_names: &'a [String],
+}
+
+impl<A: EditorApp> Viewer<'_, A> {
+    /// The tilemap the selected object draws, else the scene's first.
+    fn scene_tilemap(&self) -> Option<reign_assets::Guid> {
+        let scene = self.app.scene()?;
+        self.panels
+            .selected
+            .and_then(|id| self.app.tilemap_of(id))
+            .or_else(|| scene.walk().into_iter().find_map(|id| self.app.tilemap_of(id)))
+    }
 }
 
 impl<A: EditorApp> TabViewer for Viewer<'_, A> {
@@ -1515,7 +1773,7 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                         true,
                         &self.panels.create_items,
                         &mut self.panels.create,
-                        &mut self.panels.rename,
+                        &mut self.panels.hierarchy,
                     ) {
                         self.panels.edit_label = Some(label);
                     }
@@ -1540,20 +1798,23 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                         (Some(p), Some(db)) => prefab_ui::info(scene, id, &p.with(db), db),
                         _ => None,
                     };
-                    let action = inspector::inspector(
-                        ui,
-                        scene,
-                        self.registry,
-                        id,
-                        true,
-                        self.assets,
-                        info.as_ref(),
-                    );
+                    let lookups = inspector::Lookups {
+                        registry: self.registry,
+                        assets: self.assets,
+                        prefab: info.as_ref(),
+                        layers: self.layer_names,
+                        tags: self.tag_names,
+                    };
+                    let action = inspector::inspector(ui, scene, id, true, lookups);
                     match action {
                         Some(inspector::Action::Edit(label)) => {
                             self.panels.edit_label = Some(label)
                         }
                         Some(inspector::Action::Prefab(a)) => self.panels.prefab_action = Some(a),
+                        Some(inspector::Action::AddTag(tag)) => match self.app.add_tag(&tag) {
+                            Ok(()) => log::info!("added the tag {tag:?} to the project"),
+                            Err(e) => log::error!("couldn't add the tag {tag:?}: {e}"),
+                        },
                         None => {}
                     }
                 }
@@ -1573,6 +1834,14 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                     ui.weak("This app has no asset database.");
                     return;
                 };
+                if *tab == Tab::Tilemap {
+                    if !self.panels.tilemap_was_visible
+                        && let Some(guid) = self.scene_tilemap()
+                    {
+                        self.panels.painter.follow(db, guid);
+                    }
+                    self.panels.tilemap_visible = true;
+                }
                 let panels = &mut *self.panels;
                 match tab {
                     Tab::Project => assets_ui::project(ui, db, &mut panels.project),
@@ -1803,7 +2072,7 @@ mod view_scale_tests {
 
 #[cfg(test)]
 mod key_route_tests {
-    use super::{KeyRoute, KeyState, route_key};
+    use super::{KeyRoute, KeyState, is_key_press, route_key};
     use reign_app::winit::keyboard::{KeyCode, PhysicalKey};
 
     const F11: PhysicalKey = PhysicalKey::Code(KeyCode::F11);
@@ -1812,6 +2081,22 @@ mod key_route_tests {
 
     fn press(game_has_keyboard: bool) -> KeyState {
         KeyState { pressed: true, repeat: false, command: false, game_has_keyboard }
+    }
+
+    #[test]
+    fn taken_keys_are_presses_and_what_egui_makes_of_them() {
+        use egui::{Event, Key, Modifiers};
+        let key = |pressed| Event::Key {
+            key: Key::Delete,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(is_key_press(&key(true)));
+        assert!(is_key_press(&Event::Text(" ".into())));
+        assert!(!is_key_press(&key(false)), "releases still reach egui");
+        assert!(!is_key_press(&Event::PointerGone));
     }
 
     #[test]

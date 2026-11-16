@@ -212,14 +212,35 @@ mod templates {
     use reign::core::InputFrame;
     use top_down::TopDownMovement;
 
+    /// The ```ron blocks of every project's AGENTS.md.
+    fn guide_ron_blocks() -> Vec<String> {
+        // A Windows checkout may have turned the template's line endings into CRLF.
+        let guide = reign_build::project::agent_guide("Test").replace("\r\n", "\n");
+        guide
+            .split("```ron\n")
+            .skip(1)
+            .map(|rest| rest[..rest.find("```").expect("its end")].to_owned())
+            .collect()
+    }
+
+    /// The Project Settings example in every project's AGENTS.md loads as
+    /// written, and is the defaults it says it is.
+    #[test]
+    fn the_agent_guides_settings_are_the_defaults() {
+        let text = guide_ron_blocks()
+            .into_iter()
+            .find(|b| b.contains("start_scene:"))
+            .expect("the settings in the guide");
+        let settings: crate::settings::Settings = ron::from_str(&text).expect("they load");
+        assert_eq!(settings, crate::settings::Settings::default());
+    }
+
     /// The scene in every project's AGENTS.md loads as written, and plays:
     /// the player lands on the ground and runs right.
     #[test]
     fn the_agent_guides_scene_loads_and_plays() {
-        // A Windows checkout may have turned the template's line endings into CRLF.
-        let guide = reign_build::project::agent_guide("Test").replace("\r\n", "\n");
-        let start = guide.find("```ron\n").expect("a ron block") + "```ron\n".len();
-        let text = &guide[start..start + guide[start..].find("```").expect("its end")];
+        let blocks = guide_ron_blocks();
+        let text = blocks.iter().find(|b| b.contains("objects:")).expect("a scene in the guide");
 
         let mut registry = reign::scene::ComponentRegistry::new();
         crate::components::register_builtins(&mut registry);
@@ -605,4 +626,23 @@ mod actions {
         let c = world.scene.get::<Counter>(id).unwrap();
         assert_eq!((c.held, c.presses, c.unknown), (4, 2, 0));
     }
+}
+
+#[test]
+fn the_inspector_adds_tags_to_project_settings() {
+    let dir = std::env::temp_dir().join(format!("reign-add-tag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = engine(Project::open(dir.clone()).unwrap());
+    assert_eq!(app.tag_names(), ["Player", "Enemy"], "a new project's tags");
+
+    assert_eq!(app.add_tag(" Boss "), Ok(()));
+    assert_eq!(app.tag_names(), ["Player", "Enemy", "Boss"]);
+    let saved = crate::settings::Settings::load(&dir).unwrap();
+    assert_eq!(saved.tag_names(), ["Player", "Enemy", "Boss"]);
+
+    // Again: nothing changes. In another case: refused, nothing written.
+    assert_eq!(app.add_tag("Boss"), Ok(()));
+    assert!(app.add_tag("boss").unwrap_err().contains("already a tag called Boss"));
+    assert_eq!(crate::settings::Settings::load(&dir).unwrap(), saved);
+    let _ = std::fs::remove_dir_all(dir);
 }

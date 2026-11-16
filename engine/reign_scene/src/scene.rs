@@ -345,6 +345,7 @@ impl Scene {
             None => self.spawn(original.name.clone()),
         };
         let object = self.object_mut(copy).expect("just made");
+        object.tag = original.tag;
         object.active = original.active;
         object.transform = original.transform;
         object.dont_save = original.dont_save;
@@ -371,7 +372,7 @@ impl Scene {
 
     /// Copies object `from` of another scene, and everything under it,
     /// into new objects here under `parent` (or at the top level). Names,
-    /// active flags, transforms and components come along. Returns
+    /// tags, active flags, transforms and components come along. Returns
     /// `(source id, new id)` pairs, parents first. Ids inside components
     /// are left as they were; remap them with the pairs.
     pub fn copy_tree_from(
@@ -389,6 +390,7 @@ impl Scene {
                 None => self.spawn(original.name.clone()),
             };
             let object = self.object_mut(copy).expect("just made");
+            object.tag.clone_from(&original.tag);
             object.active = original.active;
             object.transform = original.transform;
             object.dont_save = original.dont_save;

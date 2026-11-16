@@ -76,6 +76,9 @@ impl Transform {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GameObject {
     pub name: String,
+    /// A label scripts look objects up by (`ctx.find_with_tag("Enemy")`).
+    /// Empty means untagged. A prefab's root tag comes with each copy.
+    pub tag: String,
     /// An inactive object, and everything under it, is skipped by queries.
     pub active: bool,
     pub transform: Transform,
@@ -90,6 +93,7 @@ impl GameObject {
     pub(crate) fn new(name: String, parent: Option<ObjectId>) -> Self {
         GameObject {
             name,
+            tag: String::new(),
             active: true,
             transform: Transform::default(),
             dont_save: false,

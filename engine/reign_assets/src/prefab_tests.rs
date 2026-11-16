@@ -256,3 +256,53 @@ fn instantiate_gives_the_same_ids_on_two_peers() {
     assert_eq!(a, b);
     assert!(a.1.last().unwrap().len() > 10);
 }
+
+#[test]
+fn tags_are_saved_and_come_with_a_prefab_and_can_be_overridden() {
+    // A plain scene file keeps tags, and leaves untagged objects alone.
+    let mut s = Scene::new();
+    let root = s.spawn("Goblin");
+    s.object_mut(root).unwrap().tag = "Enemy".into();
+    let hat = s.spawn_child(root, "Hat");
+    s.object_mut(hat).unwrap().tag = "Hat".into();
+    s.spawn_child(root, "Plain");
+    s.insert(root, Glow { radius: 1 });
+    let text = s.to_ron().unwrap();
+    assert_eq!(text.matches("tag:").count(), 2, "{text}");
+    assert_eq!(Scene::from_ron(&text, &registry()).unwrap(), s);
+
+    let mut lookup = MemoryPrefabs::new(registry());
+    lookup.texts.insert(GOBLIN, text);
+    let (mut scene, root) = placed(&lookup, GOBLIN);
+    let hat = scene.get::<PrefabInstance>(root).unwrap().object(&[1]).unwrap();
+    assert_eq!(scene.object(root).unwrap().tag, "Enemy", "the root's tag is the prefab's");
+    assert_eq!(scene.object(hat).unwrap().tag, "Hat");
+    assert!(!overrides(&mut scene, root, &lookup).unwrap().has_overrides());
+
+    // Retagging a placed copy is an override, kept through save and load.
+    scene.object_mut(root).unwrap().tag = "Boss".into();
+    sync_overrides(&mut scene, root, &lookup).unwrap();
+    let inst = scene.get::<PrefabInstance>(root).unwrap();
+    let paths: Vec<_> =
+        inst.overrides.iter().map(|o| (o.object.clone(), o.path.as_str())).collect();
+    assert_eq!(paths, [(vec![], "GameObject.tag")]);
+    let mut reg = registry();
+    reg.register::<PrefabInstance>();
+    let saved = saved_form(&scene, &lookup).unwrap().to_ron().unwrap();
+    let mut loaded = Scene::from_ron(&saved, &reg).unwrap();
+    assert!(expand_all(&mut loaded, &lookup).is_empty());
+    let root2 = loaded.iter::<PrefabInstance>().next().unwrap().0;
+    assert_eq!(loaded.object(root2).unwrap().tag, "Boss");
+    refresh(&mut loaded, root2, &lookup).unwrap();
+    assert_eq!(loaded.object(root2).unwrap().tag, "Boss");
+    revert_all(&mut loaded, root2, &lookup).unwrap();
+    assert_eq!(loaded.object(root2).unwrap().tag, "Enemy");
+
+    // A copy made at runtime has the prefab's tags too.
+    let template = lookup.template(Handle::new(GOBLIN)).unwrap();
+    let mut world = Scene::new();
+    let copy = instantiate(&mut world, &template, FxVec2::ZERO, None);
+    assert_eq!(world.object(copy).unwrap().tag, "Enemy");
+    let hat = world.get::<PrefabInstance>(copy).unwrap().object(&[1]).unwrap();
+    assert_eq!(world.object(hat).unwrap().tag, "Hat");
+}

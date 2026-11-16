@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod download;
 mod intro;
 mod launch;
 mod signing;
@@ -235,11 +236,17 @@ struct HubBuild {
     rx: std::sync::mpsc::Receiver<BuildEvent>,
     started: std::time::Instant,
     first_error: Option<String>,
-    hide_progress: bool,
+    /// The cargo process, so the build can be cancelled.
+    pid: u32,
+    /// Cancel was pressed: the build is being stopped, not failing.
+    cancelled: bool,
+    /// How far cargo says it has got; `None` until it says.
+    progress: Option<reign_build::progress::BuildProgress>,
 }
 
 enum BuildEvent {
     Line(String),
+    Progress(reign_build::progress::BuildProgress),
     Done(bool),
 }
 
@@ -269,6 +276,29 @@ struct Hub {
     open_choice: Option<OpenChoice>,
     /// A project to open once its engine version has downloaded.
     open_after_download: Option<(PathBuf, String)>,
+    /// Download windows the user closed; each stays hidden until its
+    /// download ends (the download carries on).
+    closed_downloads: Vec<DownloadKind>,
+    /// An update has finished installing: its window offers a restart.
+    update_done: bool,
+}
+
+/// Which download a progress window is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadKind {
+    /// The hub updating itself.
+    Update,
+    /// An engine version for a project.
+    Engine,
+}
+
+/// What the user did in a download window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadAction {
+    /// Closed the window; the download carries on.
+    Close,
+    Cancel,
+    Restart,
 }
 
 struct VersionDialog {
@@ -310,6 +340,8 @@ impl Hub {
             version_dialog: None,
             open_choice: None,
             open_after_download: None,
+            closed_downloads: Vec::new(),
+            update_done: false,
         }
     }
 
@@ -345,15 +377,12 @@ impl Hub {
         if !path.is_dir() {
             return self.error(format!("{} is missing", path.display()));
         }
-        let mut command = if project::has_code(path) {
-            let cached = project::read_crate_name(path).map(|n| project::editor_path(path, &n));
-            let Some(editor) = cached.filter(|p| p.is_file()) else {
-                return self.build(path);
-            };
-            let mut command = no_console(Command::new(editor));
-            command.env("REIGN_CHECK_BUILD_ON_OPEN", "1");
-            command
-        } else if let Some(version) = project_version(path).filter(|v| v != VERSION) {
+        // Cargo decides whether anything changed (the project's code or the
+        // engine it builds against); with nothing to do it's quick.
+        if project::has_code(path) {
+            return self.build(path);
+        }
+        let mut command = if let Some(version) = project_version(path).filter(|v| v != VERSION) {
             if self.versions.installing.as_deref() == Some(version.as_str()) {
                 return self.info(format!("Engine {version} is still downloading…"));
             }
@@ -378,7 +407,6 @@ impl Hub {
                 self.remember(path, true);
                 self.info(format!("Opened {}", project_name(path)));
             }
-            Err(_) if project::has_code(path) => self.build(path),
             Err(e) => self.error(format!("Can't start the editor: {e}")),
         }
     }
@@ -397,16 +425,21 @@ impl Hub {
         };
         let mut command = project::build_command(path, &name);
         command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+        launch::own_process_group(&mut command);
         let (tx, rx) = std::sync::mpsc::channel();
         match command.spawn() {
             Ok(mut child) => {
                 let stderr = child.stderr.take();
+                let pid = child.id();
                 std::thread::spawn(move || {
-                    use std::io::BufRead;
+                    use reign_build::progress::{Output, read_output};
                     if let Some(stderr) = stderr {
-                        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
-                            let _ = tx.send(BuildEvent::Line(line));
-                        }
+                        read_output(stderr, |output| {
+                            let _ = tx.send(match output {
+                                Output::Line(line) => BuildEvent::Line(line),
+                                Output::Progress(progress) => BuildEvent::Progress(progress),
+                            });
+                        });
                     }
                     let ok = child.wait().is_ok_and(|s| s.success());
                     let _ = tx.send(BuildEvent::Done(ok));
@@ -418,7 +451,9 @@ impl Hub {
                         rx,
                         started: std::time::Instant::now(),
                         first_error: None,
-                        hide_progress: false,
+                        pid,
+                        cancelled: false,
+                        progress: None,
                     },
                 );
                 self.info(format!("Compiling {}…", project_name(path)));
@@ -442,28 +477,45 @@ impl Hub {
                             build.first_error = Some(line.trim().to_owned());
                         }
                     }
+                    BuildEvent::Progress(progress) => build.progress = Some(progress),
                     BuildEvent::Done(ok) => finished.push((path.clone(), ok)),
                 }
             }
         }
         for (path, ok) in finished {
             let build = self.building.remove(&path).expect("listed");
-            if !ok {
-                let first = build.first_error.unwrap_or_else(|| "cargo build failed".to_owned());
-                self.error(format!("{} didn't build: {first}", project_name(&path)));
-                self.failed.insert(path, first);
+            if build.cancelled {
+                // Stopped on purpose: not a failure, and no editor opens.
+                self.failed.remove(&path);
+                self.info(format!("Build of {} cancelled", project_name(&path)));
                 continue;
             }
             let Some(name) = project::read_crate_name(&path) else { continue };
             let exe = project::editor_path(&path, &name);
+            let failure =
+                (!ok).then(|| build.first_error.unwrap_or_else(|| "cargo build failed".to_owned()));
+            if let Some(first) = &failure {
+                self.failed.insert(path.clone(), first.clone());
+                if !exe.is_file() {
+                    self.error(format!("{} didn't build: {first}", project_name(&path)));
+                    continue;
+                }
+            }
             let mut command = no_console(Command::new(&exe));
             command.arg(&path);
             match launch::Launched::spawn(command) {
                 Ok(child) => {
-                    let secs = build.started.elapsed().as_secs();
                     self.running.insert(path.clone(), child);
                     self.remember(&path, true);
-                    self.info(format!("Opened {} (built in {secs}s)", project_name(&path)));
+                    match failure {
+                        // The last editor that built still opens, so the
+                        // project can be worked on while its code is fixed.
+                        Some(first) => self.error(format!(
+                            "{} didn't build, so its last build opened: {first}",
+                            project_name(&path)
+                        )),
+                        None => self.info(format!("Opened {}", project_name(&path))),
+                    }
                 }
                 Err(e) => self.error(format!("Can't start {}: {e}", exe.display())),
             }
@@ -589,7 +641,14 @@ impl Hub {
         // A green arrow beside the version when a newer release is out.
         let (version, busy, installed, tip) = match self.updater.state.clone() {
             update::State::Available(v) => (v.clone(), false, false, format!("Update to {v}")),
-            update::State::Installing(v) => (v.clone(), true, false, format!("Installing {v}…")),
+            update::State::Installing(v) => {
+                let percent = self
+                    .updater
+                    .progress()
+                    .and_then(|p| p.snapshot().fraction())
+                    .map_or(String::new(), |f| format!(" {:.0}%", f * 100.0));
+                (v.clone(), true, false, format!("Installing {v}…{percent} (click for details)"))
+            }
             update::State::Installed(v) => {
                 (v.clone(), false, true, format!("{v} is installed: click to restart the hub"))
             }
@@ -616,19 +675,40 @@ impl Hub {
         painter.line_segment([center + Vec2::new(-5.0, 0.5), tip_of_arrow], stroke);
         painter.line_segment([center + Vec2::new(5.0, 0.5), tip_of_arrow], stroke);
 
-        if !response.clicked() || busy {
+        if !response.clicked() {
             return;
         }
-        if !installed {
+        if busy {
+            // Bring the progress window back if it was closed.
+            self.closed_downloads.retain(|k| *k != DownloadKind::Update);
+        } else if !installed {
             self.info(format!("Updating to {version}…"));
+            self.closed_downloads.retain(|k| *k != DownloadKind::Update);
             self.updater.install(ui.ctx());
-        } else if !self.running.is_empty() {
-            self.info("Close open editors, then click the arrow to restart");
         } else {
-            match self.updater.restart() {
-                Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(e) => self.error(e),
-            }
+            self.restart_hub(ui.ctx());
+        }
+    }
+
+    /// Stops a project's build (and everything cargo started for it); the
+    /// build's thread then reports it finished, and `poll_builds` says it was
+    /// cancelled.
+    fn cancel_build(&mut self, path: &Path) {
+        let Some(build) = self.building.get_mut(path) else { return };
+        build.cancelled = true;
+        launch::kill_tree(build.pid);
+        self.info(format!("Cancelling the build of {}…", project_name(path)));
+    }
+
+    /// Starts the updated hub and closes this one, once no editor is open.
+    fn restart_hub(&mut self, ctx: &egui::Context) {
+        if !self.running.is_empty() {
+            self.info("Close open editors, then click the arrow to restart");
+            return;
+        }
+        match self.updater.restart() {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.error(e),
         }
     }
 
@@ -845,7 +925,11 @@ impl Hub {
         let title_y = rect.center().y - 20.0;
         painter.galley(Pos2::new(left, title_y), title, TEXT);
 
-        let compiling = building.map(|b| format!("Compiling {}s", b.started.elapsed().as_secs()));
+        // Cargo's own count of build steps when it has given one, else seconds.
+        let compiling = building.map(|b| match b.progress.as_ref().filter(|p| p.total > 0) {
+            Some(p) => format!("Compiling {} / {}", p.done, p.total),
+            None => format!("Compiling {}s", b.started.elapsed().as_secs()),
+        });
         let badge = if running {
             Some(("● Open", GOOD))
         } else if let Some(label) = &compiling {
@@ -1072,9 +1156,71 @@ impl Hub {
                     self.open(&path);
                 }
             }
+            Err(e) if e == download::CANCELLED => {
+                self.open_after_download = None;
+                self.info(format!("Download of engine {version} cancelled"));
+            }
             Err(e) => {
                 self.open_after_download = None;
                 self.error(format!("Couldn't get engine {version}: {e}"));
+            }
+        }
+    }
+
+    /// The windows for downloads in progress (the hub updating itself, an
+    /// engine version for a project) and for a finished update: a bar, what
+    /// has arrived of the whole, and the speed. Closing one hides it; the
+    /// download carries on and the update arrow brings it back.
+    fn download_windows(&mut self, ctx: &egui::Context) {
+        let update = self.updater.progress();
+        let engine = self.versions.progress.clone();
+        // A closed window stays closed only for its own download.
+        if update.is_none() {
+            self.closed_downloads.retain(|k| *k != DownloadKind::Update);
+        }
+        if engine.is_none() {
+            self.closed_downloads.retain(|k| *k != DownloadKind::Engine);
+        }
+        if update.is_some() || engine.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        let mut actions = Vec::new();
+        for (kind, progress) in [(DownloadKind::Update, update), (DownloadKind::Engine, engine)] {
+            let Some(progress) = progress else { continue };
+            if self.closed_downloads.contains(&kind) {
+                continue;
+            }
+            let snapshot = progress.snapshot();
+            let title = match kind {
+                DownloadKind::Update => format!("Updating to {}", snapshot.label),
+                DownloadKind::Engine => format!("Downloading {}", snapshot.label),
+            };
+            let action =
+                download_window(ctx, ("download", kind as u8), &title, Some(&snapshot), None);
+            actions.push((Some(kind), action));
+        }
+        // The "installed" window has no download of its own: `None`.
+        if self.update_done
+            && let update::State::Installed(version) = self.updater.state.clone()
+        {
+            let done = format!("Reign {version} is installed");
+            let action = download_window(ctx, ("download", 2), &done, None, Some(&version));
+            actions.push((None, action));
+        }
+        for (kind, action) in actions {
+            match (kind, action) {
+                (_, None) => {}
+                (Some(DownloadKind::Update), Some(DownloadAction::Cancel)) => self.updater.cancel(),
+                (Some(DownloadKind::Engine), Some(DownloadAction::Cancel)) => {
+                    self.versions.cancel()
+                }
+                (None, Some(DownloadAction::Cancel)) => {}
+                (None, Some(DownloadAction::Close)) => self.update_done = false,
+                (Some(kind), Some(DownloadAction::Close)) => self.closed_downloads.push(kind),
+                (_, Some(DownloadAction::Restart)) => {
+                    self.update_done = false;
+                    self.restart_hub(ctx);
+                }
             }
         }
     }
@@ -1513,43 +1659,17 @@ impl eframe::App for Hub {
             self.updater.check(&ctx);
         }
         match self.updater.poll(&ctx) {
-            Some(Ok(news)) => self.info(news),
+            Some(Ok(news)) => {
+                self.update_done = matches!(self.updater.state, update::State::Installed(_));
+                self.info(news);
+            }
             Some(Err(error)) => self.error(error),
             None => {}
         }
         self.poll_versions();
+        self.download_windows(&ctx);
         if !self.building.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
-        }
-        for (path, build) in &mut self.building {
-            if build.hide_progress {
-                continue;
-            }
-            let name = project_name(path);
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of(("opening", path)),
-                egui::ViewportBuilder::default()
-                    .with_title(format!("{name} - Reign Engine"))
-                    .with_inner_size([480.0, 180.0])
-                    .with_resizable(false),
-                |ui, _| {
-                    if ui.input(|i| i.viewport().close_requested()) {
-                        build.hide_progress = true;
-                    }
-                    egui::CentralPanel::default().show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(24.0);
-                            ui.heading(&name);
-                            ui.spinner();
-                            ui.label(format!(
-                                "Building project scripts… {}s",
-                                build.started.elapsed().as_secs()
-                            ));
-                            ui.weak("The editor will open when the first build finishes.");
-                        });
-                    });
-                },
-            );
         }
         if let Some(step) = self.snapshots.as_mut().and_then(|s| s.poll(&ctx)) {
             use snapshot::Step;
@@ -1585,6 +1705,7 @@ impl eframe::App for Hub {
             .exact_size(64.0)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.top_bar(ui));
+        let mut cancel_build: Option<PathBuf> = None;
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -1598,11 +1719,73 @@ impl eframe::App for Hub {
                     Some((msg, false)) => (msg.clone(), MUTED),
                     None => ("Ready".to_owned(), FAINT),
                 };
+                // A project building: how many of cargo's steps are done, and
+                // a way to stop it.
+                let building = self
+                    .building
+                    .iter()
+                    .next()
+                    .map(|(path, build)| (path.clone(), build.progress.clone()));
                 ui.horizontal(|ui| {
                     ui.label(text("●", Face::Bold, 9.0, color, 0.0));
                     ui.label(text(msg, Face::Medium, 12.0, color, -0.1));
+                    let Some((path, progress)) = &building else { return };
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(text("Cancel", Face::Medium, 12.0, MUTED, -0.1))
+                                    .small(),
+                            )
+                            .on_hover_text("Stop building this project")
+                            .clicked()
+                        {
+                            cancel_build = Some(path.clone());
+                        }
+                        let Some(progress) = progress.as_ref().filter(|p| p.total > 0) else {
+                            return;
+                        };
+                        // A fixed slot for the count, so the bar doesn't
+                        // shift when it gains a digit.
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(88.0, 16.0),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                // The slot shrinks to its text unless told not to.
+                                ui.set_min_size(Vec2::new(88.0, 16.0));
+                                ui.label(text(
+                                    format!("{} / {}", progress.done, progress.total),
+                                    Face::Medium,
+                                    12.0,
+                                    MUTED,
+                                    -0.1,
+                                ))
+                                .on_hover_text(
+                                    if progress.building.is_empty() {
+                                        "Cargo's build steps: the engine, its libraries and \
+                                     your scripts."
+                                            .to_owned()
+                                    } else {
+                                        format!("Building: {}", progress.building)
+                                    },
+                                );
+                            },
+                        );
+                        // The track is the window's own colour unless told.
+                        ui.scope(|ui| {
+                            ui.visuals_mut().extreme_bg_color = HAIRLINE;
+                            ui.add(
+                                egui::ProgressBar::new(progress.fraction())
+                                    .desired_width(240.0)
+                                    .desired_height(10.0)
+                                    .fill(GOOD),
+                            );
+                        });
+                    });
                 });
             });
+        if let Some(path) = cancel_build {
+            self.cancel_build(&path);
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
             match self.page {
                 Page::Projects => self.projects_page(ui),
@@ -1614,6 +1797,115 @@ impl eframe::App for Hub {
         self.open_choice_dialog(&ctx);
         self.intro.show(&ctx, &self.grain, VERSION);
     }
+}
+
+/// One download's window: a bar, `12.3 MB of 48.1 MB · 3.2 MB/s · about 11 s
+/// left`, and Cancel. With no `snapshot` and a version, the finished update:
+/// Restart now or Later. Returns what the user did this frame.
+fn download_window(
+    ctx: &egui::Context,
+    id: (&str, u8),
+    title: &str,
+    snapshot: Option<&download::Snapshot>,
+    installed: Option<&str>,
+) -> Option<DownloadAction> {
+    let mut action = None;
+    let height = if installed.is_some() { 170.0 } else { 200.0 };
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of(id),
+        egui::ViewportBuilder::default()
+            .with_title(format!("{title} - Reign Hub"))
+            .with_inner_size([480.0, height])
+            .with_resizable(false),
+        |ui, _| {
+            if ui.input(|i| i.viewport().close_requested()) {
+                action = Some(DownloadAction::Close);
+            }
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(GUTTER as i8, 22)),
+                )
+                .show(ui, |ui| {
+                    ui.label(text(title, Face::Bold, 20.0, TEXT, 0.0));
+                    ui.add_space(14.0);
+                    if let Some(version) = installed {
+                        let mut note = text(
+                            format!(
+                                "Restart the hub to switch to Reign {version}. Open editors \
+                                 need to be closed first."
+                            ),
+                            Face::Regular,
+                            13.5,
+                            MUTED,
+                            -0.1,
+                        );
+                        note.wrap.max_width = ui.available_width();
+                        ui.label(note);
+                        ui.add_space(16.0);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(theme::primary("Restart now")).clicked() {
+                                action = Some(DownloadAction::Restart);
+                            }
+                            if ui.add(theme::secondary("Later")).clicked() {
+                                action = Some(DownloadAction::Close);
+                            }
+                        });
+                        return;
+                    }
+                    let Some(snapshot) = snapshot else { return };
+                    let downloading = matches!(
+                        snapshot.phase,
+                        download::Phase::Starting | download::Phase::Downloading
+                    );
+                    // Full once the download is over: what is left is quick.
+                    let fraction = if downloading { snapshot.fraction() } else { Some(1.0) };
+                    match fraction {
+                        Some(f) => {
+                            let fill = if downloading { GOOD } else { GOOD.gamma_multiply(0.45) };
+                            // The bar's empty track is the "extreme" background,
+                            // which is nearly the window's own colour here.
+                            ui.scope(|ui| {
+                                ui.visuals_mut().extreme_bg_color = HAIRLINE;
+                                ui.add(
+                                    egui::ProgressBar::new(f)
+                                        .desired_width(ui.available_width())
+                                        .desired_height(14.0)
+                                        .fill(fill),
+                                );
+                            });
+                        }
+                        None => {
+                            ui.add(egui::Spinner::new());
+                        }
+                    }
+                    ui.add_space(8.0);
+                    let percent = fraction
+                        .filter(|_| downloading)
+                        .map_or(String::new(), |f| format!("{:.0}%   ", f * 100.0));
+                    let line = if downloading && snapshot.received > 0 {
+                        format!("{percent}{}", snapshot.detail())
+                    } else {
+                        snapshot.phase_text().to_owned()
+                    };
+                    ui.label(text(line, Face::Medium, 13.5, TEXT, -0.1));
+                    ui.add_space(4.0);
+                    ui.label(text(
+                        "Closing this window doesn't stop it.",
+                        Face::Regular,
+                        12.0,
+                        FAINT,
+                        -0.1,
+                    ));
+                    ui.add_space(12.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled(downloading, theme::secondary("Cancel")).clicked() {
+                            action = Some(DownloadAction::Cancel);
+                        }
+                    });
+                });
+        },
+    );
+    action
 }
 
 /// `silent`: no questions (Settings → Apps' QuietUninstallString).

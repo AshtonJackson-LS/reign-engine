@@ -75,6 +75,14 @@ instead. **Beta updates** on also takes betas (`v0.3.0-beta.4`), which are
 built from every merge to `main`. Debug builds and builds inside a Cargo
 `target` folder never update on their own. `REIGN_NO_UPDATE_CHECK=1` turns
 the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI checks.
+While an update (or an engine version from **Engine version…**) downloads, a
+window shows a bar, how much has arrived of the whole, the speed and the time
+left, with **Cancel**; closing it doesn't stop the download, and the green
+arrow brings it back. When an update has installed, a window offers **Restart
+now** or **Later**. `REIGN_DOWNLOAD_BASE=http://127.0.0.1:8765` takes release
+files from `<base>/<tag>/<file>` instead of GitHub, to try the window against
+a slow local server (the signature check still applies, so an unsigned file is
+never installed).
 How releases are made, and forks: [RELEASING.md](RELEASING.md).
 
 Each project records its engine version (••• → **Engine version…** changes
@@ -161,8 +169,12 @@ shortcuts such as `ctx.get::<T>(me)`, `ctx.translate(me, delta)`,
 `ctx.axis_x()` and `ctx.pressed(Button::Jump)` (arrows/WASD, Space, J/K/L).
 
 **Input** is a list of named actions in `assets/input.ron` (up to 10),
-each bound to keys and gamepad buttons; edit them in **Scripts → Input
-Actions…** (press "+ key" and then the key). Scripts read
+each bound to keys, mouse buttons and gamepad buttons and sticks; edit them
+in **Scripts → Input Actions…** (or **Edit bindings…** in the Input section
+of **Project → Project Settings…**, which lists them): press **+** and then the key, pad button
+or stick direction (or click a mouse button in the box), or click a binding
+to change it. An input belongs to one action: binding it elsewhere moves it,
+and changing a binding to another action's swaps the two. Scripts read
 `ctx.action("Jump")`, `ctx.action_pressed("Interact")`,
 `ctx.action_buffered(..)` and `ctx.axis_x()`. The simulation only ever sees
 which actions are held each tick, so rebinding never affects replays.
@@ -196,6 +208,22 @@ that plays when it appears (`play_on_start`) or on `ctx.play(me)`. Sounds
 are presentation: they never feed back into the simulation, and Stop
 silences them.
 
+**Finding and spawning:** `ctx.find("Player")` is the first object with
+that name (look it up in `start` and keep the id). `ctx.spawn("prefabs/bullet.prefab.ron", at)`
+makes a copy of a prefab at a world position and returns its id straight
+away, so you can set it up on the same tick; its Behaviours `start` before
+their first update. A wrong path gives `None` and a warning in the Console.
+
+**Tags:** every object can have one tag, picked under its name in the
+Inspector (`tag: "Enemy"` in a scene file). The menu lists the project's
+tags (a new project has Player and Enemy). To make one, choose **New tag…**,
+type it and press Enter; it joins the list for every object. Project
+Settings can rename or remove them. `ctx.find_with_tag("Player")`
+is the first object with it, `ctx.find_all_with_tag("Enemy")` all of them,
+`ctx.has_tag(other, "Enemy")` asks about one (handy in `on_message` when
+something hits you) and `ctx.set_tag(id, "Dead")` changes it. Copies of a
+prefab get its root's tag.
+
 **Scenes:** `ctx.load_scene("scenes/level2.scene.ron")` moves to another
 scene when the tick ends. Input, the tick count and the random numbers
 carry on; the new scene's Behaviours start fresh.
@@ -204,6 +232,11 @@ When code changes and the editor is in front, it rebuilds in the
 background (output in the Console), saves the scene, and reopens on it.
 Ctrl/Cmd+R does it by hand. Reign Hub builds a project with code before
 opening it; the first build compiles the engine and takes a few minutes.
+While it builds, the hub's status bar shows a bar and `141 / 324` (cargo's
+own count of finished build steps), and the editor's toolbar shows the same
+as `Compiling 141 of 324` while it rebuilds or exports.
+The hub's status bar has a **Cancel** button for a build in progress; it stops
+cargo and the compilers it started, and the project can be opened again later.
 Pick the code editor (VS Code, RustRover, Cursor, Zed, Sublime Text) in the
 hub's About page or Scripts → Code editor. Projects build against this
 checkout (`REIGN_ENGINE_SOURCE` overrides it). Where there's no checkout (a
@@ -224,13 +257,27 @@ already solid: a `TilemapRenderer` (draws the map's layers) plus a
 one-way platform, with the same layers, triggers and collision events as
 BoxColliders). It writes a starter map to `assets/tilemaps/` and a small
 built-in tileset to `assets/Reign/`; double-click the map in the Project
-panel to paint it in the Tilemap tab. Slopes collide as solid blocks for now.
+panel to paint it in the Tilemap tab. Switching to the Tilemap tab opens the
+selected object's map, or else the scene's first one. Slopes collide as solid
+blocks for now.
+
+**Scene → New Scene…** (or **+ Create → Scene** in the Project panel) makes
+a scene with a Main Camera and opens it; double-click a scene in the Project
+panel to open it. When the open scene has unsaved changes, the editor asks
+whether to save them first. A game with its own `EditorApp` gets an empty
+scene unless it overrides `new_scene_text` with its own starting point.
+
+Drag files or folders from Explorer, Finder or a Linux file manager onto the
+editor window to copy them into the folder the Project panel shows. Taken
+names get a number (`hero 1.png`), and each copy gets a fresh `.meta`.
+(Linux under Wayland doesn't pass drops to the window yet; X11 does.)
 
 Create objects from the toolbar's **GameObject** menu or by right-clicking
 the Hierarchy (on an object to make a child). Shortcuts: Ctrl/Cmd+Shift+N
 (or Ctrl/Cmd+N) for an empty object, Alt+Shift+N for an empty child of the
 selection, Ctrl/Cmd+I (or F2, or double-click) to rename the selection in
-the Hierarchy (Enter keeps it, Esc cancels). New objects appear in the middle of the view. Dragging a PNG or
+the Hierarchy (Enter keeps it, Esc cancels). The Hierarchy's search box
+lists only the objects whose names match. New objects appear in the middle of the view. Dragging a PNG or
 sprite sheet from the Project panel into the view also places it. Gameplay
 comes from a game crate that depends on `reign` and implements
 `reign::editor::EditorApp` (`create_items` / `create` fill the Create menus).
@@ -245,15 +292,73 @@ macOS `<Project>.app`, elsewhere a `<Project>/` folder with the
 executable. It saves the scene, builds the project's second binary,
 `<crate>-game` (`src/game.rs`, which calls `reign_engine::play`), with
 `--release` in the background (output in the Console), packs `assets/`
-into `assets.rpak` and writes `game.ron` (title and start scene) beside
+into `assets.rpak` and writes `game.ron` (title, start scene and window) beside
 it, inside `Contents/Resources` in the app. A game needs the project's
 own crate, so a project without code is set up as one first, and a
 project made before export existed gets `src/game.rs` and its `[[bin]]`
 added. The first release build compiles the engine and takes a few
 minutes.
 
-The game plays `scenes/main.scene.ron` (else the first scene) with the
-same simulation and drawing as Play mode. F11 toggles fullscreen.
+## Project Settings
+
+**Project → Project Settings…** in the editor holds what describes the game
+rather than a scene. Edit the fields, then **Save** (the icon is saved as soon
+as it's chosen):
+
+- **Name**: the game's window title and the name of what Export Game makes.
+  It is `name` in `ReignProject.ron`, and the hub lists the project by it; the
+  project's folder and crate keep their names.
+- **Version** (`1.0.0`; one to four numbers) and **Author** (optional): put in
+  the exported game's file details on Windows (Properties → Details) and its
+  `Info.plist` on macOS.
+- **Start scene**: what the exported game and `--simulate` play first and what
+  the editor opens on. Automatic is `scenes/main.scene.ron`, else the first
+  scene. Export Game stops if the chosen scene has been deleted.
+- **Game window**: its size when the game starts (at least the 640 × 360
+  view) and whether it starts fullscreen. F11 still switches while it runs.
+- **Background**: the colour behind everything, where nothing is drawn, in
+  the game and in the editor's views.
+- **Collision layers**: names for the layers (0 to 31) colliders are on. The
+  Inspector shows a collider's `layer` by name and its `mask` as a list of
+  named layers to tick, with Everything and Nothing. Names are only for
+  people: scenes keep the numbers, so renaming a layer changes nothing in the
+  game. Your own components can show a field this way with
+  `#[reflect(layer)]` (a `u8`) or `#[reflect(layer_mask)]` (a `u32`).
+- **Tags**: the tags the Inspector's tag menu offers. Taking one off the
+  list leaves objects that have it alone; `--check` then warns about them.
+- **App icon**: see below.
+
+All but the name and icon are kept in `ProjectSettings.ron` beside
+`ReignProject.ron`, a RON file you can also edit by hand (a missing field takes
+its default). `--describe` prints the settings and `--check` reports any that
+can't be used.
+
+## Project icons
+
+A project's windows (its editor and its game) and its exported game show an
+icon. With none of its own, a project gets the Reign project icon (the hub's
+"R", inverted: dark on crimson). To use your own, open **Project → Project
+Settings…** in the editor and choose an image (it is copied into the project
+as **`icon.png`**, next to `ReignProject.ron`; you can also put the file there
+yourself). **Use the default** removes it again. The editor's window shows the
+change at once. The image must be:
+
+- a **PNG** (JPEG, GIF and `.ico` are not accepted),
+- **square**,
+- **64 to 1024 pixels** on a side (256 or 512 is a good choice; transparency
+  is kept), and
+- no larger than **8 MB**.
+
+An image that breaks a rule is refused with the reason in plain words (and one
+that is already in the project is skipped and logged). Export Game puts the
+icon in the game: `icon.png` beside the game (its window icon), the icon of the `.exe`
+file on Windows, and `AppIcon.icns` in the macOS app. The project's own icon
+always wins; the default only fills a gap, so a game that already embeds an
+icon of its own in its program keeps it.
+
+The game plays its start scene (Project Settings; by default
+`scenes/main.scene.ron`, else the first scene) with the same simulation and
+drawing as Play mode, in the window Project Settings describes. F11 toggles fullscreen.
 Flags: `--scene PATH`, `--fullscreen`, `--exit-after SECONDS`, and a
 project folder to play its loose assets instead of a pack (with no pack
 beside it, `cargo run --bin <crate>-game` plays the project it was built
@@ -262,13 +367,14 @@ the same export from the command line.
 
 ## Without the window: tools and AI agents
 
-Three commands open no window and print one JSON document on stdout, so
+These commands open no window and print one JSON document on stdout, so
 scripts, CI and AI coding agents can work on a project:
 
 ```bash
 reign-engine PROJECT_DIR --check                 # do all scenes and prefabs load? exit 1 if not
-reign-engine PROJECT_DIR --describe              # components, fields, defaults, inputs, scenes, assets
+reign-engine PROJECT_DIR --describe              # components, fields, defaults, inputs, scenes, tags, assets
 reign-engine PROJECT_DIR --simulate 240 --input "Right,Jump@30-45" --watch Player
+reign-engine PROJECT_DIR --new-scene scenes/level2.scene.ron   # a scene with a Main Camera
 ```
 
 `--simulate TICKS` plays the start scene (or `--scene scenes/x.scene.ron`)

@@ -148,3 +148,22 @@ fn every_field_kind_serializes_and_reads_back() {
     // The skipped-by-reflection field still round-trips through serde.
     assert_eq!(back, sample);
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Reflect)]
+struct Layered {
+    #[reflect(range(0, 31), layer)]
+    layer: u8,
+    #[reflect(layer_mask)]
+    mask: u32,
+    plain: u32,
+}
+
+#[test]
+fn layer_fields_carry_their_hint() {
+    use reign_scene::FieldHint;
+    let mut value = Layered::default();
+    let Mut::Struct(s) = value.reflect_mut() else { panic!("a struct") };
+    let hints: Vec<FieldHint> = s.fields().iter().map(|f| f.hint).collect();
+    assert_eq!(hints, [FieldHint::Layer, FieldHint::LayerMask, FieldHint::None]);
+    assert_eq!(s.fields()[0].range, Some((0.0, 31.0)), "other attributes still apply");
+}

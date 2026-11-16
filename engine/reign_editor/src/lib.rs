@@ -19,6 +19,8 @@
 //!   the app offers ([`EditorApp::create_items`]); Ctrl+Shift+N (or
 //!   Ctrl+N) makes an empty object and Alt+Shift+N an empty child;
 //!   Ctrl+I (or F2, or a double-click) renames the selection in place.
+//!   The search box above the tree lists only the objects whose names
+//!   match, as a flat list.
 //! - **Inspector**: the selected object's name, transform and components,
 //!   edited through reflection, with Add Component, Reset and Remove.
 //! - **Console**: everything logged through `log`, with level filters.
@@ -29,15 +31,21 @@
 //!   Drag an asset onto a handle field in the Inspector, or a sprite into
 //!   the Game view to place it ([`EditorApp::create_from_asset`]). The
 //!   Inspector shows a selected asset's import settings (Apply, Revert).
-//!   Reloaded assets flash.
+//!   Reloaded assets flash. Double-clicking a scene opens it; Create →
+//!   Scene makes one in the folder shown. Files and folders dropped on the
+//!   window from Explorer, Finder or a Linux file manager are copied into
+//!   that folder.
 //! - **Tilemap**: the Tilemap painter (brush, eraser, rectangle, flood
-//!   fill, eyedropper; collision, marker and visual layers).
+//!   fill, eyedropper; collision, marker and visual layers). Switching to
+//!   it opens the selected object's tilemap, else the scene's first
+//!   ([`EditorApp::tilemap_of`]), unless a map with unsaved edits is open.
 //! - **Sprites**: the Sprite slicer (grid or by hand; names, pivots,
 //!   density), saving a sprite sheet.
 //! - **Animation**: the Animation editor (frame timeline, durations, loop
 //!   mode, events, and a 120 Hz preview with play, pause, step and scrub).
 //! - A toolbar with Play, Pause, Step, Stop, the time scale, undo and redo,
-//!   and the Scene menu (Save, Open).
+//!   and the Scene menu (New Scene, Save, Open). Opening or making a scene
+//!   while this one has unsaved changes asks whether to save them first.
 //! - **Fullscreen** (the toolbar's button, or F11, even while the game has the
 //!   keyboard): the editor window goes borderless fullscreen and the Game view
 //!   fills it, with no toolbar or panels. F11 again returns to the editor. A
@@ -73,6 +81,7 @@ mod inspector;
 mod play;
 mod prefab_ui;
 mod scene_view;
+mod scenes;
 mod shell;
 mod slicer;
 mod tilemap_painter;
@@ -90,11 +99,12 @@ pub use create::CreateRequest;
 pub use history::{HISTORY_LIMIT, History};
 pub use play::{PlayControl, PlayMode, TIME_SCALES};
 pub use scene_view::SceneView;
+pub use scenes::{SCENE_SUFFIX, new_scene_path};
 pub use slicer::{fit as grid_fit, slice as slice_grid};
 pub use undo::{Edits, TOOL_HISTORY};
 
 use reign_app::{App, Ctx};
-use reign_assets::{AssetChange, AssetDb, Guid};
+use reign_assets::{AssetChange, AssetDb, Guid, RgbaImage};
 use reign_scene::{ComponentRegistry, ObjectId, Scene};
 
 /// An app the editor can host.
@@ -155,6 +165,19 @@ pub trait EditorApp: App {
         Err("this app can't open scenes".into())
     }
 
+    /// The contents of a new scene file (Scene → New Scene): an empty
+    /// scene unless the app has a better start. `None` means this app
+    /// can't make scenes.
+    fn new_scene_text(&self) -> Option<String> {
+        Scene::new().to_ron().ok()
+    }
+
+    /// The tilemap asset `object` draws, if any. The Tilemap tab opens the
+    /// selected object's, or else the first one in the scene.
+    fn tilemap_of(&self, _object: ObjectId) -> Option<Guid> {
+        None
+    }
+
     /// The world pixel at the top-left of the last frame drawn (the
     /// camera), for clicking and gizmos in the Game view.
     fn view_origin(&self) -> Option<(f32, f32)> {
@@ -171,6 +194,16 @@ pub trait EditorApp: App {
     /// menu every frame. It may also open windows through `ui.ctx()`.
     fn toolbar_ui(&mut self, _ui: &mut egui::Ui) -> EditorRequests {
         EditorRequests::default()
+    }
+
+    /// Every key pressed and pad input since the last frame, whoever had
+    /// the input (the editor's panels, the Game view, or nobody), heard
+    /// before the frame's UI: for a "press the key to bind" listener.
+    /// Called every frame, often with nothing. Returning true takes the
+    /// keys: the editor's panels and shortcuts don't see this frame's key
+    /// presses, so binding Delete doesn't also delete the selection.
+    fn input_heard(&mut self, _heard: &[Heard]) -> bool {
+        false
     }
 
     /// The app's own debug toggles and actions, shown in the Debug panel.
@@ -218,6 +251,49 @@ pub trait EditorApp: App {
     ) -> Option<ObjectId> {
         None
     }
+
+    /// A new icon for the editor's window, when the app has one to give (a
+    /// setting that changed it). Asked once a frame; the editor shows it and
+    /// forgets it, so give each icon once. macOS has no window icon.
+    fn take_window_icon(&mut self) -> Option<RgbaImage> {
+        None
+    }
+
+    /// A new title for the editor's window (the scene's file name is added
+    /// after it), when the app has one to give: a project renamed in its
+    /// settings. Asked once a frame, like [`EditorApp::take_window_icon`].
+    fn take_window_title(&mut self) -> Option<String> {
+        None
+    }
+
+    /// The collision layers' names, by number (index 0 is layer 0), for
+    /// fields marked `#[reflect(layer)]` or `#[reflect(layer_mask)]`. An
+    /// empty name, or a layer past the end, is shown by its number.
+    fn layer_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The project's tags, in the order the Inspector's tag menu shows
+    /// them.
+    fn tag_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Adds a tag to the project's list, from the Inspector. An error says
+    /// why it couldn't (shown in the Console).
+    fn add_tag(&mut self, _tag: &str) -> Result<(), String> {
+        Err("this editor keeps no list of tags".into())
+    }
+}
+
+/// A press from a keyboard or a pad, for [`EditorApp::input_heard`].
+/// Mouse buttons aren't here: a listener knows best which clicks are
+/// meant for its own buttons, so it reads them from egui.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heard {
+    /// A key went down (repeats left out), by its place on the keyboard.
+    Key(reign_app::winit::keyboard::KeyCode),
+    Pad(reign_app::PadInput),
 }
 
 /// What an app asked the editor to do from [`EditorApp::toolbar_ui`].

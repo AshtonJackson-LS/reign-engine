@@ -25,19 +25,20 @@ use crate::audio::Audio;
 use crate::components::register_builtins;
 use crate::editor::{PROJECT_FILE, Project};
 use crate::runtime::{self, Keyboard, Scripts, World, schedule};
+use crate::settings::{Settings, Window};
 use crate::view::Sprites;
 
 /// The packed assets an exported game ships with.
 pub const PACK_FILE: &str = "assets.rpak";
 
-/// The exported game's title and start scene, beside [`PACK_FILE`].
+/// The exported game's title, start scene and window, beside [`PACK_FILE`].
 pub const GAME_FILE: &str = "game.ron";
 
 /// The scene a game starts on when nothing names another.
 pub const MAIN_SCENE: &str = "scenes/main.scene.ron";
 
 /// What [`GAME_FILE`] holds.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameInfo {
     /// The window's title.
@@ -45,6 +46,21 @@ pub struct GameInfo {
     /// The start scene's asset path, such as `scenes/main.scene.ron`. Empty
     /// picks one with `choose_scene`.
     pub scene: String,
+    /// The window the game starts in (Project Settings).
+    pub window: Window,
+    /// The colour behind everything (Project Settings).
+    pub background: [u8; 3],
+}
+
+impl Default for GameInfo {
+    fn default() -> Self {
+        GameInfo {
+            title: String::new(),
+            scene: String::new(),
+            window: Window::default(),
+            background: crate::settings::DEFAULT_BACKGROUND,
+        }
+    }
 }
 
 impl GameInfo {
@@ -136,10 +152,11 @@ pub struct Player {
     keyboard: Keyboard,
     audio: Audio,
     sprites: Sprites,
+    background: reign::render::Color,
 }
 
 impl Player {
-    pub fn new(scripts: &Scripts, scene: Scene) -> Self {
+    pub fn new(scripts: &Scripts, scene: Scene, background: [u8; 3]) -> Self {
         Player {
             world: World::new(scene),
             registry: registry(scripts),
@@ -148,6 +165,7 @@ impl Player {
             keyboard: Keyboard::default(),
             audio: Audio::default(),
             sprites: Sprites::default(),
+            background: crate::view::background(background),
         }
     }
 }
@@ -167,7 +185,7 @@ impl App for Player {
     }
 
     fn draw(&mut self, r: &mut Renderer, _alpha: f32) {
-        self.sprites.draw_game(r, &self.world.scene, DB.get());
+        self.sprites.draw_game(r, &self.world.scene, DB.get(), self.background);
     }
 
     fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
@@ -273,7 +291,13 @@ pub fn run(scripts: Scripts) {
         Source::Project(root) => {
             log::info!("assets from the project at {}", root.display());
             let project = Project { root: root.clone() };
-            let info = GameInfo { title: project.title(), scene: String::new() };
+            let settings = Settings::read(root);
+            let info = GameInfo {
+                title: project.title(),
+                scene: settings.start_scene,
+                window: settings.window,
+                background: settings.background,
+            };
             (AssetDb::loose(project.assets()), info)
         }
     };
@@ -308,6 +332,23 @@ pub fn run(scripts: Scripts) {
         (true, Some(name)) => name.to_owned(),
         (true, None) => "Reign".to_owned(),
     };
-    let config = AppConfig { title, fullscreen, exit_after, ..AppConfig::default() };
-    reign::app::run(config, move |_ctx| Player::new(&scripts, scene));
+    // An exported game keeps its icon beside its pack; a project run in
+    // place has it in the project folder: the same file name, so either way
+    // it is `project_icon` of that folder.
+    let icon_dir = match &source {
+        Source::Pack(dir) | Source::Project(dir) => dir,
+    };
+    let icon = Some(crate::icon::window_icon(&crate::icon::project_icon(icon_dir)));
+    // `--fullscreen` overrides a game set to start in a window.
+    let window = info.window;
+    let config = AppConfig {
+        title,
+        size: (window.width.max(1), window.height.max(1)),
+        fullscreen: fullscreen || window.fullscreen,
+        exit_after,
+        icon,
+        ..AppConfig::default()
+    };
+    let background = info.background;
+    reign::app::run(config, move |_ctx| Player::new(&scripts, scene, background));
 }

@@ -5,14 +5,17 @@
 //! Building the game is the editor's job (`code.rs` runs cargo); this is
 //! the part after, which needs no window.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use reign::assets::{AssetKind, Meta, pack_dir, read_pack};
+use reign::assets::{AssetKind, Meta, RgbaImage, pack_dir, read_pack};
+use reign_build::progress::{Output, read_output};
 use reign_build::project;
 
+use crate::exe_icon::{self, VersionInfo};
+use crate::icon;
 use crate::player::{GAME_FILE, GameInfo, PACK_FILE, choose_scene};
+use crate::settings::Settings;
 
 /// How the export is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +48,23 @@ pub struct Export {
     /// Where `<Title>.app` or `<Title>/` goes.
     pub out_dir: PathBuf,
     pub layout: Layout,
+    /// The project's own icon (see [`icon::own_icon`]), if it has one. Without
+    /// it the game keeps an icon already built into it, else gets the Reign
+    /// default.
+    pub icon: Option<RgbaImage>,
+    /// Project Settings: the start scene, the window, the version and the
+    /// author.
+    pub settings: Settings,
 }
+
+/// The name of the macOS app's icon file (`AppIcon.icns`), which
+/// `Info.plist` names.
+const MAC_ICON: &str = "AppIcon";
+
+/// The side of the icon file an export keeps beside the game, which the game
+/// shows as its window icon: big enough for the largest window icon, small
+/// enough to be a few KB.
+pub const EXPORTED_ICON_SIZE: u32 = 256;
 
 /// Gets a project ready to build its game: makes it a crate if it isn't
 /// one (a project without code has nothing to build the game from) and
@@ -63,20 +82,14 @@ pub fn prepare(root: &Path, title: &str) -> Result<(String, bool), String> {
     Ok((name, had_code))
 }
 
-/// Builds the game with `--release`, handing each line cargo prints to
-/// `line`. Blocks until cargo is done.
-pub fn build(
-    root: &Path,
-    crate_name: &str,
-    mut line: impl FnMut(String),
-) -> Result<PathBuf, String> {
+/// Builds the game with `--release`, handing each line cargo prints, and
+/// each progress update, to `output`. Blocks until cargo is done.
+pub fn build(root: &Path, crate_name: &str, output: impl FnMut(Output)) -> Result<PathBuf, String> {
     let mut command = project::game_build_command(root, crate_name);
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("can't run cargo: {e}"))?;
     if let Some(stderr) = child.stderr.take() {
-        for l in BufReader::new(stderr).lines().map_while(Result::ok) {
-            line(l);
-        }
+        read_output(stderr, output);
     }
     if child.wait().is_ok_and(|s| s.success()) {
         Ok(project::game_path(root, crate_name))
@@ -88,7 +101,11 @@ pub fn build(
 /// The whole export, start to end, blocking: what `--export` does.
 pub fn export_project(root: &Path, title: &str, out_dir: &Path) -> Result<PathBuf, String> {
     let (name, _) = prepare(root, title)?;
-    let exe = build(root, &name, |l| eprintln!("{l}"))?;
+    let exe = build(root, &name, |output| {
+        if let Output::Line(line) = output {
+            eprintln!("{line}");
+        }
+    })?;
     assemble(&Export {
         title: title.to_owned(),
         crate_name: name,
@@ -96,6 +113,8 @@ pub fn export_project(root: &Path, title: &str, out_dir: &Path) -> Result<PathBu
         assets: root.join("assets"),
         out_dir: out_dir.to_owned(),
         layout: Layout::native(),
+        icon: icon::own_icon(root),
+        settings: Settings::load(root)?,
     })
 }
 
@@ -111,9 +130,11 @@ pub fn file_title(title: &str) -> String {
     if joined.is_empty() { "Game".to_owned() } else { joined }
 }
 
-/// Packs the assets and picks the start scene from what's in the pack.
-/// Returns the pack and that scene's path.
-pub fn pack(assets: &Path) -> Result<(Vec<u8>, String), String> {
+/// Packs the assets and picks the start scene from what's in the pack:
+/// `start` (from Project Settings) when it isn't empty, which must then be
+/// there, else `scenes/main.scene.ron` or the first scene. Returns the pack
+/// and that scene's path.
+pub fn pack(assets: &Path, start: &str) -> Result<(Vec<u8>, String), String> {
     let blob = pack_dir(assets).map_err(|e| e.to_string())?;
     let mut scenes = Vec::new();
     for entry in read_pack(&blob).map_err(|e| e.to_string())? {
@@ -122,14 +143,23 @@ pub fn pack(assets: &Path) -> Result<(Vec<u8>, String), String> {
             scenes.push(entry.path.to_owned());
         }
     }
-    let scene = choose_scene(&scenes, None).ok_or("the project has no scenes")?;
+    if !start.is_empty() && !scenes.iter().any(|s| s == start) {
+        return Err(format!(
+            "the start scene {start} isn't in the project: choose another in Project Settings"
+        ));
+    }
+    let scene = choose_scene(&scenes, Some(start)).ok_or("the project has no scenes")?;
     Ok((blob, scene))
 }
 
 /// Writes the export and returns the app or folder it made. Files already
 /// there are replaced; nothing else is removed.
 pub fn assemble(export: &Export) -> Result<PathBuf, String> {
-    let (blob, scene) = pack(&export.assets)?;
+    let settings = &export.settings;
+    if let Some(problem) = settings.problems().into_iter().next() {
+        return Err(format!("Project Settings: {problem}"));
+    }
+    let (blob, scene) = pack(&export.assets, &settings.start_scene)?;
     let name = file_title(&export.title);
     let exe_name = format!("{}{}", export.crate_name, std::env::consts::EXE_SUFFIX);
     let (top, bin_dir, data_dir) = match export.layout {
@@ -149,26 +179,72 @@ pub fn assemble(export: &Export) -> Result<PathBuf, String> {
     }
     let exe = bin_dir.join(&exe_name);
     std::fs::copy(&export.exe, &exe).map_err(|e| io(&export.exe, e))?;
+    // The icon of the file itself (Windows keeps it in the program). The
+    // project's own icon always goes in; the default only where the program
+    // has none, so a game that embedded its own icon keeps it. The copy is
+    // changed, never the build output; a failure costs only the icon, so it
+    // is reported, not fatal.
+    let shown = export.icon.as_ref().unwrap_or_else(|| icon::default_icon());
+    if (export.icon.is_some() || !exe_icon::has_exe_icon(&exe))
+        && let Err(e) = exe_icon::set_exe_icon(&exe, shown)
+    {
+        log::warn!("the exported game has no file icon: {e}");
+    }
+    // Its name, version and author in the file's properties (Windows).
+    let version = VersionInfo {
+        numbers: settings.version_numbers(),
+        version: settings.version.trim().to_owned(),
+        title: export.title.clone(),
+        author: settings.author.trim().to_owned(),
+        exe_name: exe_name.clone(),
+        internal_name: export.crate_name.clone(),
+    };
+    if let Err(e) = exe_icon::set_exe_version(&exe, &version) {
+        log::warn!("the exported game's file has no version details: {e}");
+    }
     let pack = data_dir.join(PACK_FILE);
     std::fs::write(&pack, &blob).map_err(|e| io(&pack, e))?;
-    let info = GameInfo { title: export.title.clone(), scene };
+    let info = GameInfo {
+        title: export.title.clone(),
+        scene,
+        window: settings.window,
+        background: settings.background,
+    };
     let game = data_dir.join(GAME_FILE);
     std::fs::write(&game, info.to_ron()).map_err(|e| io(&game, e))?;
+    // The window icon, which the game reads from here (the pack holds the
+    // project's assets, and the icon isn't one).
+    let icon_file = data_dir.join(icon::FILE);
+    std::fs::write(&icon_file, icon::encode_png(&icon::resize(shown, EXPORTED_ICON_SIZE)))
+        .map_err(|e| io(&icon_file, e))?;
     if export.layout == Layout::MacApp {
+        let icns = data_dir.join(format!("{MAC_ICON}.icns"));
+        std::fs::write(&icns, exe_icon::icns(shown)).map_err(|e| io(&icns, e))?;
         let plist = top.join("Contents").join("Info.plist");
-        std::fs::write(&plist, info_plist(&export.title, &export.crate_name, &exe_name))
+        std::fs::write(&plist, info_plist(&export.title, &export.crate_name, &exe_name, settings))
             .map_err(|e| io(&plist, e))?;
         sign(&top);
     }
     Ok(top)
 }
 
-/// The macOS app's `Info.plist`.
-pub fn info_plist(title: &str, crate_name: &str, exe_name: &str) -> String {
+/// The macOS app's `Info.plist`, with the game's version and author from
+/// Project Settings.
+pub fn info_plist(title: &str, crate_name: &str, exe_name: &str, settings: &Settings) -> String {
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let id: String =
         crate_name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let version = env!("CARGO_PKG_VERSION");
+    let version = escape(settings.version.trim());
+    let author = settings.author.trim();
+    let copyright = if author.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "
+  <key>NSHumanReadableCopyright</key><string>© {}</string>",
+            escape(author)
+        )
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -179,15 +255,17 @@ pub fn info_plist(title: &str, crate_name: &str, exe_name: &str) -> String {
   <key>CFBundleIdentifier</key><string>com.reign-engine.game.{id}</string>
   <key>CFBundleExecutable</key><string>{exe}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>{icon}</string>
   <key>CFBundleVersion</key><string>{version}</string>
   <key>CFBundleShortVersionString</key><string>{version}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHighResolutionCapable</key><true/>{copyright}
 </dict>
 </plist>
 "#,
         title = escape(title),
         exe = escape(exe_name),
+        icon = MAC_ICON,
     )
 }
 

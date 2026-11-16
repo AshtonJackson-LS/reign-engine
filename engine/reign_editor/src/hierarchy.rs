@@ -1,7 +1,8 @@
 //! The Hierarchy: the scene's objects as a tree, built from parents and
 //! children. Select, toggle active, drag onto another object to reparent
 //! (or onto empty space for the top level), and right-click to create,
-//! duplicate or delete.
+//! duplicate or delete. Typing in the search box shows only the objects
+//! whose names match, as a flat list.
 
 use egui::{Color32, RichText, Sense, Ui};
 use reign_scene::{ObjectId, Scene};
@@ -23,6 +24,23 @@ impl Rename {
     }
 }
 
+/// The Hierarchy's own state between frames.
+#[derive(Clone, Debug, Default)]
+pub struct HierarchyState {
+    pub rename: Option<Rename>,
+    pub search: String,
+}
+
+/// Objects whose names contain `query`, ignoring case, in tree order.
+pub fn search(scene: &Scene, query: &str) -> Vec<ObjectId> {
+    let query = query.trim().to_lowercase();
+    scene
+        .walk()
+        .into_iter()
+        .filter(|&id| scene.name(id).is_some_and(|name| name.to_lowercase().contains(&query)))
+        .collect()
+}
+
 /// Draws the tree and applies what was done to it. Returns a label for the
 /// undo step when something changed.
 pub fn hierarchy(
@@ -32,7 +50,7 @@ pub fn hierarchy(
     editable: bool,
     items: &[String],
     create: &mut Option<CreateRequest>,
-    rename: &mut Option<Rename>,
+    state: &mut HierarchyState,
 ) -> Option<String> {
     let mut edit = None;
     ui.add_enabled_ui(editable, |ui| {
@@ -42,11 +60,25 @@ pub fn hierarchy(
                 .on_hover_text("Create an object at the top level (or right-click the tree)");
             ui.weak(format!("{} objects", scene.len()));
         });
+        let was_searching = !state.search.trim().is_empty();
+        search_box(ui, &mut state.search);
+        let searching = !state.search.trim().is_empty();
         ui.separator();
         let mut ops = Ops::default();
-        for &root in scene.roots().to_vec().iter() {
-            let mut menus = Menus { items, create: &mut *create, rename: &mut *rename };
-            row(ui, scene, root, selected, &mut ops, &mut menus);
+        let mut menus = Menus {
+            items,
+            create: &mut *create,
+            rename: &mut state.rename,
+            flat: searching,
+            // Back from a search: open the tree down to what was picked.
+            reveal: if was_searching && !searching { *selected } else { None },
+        };
+        let shown = if searching { search(scene, &state.search) } else { scene.roots().to_vec() };
+        if searching && shown.is_empty() {
+            ui.weak("No objects match");
+        }
+        for id in shown {
+            row(ui, scene, id, selected, &mut ops, &mut menus);
         }
         // Dropping below the tree moves an object to the top level, and
         // right-clicking there creates one.
@@ -81,11 +113,33 @@ struct Ops {
     toggled: bool,
 }
 
-/// The Create menu's items, and what the menus and rename asked for.
+/// The search field. Esc or the clear button empties it.
+fn search_box(ui: &mut Ui, search: &mut String) {
+    ui.horizontal(|ui| {
+        let clear_width = if search.is_empty() { 0.0 } else { 24.0 };
+        let field = ui.add(
+            egui::TextEdit::singleline(search)
+                .hint_text("Search")
+                .desired_width(ui.available_width() - clear_width),
+        );
+        let escaped = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+        let cleared = !search.is_empty() && ui.small_button("✕").on_hover_text("Clear").clicked();
+        if escaped || cleared {
+            search.clear();
+        }
+    });
+}
+
+/// The Create menu's items, what the menus and rename asked for, and how
+/// rows are laid out.
 struct Menus<'a> {
     items: &'a [String],
     create: &'a mut Option<CreateRequest>,
     rename: &'a mut Option<Rename>,
+    /// Search results: one row per object, no children under it.
+    flat: bool,
+    /// Open the tree down to this object.
+    reveal: Option<ObjectId>,
 }
 
 fn row(
@@ -183,10 +237,12 @@ fn row(
             }
         });
     };
-    if children.is_empty() {
+    if children.is_empty() || menus.flat {
         ui.horizontal(|ui| {
-            // Line up with rows that have a collapse arrow.
-            ui.add_space(ui.spacing().icon_width + ui.spacing().item_spacing.x);
+            if !menus.flat {
+                // Line up with rows that have a collapse arrow.
+                ui.add_space(ui.spacing().icon_width + ui.spacing().item_spacing.x);
+            }
             header(ui, ops, selected, &mut active, menus.create, menus.rename);
         });
     } else {
@@ -195,8 +251,9 @@ fn row(
             ui.make_persistent_id(("hierarchy", id)),
             children.len() <= 16,
         );
-        // Open the way to an object that's about to be renamed.
-        if menus.rename.as_ref().is_some_and(|r| r.focus && scene.is_ancestor(id, r.id)) {
+        // Open the way to an object about to be renamed, or just found.
+        let renaming = menus.rename.as_ref().filter(|r| r.focus).map(|r| r.id);
+        if renaming.or(menus.reveal).is_some_and(|target| scene.is_ancestor(id, target)) {
             state.set_open(true);
         }
         state
@@ -257,9 +314,11 @@ mod tests {
         let input = egui::RawInput { events, ..Default::default() };
         let mut edit = None;
         let mut create = None;
+        let mut state = HierarchyState { rename: rename.take(), search: String::new() };
         let mut output = ctx.run_ui(input, |ui| {
-            edit = hierarchy(ui, scene, selected, true, &[], &mut create, rename);
+            edit = hierarchy(ui, scene, selected, true, &[], &mut create, &mut state);
         });
+        *rename = state.rename;
         // Nothing draws these frames; egui panics if the font texture it
         // made is dropped without being uploaded or cleared.
         output.textures_delta.clear();
@@ -292,6 +351,18 @@ mod tests {
         assert_eq!(edit.as_deref(), Some("Rename"));
         assert_eq!(scene.name(id), Some("Hero"));
         assert!(rename.is_none());
+    }
+
+    #[test]
+    fn search_finds_names_anywhere_in_the_tree_ignoring_case() {
+        let mut scene = Scene::new();
+        let level = scene.spawn("Level");
+        let player = scene.spawn_child(level, "Player");
+        let enemy = scene.spawn("Enemy");
+        let gun = scene.spawn_child(enemy, "Enemy Gun");
+        assert_eq!(search(&scene, "PLAY"), [player]);
+        assert_eq!(search(&scene, " enemy "), [enemy, gun]);
+        assert!(search(&scene, "boss").is_empty());
     }
 
     #[test]

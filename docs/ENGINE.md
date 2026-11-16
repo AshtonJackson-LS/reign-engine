@@ -24,9 +24,9 @@ the fixed tick, that reads and writes components through simple queries.
 - **`ObjectId { index, generation }`**: a handle to an object. Despawning
   bumps the slot's generation, so an old handle never finds the object that
   reuses the slot.
-- **`GameObject`**: a name, an `active` flag, a `Transform`, a parent and
-  ordered children, and `dont_save` (made at runtime, never written to scene
-  files).
+- **`GameObject`**: a name, a `tag` (empty for none), an `active` flag, a
+  `Transform`, a parent and ordered children, and `dont_save` (made at
+  runtime, never written to scene files).
 - **`Transform`**: built into every object. A local `position: FxVec2`, a
   `z` draw order and `flip_x`/`flip_y`. World positions add up the parent
   chain (`Scene::world_position`). There is no rotation or scale.
@@ -67,6 +67,11 @@ commands.insert(bolt, Projectile { speed: Fx::from_px(3) });
 commands.despawn(old);
 scene.apply(&mut commands); // in order, at a deterministic point
 ```
+
+Scripts can also spawn a prefab straight into the scene with
+`ctx.spawn(path, at)`, which returns its id at once. `fixed_update` and
+`late_update` skip a Behaviour that hasn't had `start`, so an object made
+mid-tick is started in the Commands stage and updated from the next tick.
 
 Free slots are reused lowest index first, so objects spawned one after
 another get ascending ids, and iterate in the order they were made, even
@@ -115,6 +120,8 @@ impl. `#[derive(Reflect)]` does the same for nested structs and fieldless enums.
 | `#[reflect(read_only)]` | Shown, not editable. |
 | `#[reflect(range(min, max))]` | Editors clamp to this range. |
 | `#[reflect(tooltip = "...")]` | Hover text. A doc comment works too. |
+| `#[reflect(layer)]` | A collision layer (0-31): shown by its name from Project Settings. |
+| `#[reflect(layer_mask)]` | A `u32` of collision layers, one bit each: shown as named checkboxes. |
 | `#[serde(...)]` | Left to serde, for example `#[serde(skip)]` for runtime-only state. |
 
 Reflected field kinds: all integer types, `bool`, `Fx`, `FxVec2`, `Rgba8`,
@@ -182,8 +189,8 @@ they are assets like any other (kind `Scene`). `Scene::to_ron` writes one;
   among its siblings is its place in the list.
 - `id` is `(index, generation)`. Ids stored inside components (an `ObjectId`
   field) use the same form, so references survive a save and load.
-- Defaults are left out: `parent: None`, `active: true`, a default transform,
-  no components.
+- Defaults are left out: no `tag`, `parent: None`, `active: true`, a default
+  transform, no components.
 - **`Fx` values are exact decimal strings.** `"0.00390625"` is exactly 1/256.
   Every 24.8 value has a finite decimal expansion, so a save writes the exact
   value. Loading parses the decimal with integer arithmetic only, never
@@ -213,7 +220,7 @@ the scene:
   another object to reparent (keeping world position), drop on empty space
   for the top level. Right-click to create an empty child, duplicate or
   delete.
-- **Inspector**: name and active flag, Transform, then each component through
+- **Inspector**: name and active flag, tag, Transform, then each component through
   reflection. Right-click a component's header to Reset or Remove; Add
   Component lists the registry.
 - **Game view**, while not playing: click selects the topmost object under the
@@ -602,12 +609,12 @@ does the rest:
   root's components go on the object, the prefab's children are made under
   it (marked `dont_save`, since they come from the prefab), and
   `ObjectId` fields inside are remapped to the new objects. The instance's
-  name and transform stay its own.
+  name and transform stay its own; its tag comes from the prefab's root.
 - **Overrides.** An instance stores what it changes: property overrides
   `(object path, "Component.field.sub", value)`, added components (as RON)
   and removed ones. Property paths (`reign::scene::path`) walk reflection:
   `health.max`, list items `slots.1`, a list's length `slots.#len`, an
-  option's inside `attack.?`; `GameObject.name`, `.active` and
+  option's inside `attack.?`; `GameObject.name`, `.tag`, `.active` and
   `.transform...` cover the object itself. `prefab::overrides` works them
   out by comparing the instance with its prefab; `saved_form` writes each
   instance back as just its `PrefabInstance`, so a scene file follows its

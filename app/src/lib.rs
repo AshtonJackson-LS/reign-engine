@@ -28,13 +28,17 @@ mod audio;
 mod code;
 mod components;
 mod editor;
+mod exe_icon;
 mod export;
 mod font;
 pub mod headless;
+pub mod icon;
 mod input;
 pub mod physics;
 mod player;
+mod project_settings;
 mod runtime;
+mod settings;
 mod starter;
 mod tilemap_assets;
 mod view;
@@ -81,12 +85,15 @@ const USAGE: &str = "usage: reign-engine [PROJECT_DIR] [--scene FILE] [--play] [
        reign-engine [PROJECT_DIR] --check
        reign-engine [PROJECT_DIR] --describe
        reign-engine [PROJECT_DIR] --simulate TICKS [--scene ASSET_PATH] [--input SPEC] [--every TICKS] [--watch NAMES]
+       reign-engine [PROJECT_DIR] --new-scene ASSET_PATH
   --check     load every scene and prefab; print problems as JSON (exit 1 on errors)
   --describe  print components, fields, input actions, scenes and assets as JSON
   --simulate  play a scene for TICKS ticks (120 a second) with no window; print the objects as JSON
   --input     held actions: Name, Name@TICK or Name@FROM-TO, comma separated (Right,Jump@30-45)
   --every     also print the objects every that many ticks
-  --watch     only these objects, by name, comma separated";
+  --watch     only these objects, by name, comma separated
+  --new-scene make a scene with a Main Camera, like Scene > New Scene (scenes/level2.scene.ron;
+              a bare name goes in scenes/)";
 
 fn default_project() -> PathBuf {
     reign_build::ide::home().join("ReignProjects").join("Default")
@@ -131,6 +138,15 @@ pub fn run(scripts: Scripts) {
                 exit_after = Some(Duration::from_secs_f64(secs));
             }
             "--check" => headless = Some(Headless::Check),
+            "--new-scene" => {
+                let Some(path) = args.next() else {
+                    eprintln!(
+                        "--new-scene needs a scene path, like scenes/level2.scene.ron\n{USAGE}"
+                    );
+                    std::process::exit(2);
+                };
+                headless = Some(Headless::NewScene(PathBuf::from(path)));
+            }
             "--describe" => headless = Some(Headless::Describe),
             "--simulate" => {
                 let Some(ticks) = args.next().and_then(|s| s.parse::<u64>().ok()) else {
@@ -218,6 +234,9 @@ pub fn run(scripts: Scripts) {
         let command = match command {
             Headless::Check => headless::Command::Check,
             Headless::Describe => headless::Command::Describe,
+            Headless::NewScene(path) => {
+                headless::Command::NewScene { path: asset_path(&project, &path) }
+            }
             Headless::Simulate(ticks) => headless::Command::Simulate {
                 ticks,
                 // An asset path (scenes/x.scene.ron), or a file under assets/.
@@ -227,7 +246,7 @@ pub fn run(scripts: Scripts) {
                 watch: sim_watch,
             },
         };
-        std::process::exit(headless::run(command, db, &scripts, &project.title()));
+        std::process::exit(headless::run(command, db, &scripts, &project.root));
     }
 
     match AssetDb::loose(project.assets()) {
@@ -242,7 +261,8 @@ pub fn run(scripts: Scripts) {
 
     let mut config = EditorConfig::default();
     config.app = AppConfig {
-        title: format!("{} - Reign Engine", project.title()),
+        title: project_settings::editor_title(&project.title()),
+        icon: Some(icon::window_icon(&icon::project_icon(&project.root))),
         exit_after,
         ..config.app
     };
@@ -255,6 +275,7 @@ enum Headless {
     Check,
     Describe,
     Simulate(u64),
+    NewScene(PathBuf),
 }
 
 /// `--scene` as an asset path: a file under the project's `assets/` loses

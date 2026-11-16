@@ -4,6 +4,8 @@
 //!
 //! What the buttons mean is up to the game; [`Pads::any_pressed`] and
 //! [`Pads::direction`] are enough to map them onto its own bindings.
+//! [`PadFrame::heard`] is for the other direction: "press the button to
+//! bind", which hears every pad even while they're turned off for the game.
 
 use gilrs::{Axis, Button, EventType, Gilrs};
 
@@ -20,6 +22,17 @@ pub struct Pads {
     repeat_in: f32,
     /// Off while a host has given input to something else.
     enabled: bool,
+    /// The left stick's direction last poll, on its own, for
+    /// [`PadFrame::heard`].
+    stick_dir: (i32, i32),
+}
+
+/// One thing a pad can do that a binding names: a button, or the left stick
+/// pushed one way (-1, 0 or 1 on each axis; y is down).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadInput {
+    Button(Button),
+    Stick(i32, i32),
 }
 
 /// What the pads did since the last poll.
@@ -32,6 +45,10 @@ pub struct PadFrame {
     pub nav: Vec<(i32, i32)>,
     /// Anything at all happened, for showing pad prompts.
     pub active: bool,
+    /// Every button pressed (d-pad included) and every push of the left
+    /// stick past [`DEADZONE`], in order, even while the pads are turned
+    /// off: for listening for an input to bind.
+    pub heard: Vec<PadInput>,
 }
 
 impl Pads {
@@ -50,7 +67,7 @@ impl Pads {
                 None
             }
         };
-        Pads { gilrs, held_dir: (0, 0), repeat_in: 0.0, enabled: true }
+        Pads { gilrs, held_dir: (0, 0), repeat_in: 0.0, enabled: true, stick_dir: (0, 0) }
     }
 
     /// Turns the pads off or on for the app. While off, polls still drain
@@ -72,6 +89,7 @@ impl Pads {
         while let Some(event) = gilrs.next_event() {
             match event.event {
                 EventType::ButtonPressed(button, _) => {
+                    frame.heard.push(PadInput::Button(button));
                     frame.active = true;
                     if !is_dpad(button) {
                         frame.pressed.push(button);
@@ -85,9 +103,12 @@ impl Pads {
                 _ => {}
             }
         }
+        let stick = stick_direction(gilrs);
+        frame.heard.extend(stick_pushes(self.stick_dir, stick));
+        self.stick_dir = stick;
         if !self.enabled {
             self.held_dir = (0, 0);
-            return PadFrame::default();
+            return PadFrame { heard: frame.heard, ..PadFrame::default() };
         }
         let dir = self.direction();
         if dir != (0, 0) {
@@ -146,6 +167,46 @@ impl Default for Pads {
     }
 }
 
+/// The direction any pad's left stick leans, d-pad left out.
+fn stick_direction(gilrs: &Gilrs) -> (i32, i32) {
+    let (mut x, mut y) = (0, 0);
+    for (_, pad) in gilrs.gamepads() {
+        let sx = pad.value(Axis::LeftStickX);
+        let sy = pad.value(Axis::LeftStickY);
+        if sx.abs() > DEADZONE {
+            x = if sx < 0.0 { -1 } else { 1 };
+        }
+        if sy.abs() > DEADZONE {
+            // gilrs's y is up.
+            y = if sy > 0.0 { -1 } else { 1 };
+        }
+    }
+    (x, y)
+}
+
+/// The stick directions newly pushed going from `was` to `now`, one axis
+/// at a time.
+fn stick_pushes(was: (i32, i32), now: (i32, i32)) -> impl Iterator<Item = PadInput> {
+    let x = (now.0 != 0 && now.0 != was.0).then_some(PadInput::Stick(now.0, 0));
+    let y = (now.1 != 0 && now.1 != was.1).then_some(PadInput::Stick(0, now.1));
+    x.into_iter().chain(y)
+}
+
 fn is_dpad(b: Button) -> bool {
     matches!(b, Button::DPadUp | Button::DPadDown | Button::DPadLeft | Button::DPadRight)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stick_push_is_heard_once_per_direction() {
+        let pushes = |was, now| stick_pushes(was, now).collect::<Vec<_>>();
+        assert_eq!(pushes((0, 0), (1, 0)), [PadInput::Stick(1, 0)]);
+        assert!(pushes((1, 0), (1, 0)).is_empty(), "held is not pushed again");
+        assert_eq!(pushes((1, 0), (-1, 0)), [PadInput::Stick(-1, 0)]);
+        assert_eq!(pushes((0, 0), (1, -1)), [PadInput::Stick(1, 0), PadInput::Stick(0, -1)]);
+        assert!(pushes((1, 1), (0, 0)).is_empty(), "letting go is not a push");
+    }
 }

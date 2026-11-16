@@ -7,6 +7,10 @@
 //! - `#[reflect(read_only)]`: shown but not editable.
 //! - `#[reflect(range(min, max))]`: editors clamp to this range.
 //! - `#[reflect(tooltip = "...")]`: hover text; a doc comment works too.
+//! - `#[reflect(layer)]` on an integer: a collision layer (0-31), shown by
+//!   its name from Project Settings.
+//! - `#[reflect(layer_mask)]` on a `u32`: a set of collision layers, one bit
+//!   each, shown as named checkboxes.
 //!
 //! `Component` also takes `#[component(name = "...")]` (the stable name in
 //! scene files; the type's name by default) and
@@ -69,6 +73,8 @@ struct FieldAttrs {
     read_only: bool,
     range: Option<(Expr, Expr)>,
     tooltip: Option<String>,
+    /// `layer` or `layer_mask`: the `FieldHint` variant's name.
+    hint: Option<&'static str>,
 }
 
 fn field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttrs> {
@@ -93,6 +99,10 @@ fn field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttrs> {
                 out.read_only = true;
             } else if meta.path.is_ident("tooltip") {
                 out.tooltip = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("layer") {
+                out.hint = Some("Layer");
+            } else if meta.path.is_ident("layer_mask") {
+                out.hint = Some("LayerMask");
             } else if meta.path.is_ident("range") {
                 let content;
                 syn::parenthesized!(content in meta.input);
@@ -101,7 +111,9 @@ fn field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttrs> {
                     .map_err(|_| meta.error("range takes two bounds: range(min, max)"))?;
                 out.range = Some((min, max));
             } else {
-                return Err(meta.error("expected skip, read_only, range(min, max) or tooltip"));
+                return Err(meta.error(
+                    "expected skip, read_only, range(min, max), tooltip, layer or layer_mask",
+                ));
             }
             Ok(())
         })?;
@@ -146,6 +158,7 @@ fn reflect(input: &DeriveInput) -> syn::Result<Tokens> {
                     Some(t) => quote!(Some(#t)),
                     None => quote!(None),
                 };
+                let hint = format_ident!("{}", attrs.hint.unwrap_or("None"));
                 infos.push(quote! {
                     #krate::FieldInfo {
                         name: #field_name,
@@ -153,6 +166,7 @@ fn reflect(input: &DeriveInput) -> syn::Result<Tokens> {
                         read_only: #read_only,
                         range: #range,
                         tooltip: #tooltip,
+                        hint: #krate::FieldHint::#hint,
                     }
                 });
                 arms.push(quote!(#index => Some(&mut self.#ident),));

@@ -31,12 +31,36 @@ pub struct FieldInfo {
     pub range: Option<(f64, f64)>,
     /// `#[reflect(tooltip = "...")]`, or the field's doc comment.
     pub tooltip: Option<&'static str>,
+    /// What an integer field means, so editors can show it better than a
+    /// number (`#[reflect(layer)]`, `#[reflect(layer_mask)]`).
+    pub hint: FieldHint,
 }
 
 impl FieldInfo {
     pub const fn new(name: &'static str, type_name: &'static str) -> Self {
-        FieldInfo { name, type_name, read_only: false, range: None, tooltip: None }
+        FieldInfo {
+            name,
+            type_name,
+            read_only: false,
+            range: None,
+            tooltip: None,
+            hint: FieldHint::None,
+        }
     }
+}
+
+/// What an integer field means, for editors. The value is stored as the
+/// plain number either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FieldHint {
+    /// Just a number.
+    #[default]
+    None,
+    /// A collision layer, 0 to 31: shown by the layer's name.
+    Layer,
+    /// A set of collision layers, one bit each (bit 0 is layer 0): shown as
+    /// the layers' names, each one ticked or not.
+    LayerMask,
 }
 
 /// A value the editor can inspect and change.

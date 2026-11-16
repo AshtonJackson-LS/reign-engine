@@ -9,12 +9,15 @@
 //!                      [--every TICKS] [--watch NAMES]
 //! ```
 //!
-//! - `--check` loads every scene and prefab as the game would and lists what's
-//!   wrong. Exit code 1 if there are errors.
+//! - `--check` loads every scene and prefab as the game would, checks
+//!   Project Settings, and lists what's wrong. Exit code 1 if there are
+//!   errors.
 //! - `--describe` lists what the project is made of: components with their
-//!   fields, defaults and ranges, Behaviours, input actions, scenes, assets.
-//! - `--simulate` plays a scene for a number of ticks (120 a second) with
-//!   scripted input, and prints where every object ended up.
+//!   fields, defaults and ranges, Behaviours, input actions, scenes, assets
+//!   and Project Settings.
+//! - `--simulate` plays a scene (the start scene unless `--scene` names
+//!   another) for a number of ticks (120 a second) with scripted input, and
+//!   prints where every object ended up.
 //!
 //! Run them with the project's own editor (`cargo run --bin <crate>-editor
 //! -- . --check`) so its components are known; `reign-engine` only knows the
@@ -23,15 +26,17 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 use reign::assets::{AssetDb, AssetKind, Handle, PrefabInstance, Prefabs, SceneAsset, prefab};
 use reign::behaviour::Game;
 use reign::core::{Button, InputFrame};
-use reign::scene::{ComponentRegistry, Mut, ObjectId, Reflect, Scene};
+use reign::scene::{ComponentRegistry, FieldHint, Mut, ObjectId, Reflect, Scene};
 
 use crate::input::{INPUT_FILE, InputMap};
 use crate::player;
 use crate::runtime::{self, Event, Scripts, TICKS_PER_SECOND, World, schedule};
+use crate::settings::Settings;
 
 /// A JSON value, written by hand: the engine has no JSON dependency.
 #[derive(Clone, Debug, PartialEq)]
@@ -221,6 +226,11 @@ fn describe_component(registry: &ComponentRegistry, name: &'static str) -> Json 
                 let number = |v: f64| Json::Number(format!("{v}"));
                 entry.push(("range", Json::List(vec![number(min), number(max)])));
             }
+            match info.hint {
+                FieldHint::Layer => entry.push(("hint", Json::str("layer"))),
+                FieldHint::LayerMask => entry.push(("hint", Json::str("layer_mask"))),
+                FieldHint::None => {}
+            }
             if let Some(tip) = info.tooltip {
                 entry.push(("doc", Json::str(tip.trim())));
             }
@@ -231,7 +241,7 @@ fn describe_component(registry: &ComponentRegistry, name: &'static str) -> Json 
 }
 
 /// `--describe`: what the project is made of.
-pub fn describe(db: &AssetDb, scripts: &Scripts, title: &str) -> Json {
+pub fn describe(db: &AssetDb, scripts: &Scripts, title: &str, settings: &Settings) -> Json {
     let registry = player::registry(scripts);
     let behaviours = player::behaviours(scripts);
     let components = registry.names().map(|n| describe_component(&registry, n)).collect();
@@ -244,6 +254,7 @@ pub fn describe(db: &AssetDb, scripts: &Scripts, title: &str) -> Json {
             Json::Map(vec![
                 ("name", Json::str(a.name.as_str())),
                 ("keys", names(&a.keys)),
+                ("mouse", names(&a.mouse)),
                 ("pad", names(&a.pad)),
             ])
         })
@@ -268,8 +279,125 @@ pub fn describe(db: &AssetDb, scripts: &Scripts, title: &str) -> Json {
         ("behaviours", Json::List(behaviours.names().into_iter().map(Json::str).collect())),
         ("input_actions", Json::List(actions)),
         ("scenes", Json::List(player::scene_paths(db).into_iter().map(Json::str).collect())),
+        ("tags", Json::List(tags_in(db, &registry).into_iter().map(Json::str).collect())),
         ("assets", Json::List(assets)),
+        ("settings", settings_json(settings)),
     ])
+}
+
+/// Every tag the project's scenes and prefabs use, sorted.
+fn tags_in(db: &AssetDb, registry: &ComponentRegistry) -> Vec<String> {
+    let all: std::collections::BTreeSet<String> =
+        tags_by_file(db, registry).into_iter().flat_map(|(_, tags)| tags).collect();
+    all.into_iter().collect()
+}
+
+/// The tags each scene and prefab uses, by asset path. Files that don't
+/// load are skipped (`--check` reports them).
+fn tags_by_file(
+    db: &AssetDb,
+    registry: &ComponentRegistry,
+) -> Vec<(String, std::collections::BTreeSet<String>)> {
+    let prefabs = Prefabs::new(registry.clone());
+    let mut out = Vec::new();
+    for asset in db.assets() {
+        let mut scene = Scene::new();
+        match asset.kind {
+            AssetKind::Scene => match player::load_scene(db, registry, &asset.path) {
+                Ok(loaded) => scene = loaded,
+                Err(_) => continue,
+            },
+            AssetKind::Prefab => {
+                let id = scene.spawn("probe");
+                scene.insert(id, PrefabInstance::new(Handle::new(asset.guid)));
+                prefab::expand_all(&mut scene, &prefabs.with(db));
+            }
+            _ => continue,
+        }
+        let tags: std::collections::BTreeSet<String> = scene
+            .walk()
+            .into_iter()
+            .filter_map(|id| scene.object(id).map(|o| o.tag.clone()))
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !tags.is_empty() {
+            out.push((asset.path, tags));
+        }
+    }
+    out
+}
+
+/// Warns about tags objects use that aren't in the project's list: often
+/// a typo, which would make `ctx.find_with_tag` find nothing.
+pub fn check_tags(settings: &Settings, db: &AssetDb, scripts: &Scripts, report: &mut Report) {
+    let known = settings.tag_names();
+    for (path, tags) in tags_by_file(db, &player::registry(scripts)) {
+        for tag in tags.iter().filter(|t| !known.contains(t)) {
+            let message = format!(
+                "tag {tag:?} isn't in the project's tags ({}): a typo, or add it in \
+                 Project Settings",
+                crate::settings::FILE
+            );
+            report.warnings.push(Problem::new(&path, message));
+        }
+    }
+}
+
+/// Project Settings, as `--describe` prints them (the file is
+/// `ProjectSettings.ron`; the name is `project` above).
+fn settings_json(settings: &Settings) -> Json {
+    Json::Map(vec![
+        ("file", Json::str(crate::settings::FILE)),
+        ("start_scene", Json::str(settings.start_scene.as_str())),
+        (
+            "window",
+            Json::Map(vec![
+                ("width", Json::Int(settings.window.width.into())),
+                ("height", Json::Int(settings.window.height.into())),
+                ("fullscreen", Json::Bool(settings.window.fullscreen)),
+            ]),
+        ),
+        ("version", Json::str(settings.version.as_str())),
+        ("author", Json::str(settings.author.as_str())),
+        (
+            "background",
+            Json::List(settings.background.iter().map(|&c| Json::Int(c.into())).collect()),
+        ),
+        (
+            "layers",
+            Json::List(
+                settings
+                    .layers
+                    .iter()
+                    .map(|(&layer, name)| {
+                        Json::Map(vec![
+                            ("layer", Json::Int(layer.into())),
+                            ("name", Json::str(name.trim())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("tags", Json::List(settings.tag_names().into_iter().map(Json::str).collect())),
+    ])
+}
+
+/// What `--check` says about Project Settings: a file that can't be read or
+/// has values that can't be used, and a start scene that isn't there.
+pub fn check_settings(settings: Result<Settings, String>, db: &AssetDb, report: &mut Report) {
+    let file = crate::settings::FILE;
+    let settings = match settings {
+        Ok(s) => s,
+        Err(e) => return report.errors.push(Problem::new(file, e)),
+    };
+    for problem in settings.problems() {
+        report.errors.push(Problem::new(file, problem));
+    }
+    let start = &settings.start_scene;
+    if !start.is_empty() && !player::scene_paths(db).contains(start) {
+        let message = format!("the start scene {start:?} isn't a scene in the project");
+        report.errors.push(Problem::new(file, message));
+    }
 }
 
 /// The project's `input.ron`: `None` if it has none, an error if it's wrong.
@@ -328,7 +456,7 @@ pub fn check(db: &AssetDb, scripts: &Scripts) -> Report {
     match input_map(db) {
         Ok(map) => {
             for name in map.unknown_bindings() {
-                let message = format!("unknown key or gamepad button {name:?}");
+                let message = format!("unknown key, mouse or gamepad button {name:?}");
                 report.warnings.push(Problem::new(INPUT_FILE, message));
             }
         }
@@ -448,7 +576,7 @@ fn snapshot(world: &mut World, watch: &[String]) -> Json {
         if !watch.is_empty() && !watch.contains(&object.name) {
             continue;
         }
-        let (name, active) = (object.name.clone(), object.active);
+        let (name, tag, active) = (object.name.clone(), object.tag.clone(), object.active);
         let at = world.scene.world_position(id);
         let mut components = Vec::new();
         for component in world.scene.component_names(id) {
@@ -462,6 +590,9 @@ fn snapshot(world: &mut World, watch: &[String]) -> Json {
             ("x", Json::Number(at.x.to_string())),
             ("y", Json::Number(at.y.to_string())),
         ];
+        if !tag.is_empty() {
+            entry.push(("tag", Json::str(tag)));
+        }
         if !active {
             entry.push(("active", Json::Bool(false)));
         }
@@ -539,6 +670,11 @@ pub fn simulate(
 pub enum Command {
     Check,
     Describe,
+    /// Make a scene with a Main Camera at an asset path (a bare name goes
+    /// in `scenes/`).
+    NewScene {
+        path: String,
+    },
     Simulate {
         ticks: u64,
         scene: Option<String>,
@@ -548,19 +684,48 @@ pub enum Command {
     },
 }
 
-/// Runs a command on the project's assets and prints its JSON. Returns the
+/// Makes a scene with a Main Camera, as Scene > New Scene does. Returns its
+/// asset path.
+fn new_scene(db: &AssetDb, path: &str) -> Result<String, String> {
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("scenes", path));
+    let path = reign::editor::new_scene_path(folder, name)?;
+    let text = crate::editor::new_scene_text()?;
+    db.create(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Runs a command on the project at `root` and prints its JSON. Returns the
 /// process's exit code.
-pub fn run(command: Command, db: &'static AssetDb, scripts: &Scripts, title: &str) -> i32 {
+pub fn run(command: Command, db: &'static AssetDb, scripts: &Scripts, root: &Path) -> i32 {
+    let title = crate::editor::Project { root: root.to_owned() }.title();
+    let title = title.as_str();
     match command {
         Command::Check => {
-            let report = check(db, scripts);
+            let mut report = check(db, scripts);
+            let settings = Settings::load(root);
+            if let Ok(settings) = &settings {
+                check_tags(settings, db, scripts, &mut report);
+            }
+            check_settings(settings, db, &mut report);
             println!("{}", report.json().pretty());
             if report.errors.is_empty() { 0 } else { 1 }
         }
         Command::Describe => {
-            println!("{}", describe(db, scripts, title).pretty());
+            println!("{}", describe(db, scripts, title, &Settings::read(root)).pretty());
             0
         }
+        Command::NewScene { path } => match new_scene(db, &path) {
+            Ok(created) => {
+                let ok = Json::Map(vec![("ok", Json::Bool(true)), ("created", Json::Str(created))]);
+                println!("{}", ok.pretty());
+                0
+            }
+            Err(e) => {
+                let error = Json::Map(vec![("ok", Json::Bool(false)), ("error", Json::Str(e))]);
+                println!("{}", error.pretty());
+                1
+            }
+        },
         Command::Simulate { ticks, scene, input, every, watch } => {
             let fail = |message: String| {
                 let error =
@@ -576,8 +741,10 @@ pub fn run(command: Command, db: &'static AssetDb, scripts: &Scripts, title: &st
                 Ok(h) => h,
                 Err(e) => return fail(e),
             };
-            let Some(path) = player::choose_scene(&player::scene_paths(db), scene.as_deref())
-            else {
+            // No --scene: the start scene from Project Settings.
+            let start = Settings::read(root).start_scene;
+            let wanted = scene.as_deref().or(Some(start.as_str()));
+            let Some(path) = player::choose_scene(&player::scene_paths(db), wanted) else {
                 return fail("the project has no scenes".into());
             };
             if let Some(wanted) = scene.filter(|w| *w != path) {
@@ -622,6 +789,41 @@ mod tests {
         std::fs::write(project.scenes().join("main.scene.ron"), scene).unwrap();
         let db = AssetDb::loose(project.assets()).expect("assets load");
         (project, db)
+    }
+
+    #[test]
+    fn new_scenes_have_a_camera_and_never_overwrite() {
+        let (_project, db) = temp_project("new-scene", SCENE);
+        assert_eq!(new_scene(&db, "Level 2"), Ok("scenes/Level 2.scene.ron".into()));
+        assert_eq!(new_scene(&db, "levels/boss.scene.ron"), Ok("levels/boss.scene.ron".into()));
+        assert!(new_scene(&db, "Level 2").unwrap_err().contains("already exists"));
+        assert!(new_scene(&db, "scenes/a?b").is_err());
+        let registry = player::registry(&Scripts::none());
+        let scene = player::load_scene(&db, &registry, "levels/boss.scene.ron").unwrap();
+        let camera = scene.walk()[0];
+        assert_eq!(scene.name(camera), Some("Main Camera"));
+        assert!(scene.get::<crate::Camera>(camera).is_some());
+    }
+
+    #[test]
+    fn check_warns_about_tags_the_project_doesnt_list() {
+        let scene = r#"(version: 1, objects: [
+            (id: (0, 0), name: "Main Camera", components: {"Camera": ()}),
+            (id: (1, 0), name: "Hero", tag: "Player"),
+            (id: (2, 0), name: "Bat", tag: "Enemmy"),
+        ])"#;
+        let (_project, db) = temp_project("tags", scene);
+        let mut report = Report::default();
+        check_tags(&Settings::default(), &db, &Scripts::none(), &mut report);
+        assert!(report.errors.is_empty());
+        let warnings: Vec<_> = report.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("tag \"Enemmy\" isn't in the project's tags"));
+        assert_eq!(report.warnings[0].file, "scenes/main.scene.ron");
+
+        let out = describe(&db, &Scripts::none(), "Test", &Settings::default()).pretty();
+        assert!(out.contains(r#""tags": ["Enemmy", "Player"]"#), "used: {out}");
+        assert!(out.contains(r#""tags": ["Player", "Enemy"]"#), "listed: {out}");
     }
 
     #[test]
@@ -696,7 +898,7 @@ mod tests {
     #[test]
     fn describe_lists_fields_with_defaults_and_hints() {
         let (project, db) = temp_project("describe", SCENE);
-        let out = describe(&db, &Scripts::none(), "Test").pretty();
+        let out = describe(&db, &Scripts::none(), "Test", &Settings::default()).pretty();
         for expected in [
             "\"name\": \"Rigidbody\"",
             "\"variants\": [\"Dynamic\", \"Kinematic\", \"Static\"]",

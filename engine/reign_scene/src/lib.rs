@@ -32,7 +32,7 @@ mod scene;
 pub use component::{Bounds, Component};
 pub use file::SceneError;
 pub use object::{GameObject, ObjectId, Transform};
-pub use reflect::{FieldInfo, Mut, Reflect, Rgba8};
+pub use reflect::{FieldHint, FieldInfo, Mut, Reflect, Rgba8};
 pub use registry::{ComponentInfo, ComponentRegistry};
 /// `#[derive(Component)]` and `#[derive(Reflect)]`.
 pub use reign_derive::{Component, Reflect};

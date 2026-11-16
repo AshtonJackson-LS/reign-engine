@@ -716,6 +716,10 @@ fn build_bin(root: &Path, bin: &str, release: bool, features: &[String]) -> Comm
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("CARGO_PKG_NAME");
+    // Cargo's progress line, which `progress::read_output` reads.
+    for (name, value) in crate::progress::ENV {
+        c.env(name, value);
+    }
     c
 }
 
@@ -1273,6 +1277,16 @@ mod tests {
         assert!(editor.windows(2).any(|w| w == ["--features", "editor,debug-ui"]), "{editor:?}");
         let game = args(&game_build_command(&root, "g"));
         assert!(!game.contains(&"--features".to_owned()), "{game:?}");
+        // Both ask cargo for its progress line.
+        for command in [build_command(&root, "g"), game_build_command(&root, "g")] {
+            let envs: Vec<_> = command.get_envs().collect();
+            for (name, value) in crate::progress::ENV {
+                assert!(
+                    envs.iter().any(|(n, v)| *n == name && v.is_some_and(|v| v == value)),
+                    "{name} not set: {envs:?}"
+                );
+            }
+        }
 
         // Written over several lines, with comments, under a commented header.
         std::fs::write(

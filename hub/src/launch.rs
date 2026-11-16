@@ -15,6 +15,38 @@ use std::time::{Duration, Instant};
 /// How many of an editor's last stderr lines are kept.
 const TAIL: usize = 40;
 
+/// Makes `command`'s process the leader of its own group, so everything it
+/// starts can be stopped together with [`kill_tree`] (Unix; Windows finds a
+/// process's children itself).
+pub fn own_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Stops process `pid` and everything it started. Stopping only `cargo`
+/// would leave its compilers running, still holding the build folder.
+pub fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = reign_setup::system_tool("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        c
+    };
+    #[cfg(unix)]
+    let mut command = {
+        // A negative id is a whole process group (see own_process_group).
+        let mut c = Command::new("kill");
+        c.args(["-s", "KILL", "--", &format!("-{pid}")]);
+        c
+    };
+    let _ = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+}
+
 /// An editor the hub started.
 pub struct Launched {
     child: Child,
@@ -174,6 +206,57 @@ fn shorten(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process that starts a long-running child of its own, with its
+    /// output piped: the pipe only ends when both are gone.
+    fn parent_with_a_child() -> Command {
+        #[cfg(windows)]
+        let mut c = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "ping -n 40 127.0.0.1"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut c = {
+            let mut c = Command::new("sh");
+            c.args(["-c", "sleep 40; echo done"]);
+            c
+        };
+        own_process_group(&mut c);
+        c
+    }
+
+    #[test]
+    fn kill_tree_stops_the_children_too() {
+        let mut command = parent_with_a_child();
+        let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        kill_tree(child.id());
+        // The pipe closes only when the parent and its child have both gone;
+        // killing just the parent would leave this reading for 40 seconds.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stdout, &mut sink);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(10)).expect("the child process was left running");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!child.wait().unwrap().success(), "the parent was killed, not finished");
+    }
+
+    #[test]
+    fn killing_a_process_that_has_already_gone_is_harmless() {
+        let mut child = Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args(if cfg!(windows) { ["/C", "exit 0"] } else { ["-c", "exit 0"] })
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        kill_tree(pid);
+    }
 
     fn exit(success: bool, code: Option<i32>, secs: u64, tail: &[&str]) -> Exit {
         Exit {
