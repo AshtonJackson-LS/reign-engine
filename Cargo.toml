@@ -6,6 +6,7 @@ members = [
     "engine/reign_physics",
     "engine/reign_combat",
     "engine/reign_render",
+    "engine/reign_particles",
     "engine/reign_net",
     "engine/reign_assets",
     "engine/reign_app",
@@ -35,6 +36,7 @@ reign_audio = { path = "engine/reign_audio" }
 reign_physics = { path = "engine/reign_physics" }
 reign_combat = { path = "engine/reign_combat" }
 reign_render = { path = "engine/reign_render" }
+reign_particles = { path = "engine/reign_particles" }
 reign_net = { path = "engine/reign_net" }
 reign_assets = { path = "engine/reign_assets" }
 reign_app = { path = "engine/reign_app" }

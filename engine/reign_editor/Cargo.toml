@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 reign_core.workspace = true
 reign_render = { workspace = true, features = ["hooks"] }
+reign_particles.workspace = true
 reign_app.workspace = true
 reign_scene.workspace = true
 reign_assets = { workspace = true, features = ["watch"] }

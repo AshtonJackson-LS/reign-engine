@@ -58,6 +58,7 @@ pub enum Importer {
     Scene,
     Prefab,
     MoveSet,
+    ParticleEffect,
     /// Anything else: kept and packed as plain bytes.
     Data,
 }
@@ -88,6 +89,8 @@ impl Importer {
             Importer::Prefab
         } else if ends(".moves.ron") {
             Importer::MoveSet
+        } else if ends(".particles.ron") {
+            Importer::ParticleEffect
         } else {
             Importer::Data
         }
@@ -106,6 +109,7 @@ impl Importer {
             Importer::Scene => AssetKind::Scene,
             Importer::Prefab => AssetKind::Prefab,
             Importer::MoveSet => AssetKind::MoveSet,
+            Importer::ParticleEffect => AssetKind::ParticleEffect,
             Importer::Data => AssetKind::Data,
         }
     }
@@ -152,6 +156,7 @@ mod tests {
             "x.tilemap.ron",
             "ui/font.font.ron",
             "scenes/a.scene.ron",
+            "fx/blood.particles.ron",
             "notes.json",
         ] {
             let meta = Meta::new_for(path);
@@ -161,6 +166,7 @@ mod tests {
         assert_eq!(Importer::for_path("audio/music/boss.wav").kind(), AssetKind::Music);
         assert_eq!(Importer::for_path("audio/hit.wav").kind(), AssetKind::AudioClip);
         assert_eq!(Importer::for_path("a/HERO.PNG").kind(), AssetKind::Texture);
+        assert_eq!(Importer::for_path("fx/blood.particles.ron").kind(), AssetKind::ParticleEffect);
         let text =
             Meta { guid: Guid(5), importer: Importer::Texture(TextureSettings { density: 2 }) }
                 .to_ron();

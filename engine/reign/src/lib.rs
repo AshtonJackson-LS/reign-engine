@@ -11,6 +11,7 @@
 //! | [`physics`] | `reign_physics` | Collision tiles, bodies and pixel-stepped movement. |
 //! | [`combat`] | `reign_combat` | Frame data, hitboxes, hitstop and screen shake. |
 //! | [`render`] | `reign_render` | The wgpu renderer and its post-effect chain. |
+//! | [`particles`] | `reign_particles` | Particle systems: plays and draws particle effect assets. |
 //! | [`audio`] | `reign_audio` | PCM playback, spatial mixing and buses. |
 //! | [`net`] | `reign_net` | Rollback netcode over the deterministic simulation. |
 //! | [`assets`] | `reign_assets` | Asset decoding (PNG). |
@@ -28,6 +29,7 @@ pub use reign_core as core;
 #[cfg(feature = "editor")]
 pub use reign_editor as editor;
 pub use reign_net as net;
+pub use reign_particles as particles;
 pub use reign_physics as physics;
 pub use reign_render as render;
 pub use reign_scene as scene;

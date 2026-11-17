@@ -277,6 +277,7 @@ Every asset file has a sidecar next to it: `hero.png` has `hero.png.meta`.
   | `*.scene.ron` | `Scene` | `SceneAsset` | |
   | `*.prefab.ron` | `Prefab` | `Prefab` | |
   | `*.moves.ron` | `MoveSet` | `MoveSet` | |
+  | `*.particles.ron` | `ParticleEffect` | `ParticleEffect` | |
   | anything else | `Data` | `DataAsset` (bytes) | |
 
 - A copy of a file with its `.meta` would share a GUID; the database gives
@@ -650,6 +651,39 @@ In the editor:
   prefab is saved or hot reloaded, keeping their overrides (kept up to date
   on every edit). Objects a game instantiates at runtime pick up prefab
   changes the next time the game instantiates them.
+
+## Particle effects
+
+`reign::assets::ParticleEffect` is a particle effect as data, saved as a
+`*.particles.ron` asset (kind `ParticleEffect`, presentation only), and
+`reign::particles` plays it. The file is the modules of Unity's Particle
+System; every field has a default, so a file holds only what it changes:
+
+```ron
+(
+    main: (looping: false, duration: 0.2, lifetime: (0.4, 0.9),
+           speed: (60.0, 180.0), size: (1.0, 2.0),
+           color: ((180, 20, 24, 255), (110, 8, 12, 255))),
+    emission: (rate: 0.0, bursts: [(time: 0.0, count: (30, 45))]),
+    shape: (kind: Cone, angle: -60.0, spread: 50.0),
+    forces: (gravity: 420.0, drag: 0.3),
+    collision: (enabled: true, mode: Stick),
+    sub_emitters: [(trigger: Collision, effect: "<splat GUID>")],
+    render: (mode: Streak),
+)
+```
+
+Units are world pixels, seconds and degrees (0 right, 90 down). A
+[`ParticleWorld`] holds what's playing: `play(effects, handle, spawn)`
+starts an effect at a `Spawn` (position, a turn, `flip_x`, scale, where the
+floor is, an inherited velocity and tint, a seed), `move_to` and `stop`
+control it, and `step(dt, effects, ground)` runs it in real time, splitting
+long frames so fast particles still land. `effects` finds sub-emitters'
+effects (an `AssetDb` does) and `ground` says where the level is solid.
+Effects played by handle follow their file as it hot reloads. `quads()` and
+`lights()` are what to draw, for any renderer; `ParticleRenderer` draws
+them with the game's. Particles use their own random numbers and never feed
+back into the simulation, so they can't change a replay or an online game.
 
 ## Combat data
 

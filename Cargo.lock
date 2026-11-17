@@ -3467,6 +3467,7 @@ dependencies = [
  "reign_core",
  "reign_editor",
  "reign_net",
+ "reign_particles",
  "reign_physics",
  "reign_render",
  "reign_scene",
@@ -3564,6 +3565,7 @@ dependencies = [
  "reign_assets",
  "reign_combat",
  "reign_core",
+ "reign_particles",
  "reign_render",
  "reign_scene",
  "serde",
@@ -3608,6 +3610,15 @@ version = "0.2.0"
 dependencies = [
  "ggrs",
  "reign_core",
+]
+
+[[package]]
+name = "reign_particles"
+version = "0.2.0"
+dependencies = [
+ "log",
+ "reign_assets",
+ "reign_render",
 ]
 
 [[package]]

@@ -69,7 +69,7 @@ impl EngineSource {
 /// where each lives there. A new project uses the first three; a hand-made
 /// one (like Exreign) may name any of them. Kept in step with the
 /// workspace's members by a test.
-const ENGINE_CRATES: [(&str, &str); 15] = [
+const ENGINE_CRATES: [(&str, &str); 16] = [
     ("reign_engine", "app"),
     ("reign", "engine/reign"),
     ("reign_build", "engine/reign_build"),
@@ -82,6 +82,7 @@ const ENGINE_CRATES: [(&str, &str); 15] = [
     ("reign_derive", "engine/reign_derive"),
     ("reign_editor", "engine/reign_editor"),
     ("reign_net", "engine/reign_net"),
+    ("reign_particles", "engine/reign_particles"),
     ("reign_physics", "engine/reign_physics"),
     ("reign_render", "engine/reign_render"),
     ("reign_scene", "engine/reign_scene"),
