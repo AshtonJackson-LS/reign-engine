@@ -1,5 +1,5 @@
-//! Drawing a scene: sprites, images and tilemaps back to front, from the
-//! first camera. The editor's Play and edit views and the exported game all draw
+//! Drawing a scene: sprites, images and tilemaps back to front, then
+//! particle effects over them, from the first camera. The editor's Play and edit views and the exported game all draw
 //! through here, so a game looks the same everywhere.
 
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ use reign::scene::{ObjectId, Scene, Transform};
 
 use crate::components::{Animator, Camera, Image, SpriteRenderer, Text, TilemapRenderer};
 use crate::font::glyph_rect;
+use crate::particles::SceneParticles;
 use crate::physics::TILE;
 
 /// The colour behind everything, from Project Settings' `background`.
@@ -77,9 +78,27 @@ pub fn current_frame(
 pub struct Sprites {
     /// By asset, with the version that was uploaded.
     textures: HashMap<Guid, (u32, TextureId)>,
+    /// The scene's particle effects.
+    particles: SceneParticles,
+    /// The [`crate::World::scenes_entered`] the particles belong to.
+    scene: Option<u32>,
 }
 
 impl Sprites {
+    /// Particle effects start afresh: for Play and Stop.
+    pub fn reset_particles(&mut self) {
+        self.particles.reset();
+    }
+
+    /// Notes which scene is being drawn ([`crate::World::scenes_entered`]):
+    /// a new one starts its particle effects afresh.
+    pub fn note_scene(&mut self, entered: u32) {
+        if self.scene != Some(entered) {
+            self.scene = Some(entered);
+            self.particles.reset();
+        }
+    }
+
     fn texture(
         &mut self,
         r: &mut Renderer,
@@ -174,7 +193,8 @@ impl Sprites {
         }
     }
 
-    /// Queues every sprite, image, tilemap and text, back to front. `view` is
+    /// Queues every sprite, image, tilemap and text, back to front, then the
+    /// particle effects over them. `view` is
     /// the world rectangle on screen (x, y, w, h): tilemaps draw only the
     /// cells inside it.
     pub fn draw_objects(&mut self, r: &mut Renderer, scene: &Scene, db: &AssetDb, view: [f32; 4]) {
@@ -234,6 +254,7 @@ impl Sprites {
                 self.draw_text(r, db, text, (at.0.round(), at.1.round()));
             }
         }
+        self.particles.draw(r, scene, db);
     }
 
     /// The game's frame, as Play shows it: everything from the first

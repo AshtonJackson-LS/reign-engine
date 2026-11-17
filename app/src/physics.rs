@@ -349,6 +349,30 @@ fn grids(scene: &Scene, tilemaps: &impl TilemapSource) -> Vec<Grid> {
         .collect()
 }
 
+/// Where a scene's solid tilemap colliders are, for things that aren't
+/// bodies: particles that hit the level. Trigger tilemaps and one-way
+/// platforms don't count.
+pub struct SolidTiles(Vec<Grid>);
+
+impl SolidTiles {
+    pub fn of(scene: &Scene) -> Self {
+        SolidTiles::with(scene, &project_tilemaps)
+    }
+
+    pub(crate) fn with(scene: &Scene, tilemaps: &impl TilemapSource) -> Self {
+        SolidTiles(grids(scene, tilemaps).into_iter().filter(|g| !g.trigger).collect())
+    }
+
+    /// Whether the world pixel at (`x`, `y`) is in a solid tile.
+    pub fn solid(&self, x: f32, y: f32) -> bool {
+        self.0.iter().any(|g| {
+            let tx = ((x - g.x as f32) / TILE as f32).floor() as i32;
+            let ty = ((y - g.y as f32) / TILE as f32).floor() as i32;
+            tx < g.w && ty < g.h && matches!(g.kind(tx, ty), TileKind::Solid)
+        })
+    }
+}
+
 /// Outlines of every tilemap collider's tiles inside `view`, as one-pixel
 /// rectangles: the outer edges of solid areas, and the top edge of each
 /// one-way tile (`true`).

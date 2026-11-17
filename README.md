@@ -2,7 +2,8 @@
 
 A deterministic 2D engine in Rust (wgpu + winit), with a Unity-style editor:
 scenes of game objects and components, reflection-driven Inspector, Project
-browser with hot reload, Tilemap painter, Sprite slicer and Animation editor.
+browser with hot reload, Tilemap painter, Sprite slicer, Animation editor and
+Particle editor.
 
 ## Download
 
@@ -34,6 +35,7 @@ Making releases: see [RELEASING.md](RELEASING.md).
 | `engine/reign_behaviour` | Per-object scripts run in fixed stages, with messages. |
 | `engine/reign_assets` | GUIDs, `.meta` files, handles, prefabs, hot reload, packing. |
 | `engine/reign_render` | wgpu renderer: 640x360 pixel target, integer upscale, post effects. |
+| `engine/reign_particles` | Particle systems: plays and draws `*.particles.ron` effects. |
 | `engine/reign_app` | Window, event loop, fixed-tick loop, gamepads. |
 | `engine/reign_physics`, `reign_combat`, `reign_audio`, `reign_net` | Platformer physics, frame-data combat, audio mixing, rollback netcode. |
 | `engine/reign_editor` | The editor shell (egui). |
@@ -132,7 +134,8 @@ one with a camera is made if missing). With no folder given, the editor uses
 The standalone editor's built-in components: `Camera` (centres the Game
 view), `SpriteRenderer` (one sprite of a sprite sheet, with a tint colour and
 an optional stretched size), `Image` (a whole texture), `Animator`, `Text`,
-`AudioSource`, `TilemapRenderer`, and the physics components below. Every
+`AudioSource`, `ParticleSystem`, `TilemapRenderer`, and the physics
+components below. Every
 project gets `assets/Reign/Shapes` (Square, Circle, Triangle, Diamond,
 Hexagon, Capsule, Rounded Square) and `assets/Reign/Font`, a 5 by 7 pixel
 font, with fixed GUIDs, so they work the same in any project.
@@ -207,6 +210,22 @@ from `assets/`; `ctx.play_music("music/theme.wav")` loops one and
 that plays when it appears (`play_on_start`) or on `ctx.play(me)`. Sounds
 are presentation: they never feed back into the simulation, and Stop
 silences them.
+
+**Particles:** make an effect with **+ Create > Particle Effect** in the
+Project panel (a `*.particles.ron`) and edit it in the **Particles** tab,
+which plays it live as you change it, Unity style: a main module (duration,
+looping, start lifetime, speed, size and colour) and modules you switch on
+for emission (a rate and timed bursts), shape (point, cone, circle, box or
+line), forces (gravity, drag, wind), velocity, colour and size over each
+particle's life, collision (bounce off, stick to or die on a floor and the
+level's solid tilemaps), sub-emitters (another effect where a particle is
+born, hits something or dies), lights, and drawing (squares, streaks along
+the way they move, soft glows or sprites from a sheet, blended normally or
+added as light). A `ParticleSystem` component plays one at its object,
+following it and mirroring with it: with `play_on_start` when the object
+appears, or on `ctx.play_particles(me)`; `ctx.stop_particles(me)` stops it
+emitting. Particles are drawn over the scene and are presentation only,
+like sounds; Play, Stop and a new scene start them afresh.
 
 **Finding and spawning:** `ctx.find("Player")` is the first object with
 that name (look it up in `start` and keep the id). `ctx.spawn("prefabs/bullet.prefab.ron", at)`

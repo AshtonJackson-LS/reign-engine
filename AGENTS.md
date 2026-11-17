@@ -93,6 +93,7 @@ The editor can't yet (see the roadmap).
 | Built-in components | `app/src/components.rs`, `app/src/physics.rs` |
 | Animation playback, scene changes, sound events | `app/src/runtime.rs` (`animation_system`, `tick`, `Event`) |
 | Sound output | `app/src/audio.rs`, `engine/reign_audio` |
+| Particle effects: the `*.particles.ron` format, the simulation, drawing, the Particles tab, the `ParticleSystem` component | `engine/reign_assets/src/particles.rs`, `engine/reign_particles` (`lib.rs` runs, `draw.rs` makes quads, `render.rs` draws), `engine/reign_editor/src/particle_editor.rs`, `app/src/particles.rs` (playing a scene's systems), `app/src/components.rs` |
 | The built-in font | `app/src/font.rs` (installed by `app/src/starter.rs`) |
 | How a frame is drawn | `app/src/view.rs`, `engine/reign_render` |
 | The tick's order | `app/src/runtime.rs` (`schedule`), `engine/reign_behaviour` |

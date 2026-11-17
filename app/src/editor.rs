@@ -264,6 +264,7 @@ impl App for ReignEngine {
     }
 
     fn draw(&mut self, r: &mut Renderer, _alpha: f32) {
+        self.sprites.note_scene(self.world.scenes_entered());
         self.view_origin = self.sprites.draw_game(r, &self.world.scene, DB.get(), self.background);
     }
 
@@ -292,6 +293,10 @@ impl EditorApp for ReignEngine {
         let playing = mode != PlayMode::Edit;
         if self.was_playing && !playing {
             self.audio.stop();
+        }
+        if self.was_playing != playing {
+            // Play and Stop start the scene's particle effects afresh.
+            self.sprites.reset_particles();
         }
         self.was_playing = playing;
         self.code.set_mode(mode);
@@ -336,6 +341,7 @@ impl EditorApp for ReignEngine {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let scene = Scene::from_ron(&text, &self.registry).map_err(|e| e.to_string())?;
         self.world = World::new(scene);
+        self.sprites.reset_particles();
         self.scene_file = Some(path.to_owned());
         Ok(())
     }
@@ -352,6 +358,7 @@ impl EditorApp for ReignEngine {
         if let Some(db) = DB.get() {
             let (w, h) = view.size();
             let seen = [view.origin.0, view.origin.1, w, h];
+            self.sprites.note_scene(self.world.scenes_entered());
             self.sprites.draw_objects(r, &self.world.scene, db, seen);
         }
         self.draw_colliders(r, view);

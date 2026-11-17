@@ -105,6 +105,27 @@ impl Behaviour<World> for Bullet {
     }
 }
 
+/// Plays its object's particles on tick `play_at` and stops them on tick
+/// `stop_at`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+struct Sparker {
+    play_at: u64,
+    stop_at: u64,
+}
+
+impl Behaviour<World> for Sparker {
+    fn fixed_update(ctx: &mut Ctx, me: ObjectId) {
+        let Some(s) = ctx.get::<Sparker>(me).cloned() else { return };
+        if ctx.tick() == s.play_at {
+            ctx.play_particles(me);
+        }
+        if ctx.tick() == s.stop_at {
+            ctx.stop_particles(me);
+        }
+    }
+}
+
 /// A project on disk with its assets open, and what plays it.
 struct Game {
     project: Project,
@@ -128,12 +149,16 @@ impl Game {
         let db = AssetDb::loose(project.assets()).expect("assets load");
         let mut registry = ComponentRegistry::new();
         register_builtins(&mut registry);
-        registry.register::<Probe>().register::<Gun>().register::<Bullet>();
+        registry.register::<Probe>().register::<Gun>().register::<Bullet>().register::<Sparker>();
         let mut behaviours = Behaviours::new();
         register_builtin_behaviours(&mut behaviours);
         // Bullet after Gun: a bullet fired this tick comes up later in
         // the same FixedUpdate, and must wait for its `start`.
-        behaviours.behaviour::<Probe>().behaviour::<Gun>().behaviour::<Bullet>();
+        behaviours
+            .behaviour::<Probe>()
+            .behaviour::<Gun>()
+            .behaviour::<Bullet>()
+            .behaviour::<Sparker>();
         Game { project, db, registry, behaviours, schedule: schedule() }
     }
 
@@ -330,12 +355,14 @@ fn a_script_changes_scene_and_changes_text() {
     game.run(&mut world, 3);
     assert_eq!(world.scene.name(door), Some("Door"));
     assert_eq!(world.scene.get::<Text>(door).unwrap().text, "tick 2");
+    assert_eq!(world.scenes_entered(), 0);
 
     // The fourth tick asks for level 2; it's there when the tick ends.
     game.run(&mut world, 1);
     let sign = world.scene.walk().into_iter().find(|id| world.scene.name(*id) == Some("Sign"));
     let sign = sign.expect("level 2 loaded");
     assert_eq!(world.scene.len(), 2);
+    assert_eq!(world.scenes_entered(), 1, "drawing can tell it's a new scene");
     assert_eq!(world.scene.get::<Text>(sign).unwrap().text, "Level 2");
     // Its Behaviours start and run; the clock carries on.
     game.run(&mut world, 1);
@@ -457,4 +484,47 @@ fn a_script_finds_objects_by_tag_and_retags_them() {
     for (id, tag) in [(a, "Seen"), (b, "Seen"), (player, "Player"), (pack, "")] {
         assert_eq!(world.scene.object(id).unwrap().tag, tag);
     }
+}
+
+#[test]
+fn scripts_play_and_stop_particle_systems_and_they_draw_from_the_project() {
+    let effect = reign::assets::ParticleEffect {
+        main: reign::assets::particles::Main {
+            looping: true,
+            lifetime: reign::assets::particles::Range(5.0, 5.0),
+            ..Default::default()
+        },
+        emission: reign::assets::particles::Emission { rate: 120.0, ..Default::default() },
+        ..Default::default()
+    };
+    let game = Game::new("particles", &[("fx/sparks.particles.ron", effect.to_ron().into_bytes())]);
+    let handle = game.db.handle::<reign::assets::ParticleEffect>("fx/sparks.particles.ron");
+    let handle = handle.expect("the effect is an asset");
+
+    let mut scene = Scene::new();
+    let torch = scene.spawn("Torch");
+    scene.insert(
+        torch,
+        ParticleSystem { effect: handle, play_on_start: false, ..Default::default() },
+    );
+    scene.insert(torch, Sparker { play_at: 2, stop_at: 5 });
+    let mut world = World::new(scene);
+    let mut particles = crate::particles::SceneParticles::default();
+    let frame = |world: &World, particles: &mut crate::particles::SceneParticles| {
+        particles.sync(&world.scene, &game.db, 1.0 / 30.0, &reign::particles::no_ground);
+        particles.particle_count()
+    };
+    game.run(&mut world, 2);
+    assert_eq!(frame(&world, &mut particles), 0, "not playing on start");
+    game.run(&mut world, 1);
+    let ps = world.scene.get::<ParticleSystem>(torch).unwrap();
+    assert_eq!((ps.plays, ps.emitting), (1, true), "the script started it");
+    frame(&world, &mut particles);
+    let playing = frame(&world, &mut particles);
+    assert!(playing >= 7, "emitting at 120 a second: {playing}");
+    game.run(&mut world, 3);
+    assert!(!world.scene.get::<ParticleSystem>(torch).unwrap().emitting, "the script stopped it");
+    let stopped = frame(&world, &mut particles);
+    assert_eq!(frame(&world, &mut particles), stopped, "no more once stopped");
+    assert!(stopped > 0, "the ones out live on");
 }

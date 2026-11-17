@@ -17,7 +17,7 @@ assets/                 everything the game loads
   scenes/*.scene.ron    scenes; main.scene.ron is where the game starts,
                         unless ProjectSettings.ron names another
   input.ron             input actions and their keys (optional; has defaults)
-  *.prefab.ron, *.tilemap.ron, *.sheet.ron, *.anim.ron, *.png, *.wav
+  *.prefab.ron, *.tilemap.ron, *.sheet.ron, *.anim.ron, *.particles.ron, *.png, *.wav
   *.meta                one beside every asset: its GUID. Never delete or
                         hand-write these; they're made when the project opens.
 Cargo.toml, build.rs    only once the project has code
@@ -144,6 +144,9 @@ A scene is RON. Objects are listed parents before children.
   sheet's nth sprite if the sheet has no grid.
 - Sound: `"AudioSource": (clip: "<wav GUID>", volume: 100, play_on_start: true)`.
   Sounds must be 16-bit PCM `.wav`.
+- Particles: `"ParticleSystem": (effect: "<particles GUID>", play_on_start: true)`
+  plays a `*.particles.ron` effect at the object, following it. Effects are
+  made in the editor's Particles tab; they're only drawn, never simulated.
 - A `BoxCollider` is centred on the object. With a `Rigidbody` the object
   moves (Dynamic falls, Kinematic moves by its velocity, Static never
   moves); without one it's solid scenery.
@@ -179,6 +182,7 @@ What a script can call (`ctx` is the `&mut Ctx`):
 | `ctx.set_text(id, format!("Score: {n}"))` | Change what a `Text` says |
 | `ctx.play_sound("sounds/jump.wav")`, `ctx.play(id)` | A sound by path in `assets/`; an object's `AudioSource` |
 | `ctx.play_music("music/theme.wav")`, `ctx.stop_music()` | Looping music |
+| `ctx.play_particles(id)`, `ctx.stop_particles(id)` | Start an object's `ParticleSystem` again; stop it emitting |
 | `ctx.load_scene("scenes/level2.scene.ron")` | Go to another scene when this tick ends |
 | `ctx.rng()` | The only allowed source of randomness |
 | `ctx.tick()` | Ticks since the game started |

@@ -51,6 +51,9 @@ text or command-line way in, and a way to see the result.
 - [x] **Text**: the `Text` component and a built-in 5x7 pixel font in every
   project; world or screen space; `ctx.set_text`.
 - [x] **Change scene** from a script: `ctx.load_scene("scenes/level2.scene.ron")`.
+- [x] **Particles**: `*.particles.ron` effects with Unity's modules, the
+  Particles tab with a live preview, the `ParticleSystem` component and
+  `ctx.play_particles` / `ctx.stop_particles`.
 - [ ] An Add Component shortcut for Animator: dragging an `.anim.ron` into
   the view could make an animated sprite in one step.
 - [ ] Sound volume settings (master, music, effects) for players, and
