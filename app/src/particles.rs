@@ -4,8 +4,9 @@
 //!
 //! This is drawing, not simulation. The scene only holds what scripts set
 //! (`plays`, `emitting`); the particles themselves live here, step in real
-//! time and hit the scene's solid tilemaps. Play/Stop and a new scene start
-//! everything afresh ([`SceneParticles::reset`]).
+//! time and hit the scene's solid tilemaps (landing on one-way tiles from
+//! above). Play/Stop and a new scene start everything afresh
+//! ([`SceneParticles::reset`]).
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -111,8 +112,7 @@ impl SceneParticles {
         {
             return;
         }
-        let solid = SolidTiles::of(scene);
-        self.sync(scene, db, dt, &|x: f32, y: f32| solid.solid(x, y));
+        self.sync(scene, db, dt, &SolidTiles::of(scene));
         self.renderer.draw(r, db, &self.world);
         self.renderer.lights(r, &self.world);
     }
@@ -268,12 +268,12 @@ mod tests {
     }
 
     #[test]
-    fn particles_hit_the_scenes_solid_tilemaps_only() {
+    fn particles_hit_the_scenes_solid_tilemaps_and_land_on_one_way_tiles() {
         use crate::components::TilemapRenderer;
         use crate::physics::TilemapCollider;
         use reign::assets::Tilemap;
         let map = Arc::new(Tilemap::from_ascii(
-            "....
+            "...-
 ..#.
 ####
 ",
@@ -291,6 +291,9 @@ mod tests {
         assert!(solid.solid(140.0, 220.0), "the block in the middle row");
         assert!(solid.solid(100.0, 232.0), "the floor row");
         assert!(!solid.solid(99.0, 232.0) && !solid.solid(100.0, 249.0), "outside the map");
+        assert!(!solid.solid(150.0, 200.0), "a one-way tile isn't solid");
+        assert!(solid.one_way(150.0, 200.0) && solid.one_way(163.9, 200.9), "but its top row");
+        assert!(!solid.one_way(150.0, 201.0) && !solid.one_way(140.0, 200.0), "and only that");
         scene.insert(ground, TilemapCollider { is_trigger: true, ..TilemapCollider::default() });
         let trigger = SolidTiles::with(&scene, &|_| Some(map.clone()));
         assert!(!trigger.solid(100.0, 232.0), "a trigger isn't solid");

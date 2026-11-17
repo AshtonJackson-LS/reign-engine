@@ -679,7 +679,11 @@ starts an effect at a `Spawn` (position, a turn, `flip_x`, scale, where the
 floor is, an inherited velocity and tint, a seed), `move_to` and `stop`
 control it, and `step(dt, effects, ground)` runs it in real time, splitting
 long frames so fast particles still land. `effects` finds sub-emitters'
-effects (an `AssetDb` does) and `ground` says where the level is solid.
+effects (an `AssetDb` does) and `ground` (a `Ground`) says where the
+level is solid and, optionally, where one-way platforms catch particles
+falling onto them. Particles stop at whichever they reach first: the
+floor or the level. A game whose ground isn't one flat line (hills,
+slopes) plays with `Spawn::no_floor()` so only the level stops them.
 Effects played by handle follow their file as it hot reloads. `quads()` and
 `lights()` are what to draw, for any renderer; `ParticleRenderer` draws
 them with the game's. Each effect's `render.order` (Unity's Order in

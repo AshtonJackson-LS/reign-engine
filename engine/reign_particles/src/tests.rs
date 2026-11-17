@@ -760,3 +760,161 @@ fn a_flat_splat_draws_even_when_thinner_than_a_pixel() {
     world.systems[0].particles[0].size = 0.02;
     assert!(quads(&world).is_empty(), "under half a pixel both ways: not drawn");
 }
+
+/// A 45-degree hill: flat ground at y = 100, rising to the right (`/`)
+/// from x = 0 to a plateau at y = 0 from x = 100, falling back (`\`) from
+/// x = 200 to the flat at x = 300.
+fn hill_top(x: f32) -> f32 {
+    if x < 0.0 {
+        100.0
+    } else if x < 100.0 {
+        100.0 - x
+    } else if x < 200.0 {
+        0.0
+    } else if x < 300.0 {
+        x - 200.0
+    } else {
+        100.0
+    }
+}
+
+fn hill(x: f32, y: f32) -> bool {
+    y >= hill_top(x)
+}
+
+#[test]
+fn particles_land_on_slopes_whichever_way_they_come_at_them() {
+    // Sprays from all over the hill, every way, fast and slow.
+    for x in [-30.0, 20.0, 50.0, 90.0, 150.0, 210.0, 250.0, 290.0, 330.0] {
+        for angle in [-170.0, -135.0, -90.0, -45.0, -10.0, 10.0, 45.0, 90.0, 135.0, 170.0] {
+            for speed in [5.0, 60.0, 400.0] {
+                let mut effect = dropped(CollisionMode::Stick);
+                effect.collision.floor = 10_000.0;
+                effect.shape.angle = angle;
+                effect.main.speed = Range(speed, speed);
+                effect.forces.gravity = 500.0;
+                let mut world = ParticleWorld::new();
+                let at = hill_top(x) - 8.0;
+                world.play_effect(Arc::new(effect), Spawn::at(x, at));
+                run_with(&mut world, 2.5, &NoEffects, &hill);
+                let (px, py) = positions(&world)[0];
+                assert!(
+                    hill(px, py + 1.0) && !hill(px, py - 1.0),
+                    "from ({x}, {at}) at {angle} degrees, {speed} px/s: stuck at ({px}, {py}), \
+                     the ground there is at {}",
+                    hill_top(px)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_drop_that_dies_on_a_slope_leaves_its_splat() {
+    let splat = Handle::<ParticleEffect>::new(Guid(1));
+    let mut mark = burst(1, 10.0);
+    mark.main.speed = Range(0.0, 0.0);
+    let effects = Library(HashMap::from([(splat.guid, Arc::new(mark))]));
+    for x in [20.0, 50.0, 90.0, 210.0, 250.0, 290.0] {
+        // Thrown gently across the slope, either way: they skim into it.
+        for angle in [0.0, 180.0, 20.0, 160.0] {
+            let mut effect = dropped(CollisionMode::Die);
+            effect.collision.floor = 10_000.0;
+            effect.shape.angle = angle;
+            effect.main.speed = Range(30.0, 30.0);
+            effect.forces.gravity = 500.0;
+            effect.sub_emitters = vec![SubEmitter {
+                trigger: SubTrigger::Collision,
+                effect: splat,
+                ..SubEmitter::default()
+            }];
+            let mut world = ParticleWorld::new();
+            world.play_effect(Arc::new(effect), Spawn::at(x, hill_top(x) - 6.0));
+            run_with(&mut world, 1.0, &effects, &hill);
+            let marks = positions(&world);
+            assert_eq!(marks.len(), 1, "from x = {x} at {angle} degrees: {marks:?}");
+            // Where it touched the surface: not the hair above it the drop
+            // stopped at, which a pixel grid would round up a row.
+            let (mx, my) = marks[0];
+            let top = hill_top(mx);
+            assert!(my >= top && my - top < 0.01, "on the slope: ({mx}, {my}), its top {top}");
+        }
+    }
+}
+
+#[test]
+fn the_nearest_surface_stops_a_particle_whether_floor_or_level() {
+    // In one step a fast particle passes the level's ground at y = 2 and
+    // then the floor at y = 6: the ground, hit first, stops it.
+    let mut effect = dropped(CollisionMode::Stick);
+    effect.main.speed = Range(600.0, 600.0);
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect.clone()), Spawn::at(0.0, -3.0).floor(6.0));
+    run_with(&mut world, 0.5, &NoEffects, &|_: f32, y: f32| y >= 2.0);
+    let (_, y) = positions(&world)[0];
+    assert!((1.9..2.0).contains(&y), "on the ground, not the floor below it: {y}");
+
+    // And the other way round.
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect), Spawn::at(0.0, -3.0).floor(2.0));
+    run_with(&mut world, 0.5, &NoEffects, &|_: f32, y: f32| y >= 6.0);
+    assert_eq!(positions(&world)[0].1, 2.0, "on the floor, above the ground");
+}
+
+#[test]
+fn without_a_floor_only_the_level_stops_particles() {
+    // The effect's floor is at the emitter: it would stop them at once.
+    let mut effect = dropped(CollisionMode::Stick);
+    effect.collision.floor = 0.0;
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect), Spawn::at(0.0, 0.0).no_floor());
+    run_with(&mut world, 1.0, &NoEffects, &|_: f32, y: f32| y >= 50.0);
+    let (_, y) = positions(&world)[0];
+    assert!((49.9..50.0).contains(&y), "fell to the level: {y}");
+}
+
+/// A level with one-way platforms: solid only to things falling onto them.
+struct Platform;
+
+impl Ground for Platform {
+    fn solid(&self, _: f32, y: f32) -> bool {
+        y >= 100.0
+    }
+
+    fn one_way(&self, x: f32, y: f32) -> bool {
+        (0.0..50.0).contains(&x) && (40.0..41.0).contains(&y)
+    }
+}
+
+#[test]
+fn one_way_platforms_catch_particles_from_above_and_let_them_up_through() {
+    let mut effect = dropped(CollisionMode::Stick);
+    effect.collision.floor = 10_000.0;
+    effect.forces.gravity = 500.0;
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect.clone()), Spawn::at(20.0, 0.0));
+    run_with(&mut world, 1.0, &NoEffects, &Platform);
+    let (_, y) = positions(&world)[0];
+    assert!((39.9..40.0).contains(&y), "landed on the platform: {y}");
+
+    // Thrown up from under it: through, up, and back down onto it.
+    effect.shape.angle = -90.0;
+    effect.main.speed = Range(300.0, 300.0);
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect.clone()), Spawn::at(20.0, 90.0));
+    let mut highest = f32::MAX;
+    for _ in 0..60 {
+        world.step(FRAME, &NoEffects, &Platform);
+        highest = highest.min(positions(&world)[0].1);
+    }
+    assert!(highest < 40.0, "went up through it: {highest}");
+    let (_, y) = positions(&world)[0];
+    assert!((39.9..40.0).contains(&y), "and landed on top: {y}");
+
+    // Beside it, it falls past to the ground.
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect), Spawn::at(70.0, 0.0));
+    run_with(&mut world, 1.5, &NoEffects, &Platform);
+    let (_, y) = positions(&world)[0];
+    assert!((99.9..100.0).contains(&y), "the ground: {y}");
+}

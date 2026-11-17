@@ -51,6 +51,13 @@ const SLACK: f32 = 1e-4;
 pub trait Ground {
     /// Whether the world pixel at (`x`, `y`) is inside something solid.
     fn solid(&self, x: f32, y: f32) -> bool;
+
+    /// Whether the world pixel at (`x`, `y`) is inside a one-way platform:
+    /// solid only to particles falling onto it from above, which pass up
+    /// through it and fall past its sides. None by default.
+    fn one_way(&self, _x: f32, _y: f32) -> bool {
+        false
+    }
 }
 
 impl<F: Fn(f32, f32) -> bool> Ground for F {
@@ -146,6 +153,12 @@ impl Spawn {
 
     pub fn floor(self, y: f32) -> Self {
         Spawn { floor: Some(y), ..self }
+    }
+
+    /// No floor: only the level (the game's [`Ground`]) stops particles,
+    /// for a game whose ground isn't one flat line.
+    pub fn no_floor(self) -> Self {
+        self.floor(f32::INFINITY)
     }
 
     pub fn tint(self, tint: [f32; 4]) -> Self {
@@ -658,37 +671,46 @@ impl System {
                 continue;
             }
             let (wx0, wy0, wx1, wy1) = (p.x + ox, p.y + oy, nx + ox, ny + oy);
-            // A surface's normal, and where it was touched.
-            let hit = if mvy > 0.0 && wy0 <= floor && wy1 >= floor {
+            // Where along the move it touched a surface (whichever of the
+            // floor, the level or a one-way platform comes first), as
+            // fractions of the move: where it stops, still outside, and
+            // where it touched, the surface itself, for sub-emitters. And
+            // the surface's normal.
+            let at = |k: f32| (wx0 + (wx1 - wx0) * k, wy0 + (wy1 - wy0) * k);
+            let mut hit: Option<(f32, f32, (f32, f32))> = None;
+            if mvy > 0.0 && wy0 <= floor && wy1 >= floor {
                 let k = if wy1 > wy0 { (floor - wy0) / (wy1 - wy0) } else { 0.0 };
-                Some((wx0 + (wx1 - wx0) * k, floor, (0.0, -1.0)))
-            } else if c.world && ground.solid(wx1, wy1) && !ground.solid(wx0, wy0) {
-                // Find the surface: halve the move until the last clear
-                // point and the first solid one are a hair apart.
-                let at = |k: f32| (wx0 + (wx1 - wx0) * k, wy0 + (wy1 - wy0) * k);
-                let (mut clear, mut solid) = (0.0, 1.0);
-                for _ in 0..10 {
-                    let mid = (clear + solid) / 2.0;
-                    let (mx, my) = at(mid);
-                    if ground.solid(mx, my) { solid = mid } else { clear = mid }
+                hit = Some((k, k, (0.0, -1.0)));
+            }
+            if c.world && ground.solid(wx1, wy1) && !ground.solid(wx0, wy0) {
+                let (clear, solid) = surface(&at, &|x, y| ground.solid(x, y));
+                if hit.is_none_or(|(k, _, _)| clear < k) {
+                    let ((cx, cy), (sx, sy)) = (at(clear), at(solid));
+                    // A wall if moving across alone runs into it; else a
+                    // floor or ceiling.
+                    let normal = if ground.solid(sx, cy) && !ground.solid(cx, sy) {
+                        (-mvx.signum(), 0.0)
+                    } else {
+                        (0.0, -mvy.signum())
+                    };
+                    hit = Some((clear, solid, normal));
                 }
-                let ((cx, cy), (sx, sy)) = (at(clear), at(solid));
-                // A wall if moving across alone runs into it; else a floor
-                // or ceiling.
-                let normal = if ground.solid(sx, cy) && !ground.solid(cx, sy) {
-                    (-mvx.signum(), 0.0)
-                } else {
-                    (0.0, -mvy.signum())
-                };
-                Some((cx, cy, normal))
-            } else {
-                None
-            };
-            let Some((hx, hy, (nxn, nyn))) = hit else {
+            }
+            if c.world && mvy > 0.0 && ground.one_way(wx1, wy1) && !ground.one_way(wx0, wy0) {
+                let (clear, inside) = surface(&at, &|x, y| ground.one_way(x, y));
+                // Only coming down onto its top: not falling in at a side.
+                let (cx, cy) = at(clear);
+                if ground.one_way(cx, cy + 1.0) && hit.is_none_or(|(k, _, _)| clear < k) {
+                    hit = Some((clear, inside, (0.0, -1.0)));
+                }
+            }
+            let Some((stop, touch, (nxn, nyn))) = hit else {
                 (p.x, p.y) = (nx, ny);
                 continue;
             };
-            (p.x, p.y) = (hx - ox, hy - oy);
+            let (sx, sy) = at(stop);
+            let (hx, hy) = at(touch);
+            (p.x, p.y) = (sx - ox, sy - oy);
             let into = -(p.vx * nxn + p.vy * nyn);
             let impact = into > RESTING;
             if impact {
@@ -731,6 +753,19 @@ impl System {
             }
         }
     }
+}
+
+/// Where a move from `at(0.0)` (clear) to `at(1.0)` (inside) enters what
+/// `inside` says: halves the move until the last clear point and the first
+/// inside one are a hair apart. Both, as fractions of the move.
+fn surface(at: &dyn Fn(f32) -> (f32, f32), inside: &dyn Fn(f32, f32) -> bool) -> (f32, f32) {
+    let (mut clear, mut solid) = (0.0, 1.0);
+    for _ in 0..10 {
+        let mid = (clear + solid) / 2.0;
+        let (mx, my) = at(mid);
+        if inside(mx, my) { solid = mid } else { clear = mid }
+    }
+    (clear, solid)
 }
 
 /// Fast random numbers for particles (xorshift): the same seed gives the
