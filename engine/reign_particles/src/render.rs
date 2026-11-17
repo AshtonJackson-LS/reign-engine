@@ -40,7 +40,19 @@ impl ParticleRenderer {
     /// Queues every particle, with the blend each effect asks for. Leaves
     /// the renderer blending normally ([`Blend::Alpha`]).
     pub fn draw(&mut self, r: &mut Renderer, db: &AssetDb, world: &ParticleWorld) {
-        let quads = world.quads(&mut |h| db.load(h).ok());
+        self.draw_in(r, db, world, i32::MIN..=i32::MAX);
+    }
+
+    /// [`ParticleRenderer::draw`] for effects whose render `order` is in
+    /// `orders`.
+    pub fn draw_in(
+        &mut self,
+        r: &mut Renderer,
+        db: &AssetDb,
+        world: &ParticleWorld,
+        orders: std::ops::RangeInclusive<i32>,
+    ) {
+        let quads = world.quads_in(orders, &mut |h| db.load(h).ok());
         for q in quads {
             r.set_blend(match q.blend {
                 BlendMode::Alpha => Blend::Alpha,

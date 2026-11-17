@@ -50,15 +50,31 @@ pub struct ParticleLight {
 const INVISIBLE: f32 = 1.0 / 255.0;
 
 impl ParticleWorld {
-    /// Every particle as quads, in the order they're drawn: effects in the
-    /// order they were played, each one's particles oldest first. `sheets`
-    /// finds sprite sheets for sprite particles.
+    /// Every particle as quads, in the order they're drawn: effects by
+    /// their render `order` (lower first), then in the order they were
+    /// played, each one's particles oldest first. `sheets` finds sprite
+    /// sheets for sprite particles.
     pub fn quads(
         &self,
         sheets: &mut dyn FnMut(Handle<SpriteSheet>) -> Option<Arc<SpriteSheet>>,
     ) -> Vec<Quad> {
+        self.quads_in(i32::MIN..=i32::MAX, sheets)
+    }
+
+    /// [`ParticleWorld::quads`] for effects whose render `order` is in
+    /// `orders`: to draw some behind a game's characters and the rest in
+    /// front.
+    pub fn quads_in(
+        &self,
+        orders: std::ops::RangeInclusive<i32>,
+        sheets: &mut dyn FnMut(Handle<SpriteSheet>) -> Option<Arc<SpriteSheet>>,
+    ) -> Vec<Quad> {
+        let mut systems: Vec<&System> =
+            self.systems.iter().filter(|s| orders.contains(&s.effect.render.order)).collect();
+        // Stable: equal orders keep the order they were played in.
+        systems.sort_by_key(|s| s.effect.render.order);
         let mut out = Vec::new();
-        for s in &self.systems {
+        for s in systems {
             let sheet = (s.effect.render.mode == RenderMode::Sprite)
                 .then(|| sheets(s.effect.render.sheet))
                 .flatten();
@@ -141,7 +157,9 @@ impl System {
             RenderMode::Square => {
                 let (mut w, mut h) = (size * r.aspect, size);
                 if r.pixel_snap {
-                    if size < 0.5 {
+                    // Too small to cover half a pixel either way: not drawn.
+                    // A flat splat (aspect 20) at size 0.1 is still 2 wide.
+                    if w.max(h) < 0.5 {
                         return;
                     }
                     (w, h) = (w.round().max(1.0), h.round().max(1.0));

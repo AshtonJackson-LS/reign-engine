@@ -593,6 +593,10 @@ fn shape(ui: &mut Ui, s: &mut Shape) {
         row(ui, "Randomize", "Mixes each direction with a random one", |ui| {
             ui.add(egui::Slider::new(&mut s.randomize, 0.0..=1.0));
         });
+        row(ui, "Offset", "Moves the shape away from the emitter", |ui| {
+            ui.add(number(&mut s.offset[0], 0.5, -10_000.0..=10_000.0).prefix("x "));
+            ui.add(number(&mut s.offset[1], 0.5, -10_000.0..=10_000.0).prefix("y "));
+        });
     });
 }
 
@@ -764,6 +768,14 @@ fn render(ui: &mut Ui, db: &AssetDb, r: &mut Render) {
         row(ui, "Pixel snap", "Draw on whole pixels, as crisp as the art", |ui| {
             ui.checkbox(&mut r.pixel_snap, "");
         });
+        row(
+            ui,
+            "Order",
+            "Lower draws first; a game may draw some orders behind its characters",
+            |ui| {
+                ui.add(egui::DragValue::new(&mut r.order).range(-1000..=1000));
+            },
+        );
     });
 }
 

@@ -553,6 +553,8 @@ impl System {
         }
         py *= sh.squash;
         dy *= sh.squash;
+        px += sh.offset[0];
+        py += sh.offset[1];
         // The emitter's turn, mirror and scale.
         let s = self.spawn;
         let (sin, cos) = s.angle.to_radians().sin_cos();
@@ -593,7 +595,9 @@ impl System {
         }
     }
 
-    /// Where a sub-emitter starts from a particle at world (`x`, `y`).
+    /// Where a sub-emitter starts from a particle at world (`x`, `y`): there,
+    /// mirrored and scaled like its parent but not turned, so an effect
+    /// started where a drop lands stays upright on the ground.
     fn sub_spawn(
         &self,
         sub: &reign_assets::particles::SubEmitter,
@@ -606,6 +610,7 @@ impl System {
             spawn: Spawn {
                 x,
                 y,
+                angle: 0.0,
                 velocity: [p.vx * k, p.vy * k],
                 tint: if sub.inherit_color { p.color } else { [1.0; 4] },
                 seed: None,

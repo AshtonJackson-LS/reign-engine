@@ -181,6 +181,9 @@ pub struct Shape {
     pub squash: f32,
     /// Mixes each direction with a random one: 0 not at all, 1 fully.
     pub randomize: f32,
+    /// Moves the whole shape from the emitter, in pixels: x, y (turned and
+    /// mirrored with the effect).
+    pub offset: [f32; 2],
 }
 
 impl Default for Shape {
@@ -194,6 +197,7 @@ impl Default for Shape {
             edge: false,
             squash: 1.0,
             randomize: 0.0,
+            offset: [0.0, 0.0],
         }
     }
 }
@@ -396,7 +400,9 @@ pub enum CollisionMode {
     Die,
 }
 
-/// Another effect started by each particle.
+/// Another effect started by each particle, where the particle is. It's
+/// mirrored and scaled like its parent but not turned, so an effect started
+/// where a drop lands stays upright on the ground.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubEmitter {
@@ -487,6 +493,10 @@ pub struct Render {
     pub fps: f32,
     /// Draws on whole pixels, so particles stay as crisp as the art.
     pub pixel_snap: bool,
+    /// Which effects draw first, like Unity's Order in Layer: lower first.
+    /// A game can draw a range of orders at a time, such as stains on the
+    /// ground (below 0) behind its characters and the rest in front.
+    pub order: i32,
 }
 
 impl Default for Render {
@@ -502,6 +512,7 @@ impl Default for Render {
             frames: FrameMode::OverLife,
             fps: 12.0,
             pixel_snap: true,
+            order: 0,
         }
     }
 }
@@ -585,7 +596,19 @@ impl ParticleEffect {
         finite("The start size", &[m.size.0, m.size.1]);
         finite("The emission rate", &[self.emission.rate]);
         let s = &self.shape;
-        finite("The shape", &[s.angle, s.spread, s.radius, s.size[0], s.size[1], s.squash]);
+        finite(
+            "The shape",
+            &[
+                s.angle,
+                s.spread,
+                s.radius,
+                s.size[0],
+                s.size[1],
+                s.squash,
+                s.offset[0],
+                s.offset[1],
+            ],
+        );
         let f = &self.forces;
         finite("The forces", &[f.gravity, f.drag, f.wind[0], f.wind[1]]);
         if m.duration <= 0.0 {

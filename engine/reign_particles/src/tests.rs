@@ -692,3 +692,71 @@ fn the_glow_image_is_round_and_soft() {
     assert_eq!(alpha(0, 0), 0, "nothing in the corners");
     assert!(alpha(mid, mid) > alpha(mid + 6, mid) && alpha(mid + 6, mid) > alpha(mid + 12, mid));
 }
+
+#[test]
+fn effects_draw_by_order_and_a_range_picks_some() {
+    let mut world = ParticleWorld::new();
+    let at = |order: i32, x: f32| {
+        let mut e = burst(1, 1.0);
+        e.main.speed = Range(0.0, 0.0);
+        e.main.size = Range(1.0, 1.0);
+        e.render.order = order;
+        (Arc::new(e), Spawn::at(x, 0.0))
+    };
+    for (order, x) in [(5, 1.0), (-1, 2.0), (0, 3.0), (-1, 4.0)] {
+        let (e, spawn) = at(order, x);
+        world.play_effect(e, spawn);
+    }
+    world.step(FRAME, &NoEffects, &no_ground);
+    // One-pixel squares centred on x land on whole pixel x.
+    let xs = |q: Vec<Quad>| q.iter().map(|q| q.x).collect::<Vec<_>>();
+    assert_eq!(xs(quads(&world)), vec![2.0, 4.0, 3.0, 1.0], "by order, then as played");
+    assert_eq!(xs(world.quads_in(i32::MIN..=-1, &mut |_| None)), vec![2.0, 4.0]);
+    assert_eq!(xs(world.quads_in(0..=i32::MAX, &mut |_| None)), vec![3.0, 1.0]);
+}
+
+#[test]
+fn the_shape_offset_moves_turns_and_mirrors_with_the_effect() {
+    let mut effect = burst(1, 1.0);
+    effect.main.speed = Range(0.0, 0.0);
+    effect.shape = Shape { kind: ShapeKind::Point, offset: [3.0, -1.0], ..Shape::default() };
+    let place = |spawn: Spawn| {
+        let mut world = ParticleWorld::new();
+        world.play_effect(Arc::new(effect.clone()), spawn);
+        world.step(FRAME, &NoEffects, &no_ground);
+        let (x, y) = positions(&world)[0];
+        ((x * 100.0).round() / 100.0, (y * 100.0).round() / 100.0)
+    };
+    assert_eq!(place(Spawn::at(10.0, 20.0)), (13.0, 19.0));
+    assert_eq!(place(Spawn::at(10.0, 20.0).flip_x(true)), (7.0, 19.0));
+    assert_eq!(place(Spawn::at(10.0, 20.0).angle(90.0)), (11.0, 23.0), "turned a quarter");
+}
+
+#[test]
+fn sub_emitters_play_upright_whatever_their_parent_was_turned_to() {
+    let child = Handle::<ParticleEffect>::new(Guid(11));
+    let mut c = burst(1, 1.0);
+    c.main.speed = Range(0.0, 0.0);
+    c.shape = Shape { kind: ShapeKind::Point, offset: [0.0, -1.0], ..Shape::default() };
+    let library = Library(HashMap::from([(child.guid, Arc::new(c))]));
+    let mut effect = burst(1, 0.02);
+    effect.main.speed = Range(0.0, 0.0);
+    effect.sub_emitters =
+        vec![SubEmitter { trigger: SubTrigger::Death, effect: child, ..SubEmitter::default() }];
+    let mut world = ParticleWorld::new();
+    world.play_effect(Arc::new(effect), Spawn::at(10.0, 20.0).angle(-30.0));
+    run_with(&mut world, 0.1, &library, &no_ground);
+    let (x, y) = positions(&world)[0];
+    assert!((x - 10.0).abs() < 1e-4 && (y - 19.0).abs() < 1e-4, "straight up: {x}, {y}");
+    assert_eq!(world.systems[0].spawn.angle, 0.0);
+}
+
+#[test]
+fn a_flat_splat_draws_even_when_thinner_than_a_pixel() {
+    let mut world = still(Render { aspect: 20.0, ..Render::default() });
+    world.systems[0].particles[0].size = 0.1;
+    let q = quads(&world);
+    assert_eq!((q[0].w, q[0].h), (2.0, 1.0), "2 wide, at least a pixel high");
+    world.systems[0].particles[0].size = 0.02;
+    assert!(quads(&world).is_empty(), "under half a pixel both ways: not drawn");
+}

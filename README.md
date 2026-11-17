@@ -221,7 +221,7 @@ particle's life, collision (bounce off, stick to or die on a floor and the
 level's solid tilemaps), sub-emitters (another effect where a particle is
 born, hits something or dies), lights, and drawing (squares, streaks along
 the way they move, soft glows or sprites from a sheet, blended normally or
-added as light). A `ParticleSystem` component plays one at its object,
+added as light, in a draw order). A `ParticleSystem` component plays one at its object,
 following it and mirroring with it: with `play_on_start` when the object
 appears, or on `ctx.play_particles(me)`; `ctx.stop_particles(me)` stops it
 emitting. Particles are drawn over the scene and are presentation only,

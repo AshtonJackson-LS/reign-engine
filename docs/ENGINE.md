@@ -682,7 +682,10 @@ long frames so fast particles still land. `effects` finds sub-emitters'
 effects (an `AssetDb` does) and `ground` says where the level is solid.
 Effects played by handle follow their file as it hot reloads. `quads()` and
 `lights()` are what to draw, for any renderer; `ParticleRenderer` draws
-them with the game's. Particles use their own random numbers and never feed
+them with the game's. Each effect's `render.order` (Unity's Order in
+Layer) sorts it, and `quads_in(orders, ..)` / `draw_in(.., orders)` draw a
+range at a time: a game can draw ground stains (negative orders) behind
+its characters and everything else in front. Particles use their own random numbers and never feed
 back into the simulation, so they can't change a replay or an online game.
 
 ## Combat data
