@@ -1,6 +1,7 @@
-//! Drawing a scene: sprites, images and tilemaps back to front, then
-//! particle effects over them, from the first camera. The editor's Play and edit views and the exported game all draw
-//! through here, so a game looks the same everywhere.
+//! Drawing a scene: sprites, images, tilemaps and trails back to front, then
+//! particle effects over them, from the first camera. The editor's Play and
+//! edit views and the exported game all draw through here, so a game looks
+//! the same everywhere.
 
 use std::collections::HashMap;
 
@@ -8,10 +9,13 @@ use reign::assets::{AssetDb, Guid, Handle, SpriteSheet, Texture};
 use reign::render::{Color, Renderer, TextureId, VIEW_HEIGHT, VIEW_WIDTH};
 use reign::scene::{ObjectId, Scene, Transform};
 
-use crate::components::{Animator, Camera, Image, SpriteRenderer, Text, TilemapRenderer};
+use crate::components::{
+    Animator, Camera, Image, SpriteRenderer, Text, TilemapRenderer, TrailRenderer,
+};
 use crate::font::glyph_rect;
 use crate::particles::SceneParticles;
 use crate::physics::TILE;
+use crate::trail;
 
 /// The colour behind everything, from Project Settings' `background`.
 pub fn background(rgb: [u8; 3]) -> Color {
@@ -211,10 +215,17 @@ impl Sprites {
         for (id, _) in scene.iter::<Text>() {
             items.push((scene.transform(id).map_or(0, |t| t.z), id));
         }
+        for (id, _) in scene.iter::<TrailRenderer>() {
+            items.push((scene.transform(id).map_or(0, |t| t.z), id));
+        }
         items.sort();
         items.dedup();
         for (_, id) in items {
             let pos = scene.world_position(id);
+            // Behind its own object.
+            if let Some(trail) = scene.get::<TrailRenderer>(id) {
+                trail::draw(r, trail, pos);
+            }
             if let Some(tm) = scene.get::<TilemapRenderer>(id) {
                 let at = (pos.x.round_px(), pos.y.round_px());
                 self.draw_tilemap(r, db, tm, at, view);

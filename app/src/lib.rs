@@ -42,6 +42,7 @@ mod runtime;
 mod settings;
 mod starter;
 mod tilemap_assets;
+mod trail;
 mod view;
 
 use std::path::PathBuf;
@@ -54,7 +55,7 @@ use reign::editor::{EditorConfig, init_logger, run_editor};
 
 pub use components::{
     Animator, AudioSource, Camera, Image, NamedClip, ParticleSystem, SpriteRenderer, Text,
-    TextAlign, TilemapRenderer,
+    TextAlign, TilemapRenderer, TrailPoint, TrailRenderer,
 };
 pub use player::{GAME_FILE, GameInfo, PACK_FILE};
 pub use runtime::{Ctx, CtxExt, Event, Message, Scripts, TICKS_PER_SECOND, World};
@@ -77,7 +78,7 @@ pub mod prelude {
     pub use crate::physics::{BodyType, BoxCollider, Rigidbody, TilemapCollider};
     pub use crate::{
         Animator, AudioSource, Camera, Ctx, CtxExt, Image, Message, NamedClip, ParticleSystem,
-        SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, World,
+        SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, TrailRenderer, World,
     };
 }
 

@@ -54,6 +54,10 @@ text or command-line way in, and a way to see the result.
 - [x] **Particles**: `*.particles.ron` effects with Unity's modules, the
   Particles tab with a live preview, the `ParticleSystem` component and
   `ctx.play_particles` / `ctx.stop_particles`.
+- [x] **Trail Renderer**: the `TrailRenderer` component draws a fading, tapering
+  ribbon behind a moving object, with its points kept in the scene so it
+  replays exactly; `ctx.clear_trail`. `Renderer::line` and
+  `Renderer::parallelogram` draw it.
 - [ ] An Add Component shortcut for Animator: dragging an `.anim.ron` into
   the view could make an animated sprite in one step.
 - [ ] Sound volume settings (master, music, effects) for players, and

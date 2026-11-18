@@ -13,7 +13,7 @@ use reign::behaviour::{
 use reign::core::{Button, FxVec2, InputBuffer, InputFrame, Rng};
 use reign::scene::{Component, ComponentRegistry, ObjectId, Scene};
 
-use crate::components::{Animator, AudioSource, ParticleSystem, Text};
+use crate::components::{Animator, AudioSource, ParticleSystem, Text, TrailRenderer};
 use crate::{components, physics};
 
 /// Fixed ticks per second: divide a per-second speed by this for one tick.
@@ -300,10 +300,25 @@ pub fn schedule() -> Schedule<World> {
         .then(Stage::Messages)
         .then(Stage::LateUpdate)
         .then(Stage::Systems("animation"))
+        .then(Stage::Systems("trails"))
         .then(Stage::Messages)
         .then(Stage::Commands)
         .system(System::new("physics", "physics", 0, physics_system))
         .system(System::new("animation", "animation", 0, animation_system))
+        .system(System::new("trails", "trails", 0, trail_system))
+}
+
+/// Adds each [`TrailRenderer`]'s object's position to its trail, after
+/// everything that moves objects has run this tick.
+fn trail_system(ctx: &mut Ctx) -> Flow {
+    let ids: Vec<ObjectId> = ctx.game.scene.iter::<TrailRenderer>().map(|(id, _)| id).collect();
+    for id in ids {
+        let at = ctx.game.scene.world_position(id);
+        if let Some(trail) = ctx.game.scene.get_mut::<TrailRenderer>(id) {
+            trail.step(at);
+        }
+    }
+    Flow::Continue
 }
 
 /// One tick of a game as every host plays it (the editor's Play, the
@@ -486,6 +501,9 @@ pub trait CtxExt {
     /// Stops an object's [`ParticleSystem`] emitting; the particles still
     /// out finish their lives.
     fn stop_particles(&mut self, id: ObjectId);
+    /// Empties an object's [`TrailRenderer`], so a teleport doesn't draw a
+    /// streak across the screen: `ctx.set_position(me, spawn); ctx.clear_trail(me);`
+    fn clear_trail(&mut self, id: ObjectId);
     /// Switches the music to a `.wav` by its path in `assets/`, looping.
     fn play_music(&mut self, path: &str);
     fn stop_music(&mut self);
@@ -654,6 +672,12 @@ impl CtxExt for Ctx<'_> {
             && let Some(p) = self.game.scene.get_mut::<ParticleSystem>(id)
         {
             p.emitting = false;
+        }
+    }
+
+    fn clear_trail(&mut self, id: ObjectId) {
+        if let Some(t) = self.game.scene.get_mut::<TrailRenderer>(id) {
+            t.points.clear();
         }
     }
 

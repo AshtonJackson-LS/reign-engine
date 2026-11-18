@@ -147,6 +147,9 @@ A scene is RON. Objects are listed parents before children.
 - Particles: `"ParticleSystem": (effect: "<particles GUID>", play_on_start: true)`
   plays a `*.particles.ron` effect at the object, following it. Effects are
   made in the editor's Particles tab; they're only drawn, never simulated.
+- Trail: `"TrailRenderer": (time: "0.5", start_width: "6", end_width: "0")` draws a
+  ribbon behind the object that fades after `time` seconds. Also `min_vertex_distance`,
+  `start_color`, `end_color`, `additive`, `max_points`, `emitting`.
 - A `BoxCollider` is centred on the object. With a `Rigidbody` the object
   moves (Dynamic falls, Kinematic moves by its velocity, Static never
   moves); without one it's solid scenery.
@@ -183,6 +186,7 @@ What a script can call (`ctx` is the `&mut Ctx`):
 | `ctx.play_sound("sounds/jump.wav")`, `ctx.play(id)` | A sound by path in `assets/`; an object's `AudioSource` |
 | `ctx.play_music("music/theme.wav")`, `ctx.stop_music()` | Looping music |
 | `ctx.play_particles(id)`, `ctx.stop_particles(id)` | Start an object's `ParticleSystem` again; stop it emitting |
+| `ctx.clear_trail(id)` | Empty an object's `TrailRenderer` (after a teleport) |
 | `ctx.load_scene("scenes/level2.scene.ron")` | Go to another scene when this tick ends |
 | `ctx.rng()` | The only allowed source of randomness |
 | `ctx.tick()` | Ticks since the game started |

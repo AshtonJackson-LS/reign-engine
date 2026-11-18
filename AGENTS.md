@@ -91,6 +91,7 @@ The editor can't yet (see the roadmap).
 | --- | --- |
 | What scripts can call (`ctx.…`) | `app/src/runtime.rs` (`CtxExt`), `app/src/lib.rs` (`prelude`) |
 | Built-in components | `app/src/components.rs`, `app/src/physics.rs` |
+| Trail Renderer: the `TrailRenderer` component (points are game state), its tick (`trail_system` in `runtime.rs`), drawing | `app/src/components.rs`, `app/src/trail.rs`, `app/src/view.rs`, `Renderer::line`/`parallelogram` in `engine/reign_render/src/lib.rs` |
 | Animation playback, scene changes, sound events | `app/src/runtime.rs` (`animation_system`, `tick`, `Event`) |
 | Sound output | `app/src/audio.rs`, `engine/reign_audio` |
 | Particle effects: the `*.particles.ron` format, the simulation, drawing, the Particles tab, the `ParticleSystem` component | `engine/reign_assets/src/particles.rs`, `engine/reign_particles` (`lib.rs` runs, `draw.rs` makes quads, `render.rs` draws), `engine/reign_editor/src/particle_editor.rs`, `app/src/particles.rs` (playing a scene's systems), `app/src/components.rs` |

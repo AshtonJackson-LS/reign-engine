@@ -126,6 +126,24 @@ impl Behaviour<World> for Sparker {
     }
 }
 
+/// Walks its object 1 pixel right each tick, and calls `ctx.clear_trail`
+/// on tick `clear_at` (never, if 0).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+struct Walker {
+    clear_at: u64,
+}
+
+impl Behaviour<World> for Walker {
+    fn fixed_update(ctx: &mut Ctx, me: ObjectId) {
+        let Some(w) = ctx.get::<Walker>(me).cloned() else { return };
+        ctx.translate(me, FxVec2::from_px(1, 0));
+        if w.clear_at != 0 && ctx.tick() == w.clear_at {
+            ctx.clear_trail(me);
+        }
+    }
+}
+
 /// A project on disk with its assets open, and what plays it.
 struct Game {
     project: Project,
@@ -149,7 +167,12 @@ impl Game {
         let db = AssetDb::loose(project.assets()).expect("assets load");
         let mut registry = ComponentRegistry::new();
         register_builtins(&mut registry);
-        registry.register::<Probe>().register::<Gun>().register::<Bullet>().register::<Sparker>();
+        registry
+            .register::<Probe>()
+            .register::<Gun>()
+            .register::<Bullet>()
+            .register::<Sparker>()
+            .register::<Walker>();
         let mut behaviours = Behaviours::new();
         register_builtin_behaviours(&mut behaviours);
         // Bullet after Gun: a bullet fired this tick comes up later in
@@ -158,7 +181,8 @@ impl Game {
             .behaviour::<Probe>()
             .behaviour::<Gun>()
             .behaviour::<Bullet>()
-            .behaviour::<Sparker>();
+            .behaviour::<Sparker>()
+            .behaviour::<Walker>();
         Game { project, db, registry, behaviours, schedule: schedule() }
     }
 
@@ -527,4 +551,67 @@ fn scripts_play_and_stop_particle_systems_and_they_draw_from_the_project() {
     let stopped = frame(&world, &mut particles);
     assert_eq!(frame(&world, &mut particles), stopped, "no more once stopped");
     assert!(stopped > 0, "the ones out live on");
+}
+
+/// A walking object with a trail, played from tick 0.
+fn trail_world(clear_at: u64) -> World {
+    let mut scene = Scene::new();
+    let ball = scene.spawn("Ball");
+    scene.insert(ball, Walker { clear_at });
+    // Half a second is 60 ticks; a point for every 4 pixels walked.
+    scene.insert(
+        ball,
+        TrailRenderer {
+            time: Fx::from_subpx(0, 128),
+            min_vertex_distance: Fx::from_px(4),
+            ..Default::default()
+        },
+    );
+    World::new(scene)
+}
+
+fn ball_trail(world: &World) -> &TrailRenderer {
+    let id = world.scene.iter::<TrailRenderer>().next().unwrap().0;
+    world.scene.get::<TrailRenderer>(id).unwrap()
+}
+
+#[test]
+fn a_moving_object_leaves_a_trail_that_fades_and_replays_exactly() {
+    use std::hash::{Hash, Hasher};
+    let game = Game::new("trail", &[]);
+    let mut world = trail_world(0);
+    game.run(&mut world, 40);
+    let trail = ball_trail(&world);
+    assert_eq!(trail.points.len(), 10, "a point every 4 pixels over 40 ticks of walking");
+    assert!(trail.points.windows(2).all(|p| p[0].age > p[1].age), "oldest first");
+    // Long past its lifetime the old points are gone, however far it walked.
+    game.run(&mut world, 200);
+    let trail = ball_trail(&world);
+    assert!(trail.points.iter().all(|p| p.age <= trail.lifetime_ticks()));
+    assert!(trail.points.len() <= 60 / 4 + 1, "only the last half second: {}", trail.points.len());
+
+    // The same ticks give the same state, trail and all.
+    let hash = |ticks| {
+        let mut world = trail_world(0);
+        game.run(&mut world, ticks);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        world.hash(&mut h);
+        h.finish()
+    };
+    assert_eq!(hash(150), hash(150));
+    assert_ne!(hash(150), hash(151), "and the trail is part of the state");
+}
+
+#[test]
+fn clear_trail_empties_it_and_a_stopped_trail_fades_out() {
+    let game = Game::new("trail-clear", &[]);
+    let mut world = trail_world(20);
+    game.run(&mut world, 21);
+    // Cleared on tick 20; the tick's trail system then adds its position.
+    assert!(ball_trail(&world).points.len() <= 1, "{}", ball_trail(&world).points.len());
+
+    let id = world.scene.iter::<TrailRenderer>().next().unwrap().0;
+    world.scene.get_mut::<TrailRenderer>(id).unwrap().emitting = false;
+    game.run(&mut world, 100);
+    assert!(ball_trail(&world).points.is_empty(), "no new points, and the rest faded");
 }

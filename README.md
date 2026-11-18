@@ -134,7 +134,7 @@ one with a camera is made if missing). With no folder given, the editor uses
 The standalone editor's built-in components: `Camera` (centres the Game
 view), `SpriteRenderer` (one sprite of a sprite sheet, with a tint colour and
 an optional stretched size), `Image` (a whole texture), `Animator`, `Text`,
-`AudioSource`, `ParticleSystem`, `TilemapRenderer`, and the physics
+`AudioSource`, `ParticleSystem`, `TrailRenderer`, `TilemapRenderer`, and the physics
 components below. Every
 project gets `assets/Reign/Shapes` (Square, Circle, Triangle, Diamond,
 Hexagon, Capsule, Rounded Square) and `assets/Reign/Font`, a 5 by 7 pixel
@@ -226,6 +226,14 @@ following it and mirroring with it: with `play_on_start` when the object
 appears, or on `ctx.play_particles(me)`; `ctx.stop_particles(me)` stops it
 emitting. Particles are drawn over the scene and are presentation only,
 like sounds; Play, Stop and a new scene start them afresh.
+
+A `TrailRenderer` (Unity's Trail Renderer) draws a ribbon behind a moving object: every tick the
+object's position is added, and points older than `time` seconds fade away. The ribbon goes from
+`start_width` and `start_color` at the object to `end_width` and `end_color` at the oldest point
+(`additive` adds its colour like light), a new point comes every `min_vertex_distance` pixels, and
+`max_points` caps its length. It draws at the object's `z`, behind the object. Unlike particles the
+points are game state (whole subpixels), so a trail replays exactly and is in `state_hash`.
+`ctx.clear_trail(me)` empties it after a teleport.
 
 **Finding and spawning:** `ctx.find("Player")` is the first object with
 that name (look it up in `start` and keep the id). `ctx.spawn("prefabs/bullet.prefab.ron", at)`
