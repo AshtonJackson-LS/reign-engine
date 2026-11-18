@@ -55,6 +55,19 @@ pub fn decode_png(bytes: &[u8]) -> Result<RgbaImage, PngError> {
     Ok(RgbaImage { rgba, width: info.width, height: info.height })
 }
 
+/// `image` as PNG bytes (8-bit RGBA).
+pub fn encode_png(image: &RgbaImage) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, image.width, image.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(&image.rgba))
+        .expect("encoding to memory can't fail");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +79,12 @@ mod tests {
         encoder.set_depth(png::BitDepth::Eight);
         encoder.write_header().unwrap().write_image_data(pixels).unwrap();
         out
+    }
+
+    #[test]
+    fn encode_png_round_trips_through_decode_png() {
+        let image = RgbaImage { rgba: vec![9, 8, 7, 6, 5, 4, 3, 2], width: 1, height: 2 };
+        assert_eq!(decode_png(&encode_png(&image)).unwrap(), image);
     }
 
     #[test]
