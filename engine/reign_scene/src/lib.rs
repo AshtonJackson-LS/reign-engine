@@ -23,6 +23,7 @@ extern crate self as reign_scene;
 
 mod component;
 mod file;
+mod gizmos;
 mod object;
 pub mod path;
 pub mod reflect;
@@ -31,6 +32,7 @@ mod scene;
 
 pub use component::{Bounds, Component};
 pub use file::SceneError;
+pub use gizmos::{GizmoLine, Gizmos};
 pub use object::{GameObject, ObjectId, Transform};
 pub use reflect::{FieldHint, FieldInfo, Mut, Reflect, Rgba8};
 pub use registry::{ComponentInfo, ComponentRegistry};

@@ -91,6 +91,7 @@ The editor can't yet (see the roadmap).
 | --- | --- |
 | What scripts can call (`ctx.…`) | `app/src/runtime.rs` (`CtxExt`), `app/src/lib.rs` (`prelude`) |
 | Built-in components | `app/src/components.rs`, `app/src/physics.rs` |
+| Gizmos: the `Gizmos` line collector, the `Behaviour::gizmos` hook, what the Scene view draws and its toggles | `engine/reign_scene/src/gizmos.rs`, `engine/reign_behaviour/src/lib.rs` (`draw_gizmos`), `app/src/gizmos.rs`, `draw_scene` and `debug_ui` in `app/src/editor.rs` |
 | Trail Renderer: the `TrailRenderer` component (points are game state), its tick (`trail_system` in `runtime.rs`), drawing | `app/src/components.rs`, `app/src/trail.rs`, `app/src/view.rs`, `Renderer::line`/`parallelogram` in `engine/reign_render/src/lib.rs` |
 | Animation playback, scene changes, sound events | `app/src/runtime.rs` (`animation_system`, `tick`, `Event`) |
 | Sound output | `app/src/audio.rs`, `engine/reign_audio` |

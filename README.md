@@ -166,10 +166,21 @@ whether it's standing on something.
 
 A component is a `#[derive(Component)]` struct (its public fields show in
 the Inspector); `impl Behaviour<World> for It` gives it `start`,
-`fixed_update` (120 Hz), `late_update` and `on_message`. Files start with
+`fixed_update` (120 Hz), `late_update` and `on_message`, and `gizmos` to draw
+helper lines in the Scene view (below). Files start with
 `use reign_engine::prelude::*;`, which brings in the engine types plus
 shortcuts such as `ctx.get::<T>(me)`, `ctx.translate(me, delta)`,
 `ctx.axis_x()` and `ctx.pressed(Button::Jump)` (arrows/WASD, Space, J/K/L).
+
+**Gizmos** (Unity's `OnDrawGizmos`) are lines a component draws in the editor's
+Scene view while the game is stopped, to show what it does: a range, a patrol
+path, an aim direction. Implement `fn gizmos(scene: &Scene, me: ObjectId, g: &mut Gizmos)`
+in the component's `impl Behaviour<World>` and draw with `g.set_color(Rgba8::rgb(..))`,
+`g.line(a, b)`, `g.polyline(&points, closed)`, `g.rect(x, y, w, h)`, `g.circle(center, radius)`,
+`g.cross(center, half)` and `g.arrow(from, to)`, all in world pixels. Gizmos are one
+screen pixel wide at any zoom, are never drawn in Play or an exported game, and can't change
+the scene. The editor also shows each camera's view and a marker at each particle emitter;
+the editor's debug panel has "Show gizmos" and "Show tile grid" checkboxes.
 
 **Input** is a list of named actions in `assets/input.ron` (up to 10),
 each bound to keys, mouse buttons and gamepad buttons and sticks; edit them

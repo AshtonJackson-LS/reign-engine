@@ -186,6 +186,7 @@ What a script can call (`ctx` is the `&mut Ctx`):
 | `ctx.play_sound("sounds/jump.wav")`, `ctx.play(id)` | A sound by path in `assets/`; an object's `AudioSource` |
 | `ctx.play_music("music/theme.wav")`, `ctx.stop_music()` | Looping music |
 | `ctx.play_particles(id)`, `ctx.stop_particles(id)` | Start an object's `ParticleSystem` again; stop it emitting |
+| `fn gizmos(scene: &Scene, me: ObjectId, g: &mut Gizmos)` in `impl Behaviour<World>` | Lines drawn in the editor's Scene view while stopped: `g.set_color(..)`, `g.line`, `g.rect`, `g.circle`, `g.arrow`, `g.cross`, `g.polyline`. Never drawn in Play |
 | `ctx.clear_trail(id)` | Empty an object's `TrailRenderer` (after a teleport) |
 | `ctx.load_scene("scenes/level2.scene.ron")` | Go to another scene when this tick ends |
 | `ctx.rng()` | The only allowed source of randomness |

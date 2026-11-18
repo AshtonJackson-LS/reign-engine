@@ -31,6 +31,7 @@ mod editor;
 mod exe_icon;
 mod export;
 mod font;
+mod gizmos;
 pub mod headless;
 pub mod icon;
 mod input;
@@ -72,7 +73,7 @@ pub mod prelude {
     };
     pub use reign::behaviour::{Behaviour, Envelope, To};
     pub use reign::core::{Button, Fx, FxVec2};
-    pub use reign::scene::{Component, ObjectId, Reflect, Rgba8, Scene, Transform};
+    pub use reign::scene::{Component, Gizmos, ObjectId, Reflect, Rgba8, Scene, Transform};
     pub use serde::{Deserialize, Serialize};
 
     pub use crate::physics::{BodyType, BoxCollider, Rigidbody, TilemapCollider};

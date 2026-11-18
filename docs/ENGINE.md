@@ -227,6 +227,10 @@ the scene:
   cursor (highest `z`, then drawn last), using its component bounds or a
   default 16 px box. Drag moves it, snapped to pixels; hold Ctrl to snap to
   the 16 px grid.
+- **Gizmos**: while stopped, the Scene view draws helper lines over the
+  scene: each camera's view rectangle, a marker at each particle emitter, an
+  optional tile grid, and whatever a Behaviour's `gizmos` adds (see
+  Behaviours). "Show gizmos" and "Show tile grid" are in the debug panel.
 - **Undo/redo**: Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z. Each step is a whole-scene
   snapshot (cheap, thanks to copy-on-write), so every kind of edit restores
   exactly.
@@ -430,6 +434,7 @@ pub trait Behaviour<G: Game>: Component {
     fn late_update(ctx: &mut Ctx<'_, G>, me: ObjectId) {}
     fn on_message(ctx: &mut Ctx<'_, G>, me: ObjectId, msg: &Envelope<G::Message>) {}
     fn on_destroy(ctx: &mut Ctx<'_, G>, me: ObjectId) {}
+    fn gizmos(scene: &Scene, me: ObjectId, gizmos: &mut Gizmos) {}
 }
 ```
 
@@ -454,6 +459,11 @@ it exercises lifecycle, messages, Systems and snapshot/replay anyway.
 - **`on_message`** for each message sent to the object, or broadcast.
 - **`on_destroy`** just before a despawn through the command buffer
   removes the object (and for everything under it).
+- **`gizmos`** is not part of the tick. The editor's Scene view calls it
+  (through `Behaviours::draw_gizmos`) for every object while the game is
+  stopped, to collect lines in a `Gizmos` (`reign_scene`): a float,
+  world-pixel list of lines that is drawn over the frame, never in Play or
+  an exported game, and never part of the state.
 
 ### Stages and order
 

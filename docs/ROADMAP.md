@@ -58,6 +58,10 @@ text or command-line way in, and a way to see the result.
   ribbon behind a moving object, with its points kept in the scene so it
   replays exactly; `ctx.clear_trail`. `Renderer::line` and
   `Renderer::parallelogram` draw it.
+- [x] **Gizmos**: lines drawn over the stopped Scene view (camera view,
+  particle emitters, an optional grid) and `Behaviour::gizmos` for a
+  component's own, like Unity's `OnDrawGizmos`. Editor only; no runtime
+  debug-draw yet.
 - [ ] An Add Component shortcut for Animator: dragging an `.anim.ron` into
   the view could make an animated sprite in one step.
 - [ ] Sound volume settings (master, music, effects) for players, and
