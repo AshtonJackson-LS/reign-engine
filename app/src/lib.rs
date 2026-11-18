@@ -31,6 +31,7 @@ mod editor;
 mod exe_icon;
 mod export;
 mod font;
+mod gizmos;
 pub mod headless;
 pub mod icon;
 mod input;
@@ -42,6 +43,7 @@ mod runtime;
 mod settings;
 mod starter;
 mod tilemap_assets;
+mod trail;
 mod view;
 
 use std::path::PathBuf;
@@ -53,8 +55,8 @@ use reign::assets::AssetDb;
 use reign::editor::{EditorConfig, init_logger, run_editor};
 
 pub use components::{
-    Animator, AudioSource, Camera, Image, NamedClip, ParticleSystem, SpriteRenderer, Text,
-    TextAlign, TilemapRenderer,
+    AmbientLight, Animator, AudioSource, Camera, Image, Light2D, NamedClip, ParticleSystem,
+    SpriteRenderer, Text, TextAlign, TilemapRenderer, TrailPoint, TrailRenderer,
 };
 pub use player::{GAME_FILE, GameInfo, PACK_FILE};
 pub use runtime::{Ctx, CtxExt, Event, Message, Scripts, TICKS_PER_SECOND, World};
@@ -71,13 +73,14 @@ pub mod prelude {
     };
     pub use reign::behaviour::{Behaviour, Envelope, To};
     pub use reign::core::{Button, Fx, FxVec2};
-    pub use reign::scene::{Component, ObjectId, Reflect, Rgba8, Scene, Transform};
+    pub use reign::scene::{Component, Gizmos, ObjectId, Reflect, Rgba8, Scene, Transform};
     pub use serde::{Deserialize, Serialize};
 
     pub use crate::physics::{BodyType, BoxCollider, Rigidbody, TilemapCollider};
     pub use crate::{
-        Animator, AudioSource, Camera, Ctx, CtxExt, Image, Message, NamedClip, ParticleSystem,
-        SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, World,
+        AmbientLight, Animator, AudioSource, Camera, Ctx, CtxExt, Image, Light2D, Message,
+        NamedClip, ParticleSystem, SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign,
+        TilemapRenderer, TrailRenderer, World,
     };
 }
 

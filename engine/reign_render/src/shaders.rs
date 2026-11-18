@@ -6,8 +6,9 @@ const VIEW: vec2<f32> = vec2<f32>(640.0, 360.0);
 
 struct Rect {
     @location(0) pos: vec2<f32>,
-    @location(1) size: vec2<f32>,
-    @location(2) color: vec4<f32>,
+    @location(1) edge_x: vec2<f32>,
+    @location(2) edge_y: vec2<f32>,
+    @location(3) color: vec4<f32>,
 };
 
 struct VsOut {
@@ -22,7 +23,8 @@ fn vs_main(@builtin(vertex_index) i: u32, rect: Rect) -> VsOut {
         vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0),
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
     );
-    let px = rect.pos + corners[i] * rect.size;
+    let c = corners[i];
+    let px = rect.pos + c.x * rect.edge_x + c.y * rect.edge_y;
     let ndc = px / VIEW * 2.0 - 1.0;
     var out: VsOut;
     out.clip = vec4(ndc.x, -ndc.y, 0.0, 1.0);
@@ -108,13 +110,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// A point light in the light map: a soft disc, brightest in the middle.
+///
+/// Where the material target says a pixel has maps (alpha 1), the light is
+/// shaded by the pixel's normal and scaled by its light mask; elsewhere it is
+/// the plain radial light it always was. The material target is the same size
+/// as the light map and holds, per pixel, the normal's x and y in red and
+/// green (0.5 is zero), the mask in blue, and 1 in alpha for pixels with maps.
+/// `reign_assets::lighting::shade_pixel` is the same formula, for the editor.
 pub const LIGHT: &str = r#"
 const VIEW: vec2<f32> = vec2<f32>(640.0, 360.0);
+
+@group(0) @binding(0) var material: texture_2d<f32>;
+@group(0) @binding(1) var material_sampler: sampler;
 
 struct Light {
     @location(0) pos: vec2<f32>,
     @location(1) radius: f32,
-    @location(2) pad: f32,
+    @location(2) height: f32,
     @location(3) color: vec4<f32>,
 };
 
@@ -122,6 +134,9 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) local: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) world: vec2<f32>,
+    @location(3) @interpolate(flat) centre: vec2<f32>,
+    @location(4) @interpolate(flat) height: f32,
 };
 
 @vertex
@@ -131,11 +146,15 @@ fn vs_main(@builtin(vertex_index) i: u32, l: Light) -> VsOut {
         vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
     );
     let c = corners[i];
-    let ndc = (l.pos + c * l.radius) / VIEW * 2.0 - 1.0;
+    let world = l.pos + c * l.radius;
+    let ndc = world / VIEW * 2.0 - 1.0;
     var out: VsOut;
     out.clip = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     out.local = c;
     out.color = l.color;
+    out.world = world;
+    out.centre = l.pos;
+    out.height = l.height;
     return out;
 }
 
@@ -145,7 +164,68 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Smooth to zero at the radius, with a hot core like a real falloff.
     let edge = clamp(1.0 - d2, 0.0, 1.0);
     let f = edge * edge / (1.0 + 8.0 * d2);
-    return vec4(in.color.rgb * f, 0.0);
+    let m = textureSampleLevel(material, material_sampler, in.world / VIEW, 0.0);
+    var shade = 1.0;
+    if m.a > 0.5 {
+        let xy = m.rg * 2.0 - 1.0;
+        let n = vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+        // Image y grows down, normals have up as positive.
+        let to_light = in.centre - in.world;
+        let l = normalize(vec3(to_light.x, -to_light.y, in.height));
+        shade = max(dot(n, l), 0.0) * m.b;
+    }
+    return vec4(in.color.rgb * f * shade, 0.0);
+}
+"#;
+
+/// The sprites again, into the material target: each solid pixel of a sprite
+/// writes its material (or nothing, for a sprite without maps), so what is
+/// frontmost at a pixel decides how lights shade it.
+pub const SPRITE_MATERIAL: &str = r#"
+const VIEW: vec2<f32> = vec2<f32>(640.0, 360.0);
+
+@group(0) @binding(0) var sheet: texture_2d<f32>;
+@group(0) @binding(1) var pixel_sampler: sampler;
+@group(1) @binding(0) var material: texture_2d<f32>;
+@group(1) @binding(1) var material_sampler: sampler;
+
+struct Sprite {
+    @location(0) pos: vec2<f32>,
+    @location(1) size: vec2<f32>,
+    @location(2) uv_min: vec2<f32>,
+    @location(3) uv_max: vec2<f32>,
+    @location(4) color: vec4<f32>,
+    @location(5) crimson: vec2<f32>,
+};
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32, s: Sprite) -> VsOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0),
+        vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+    );
+    let c = corners[i];
+    let ndc = (s.pos + c * s.size) / VIEW * 2.0 - 1.0;
+    var out: VsOut;
+    out.clip = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    out.uv = mix(s.uv_min, s.uv_max, c);
+    out.alpha = s.color.a;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let coverage = textureSampleLevel(sheet, pixel_sampler, in.uv, 0.0).a * in.alpha;
+    if coverage < 0.5 {
+        discard;
+    }
+    return textureSampleLevel(material, material_sampler, in.uv, 0.0);
 }
 "#;
 

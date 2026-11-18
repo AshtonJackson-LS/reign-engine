@@ -105,6 +105,8 @@ pub enum Open {
     Slicer(Guid),
     Animation(Guid),
     Particles(Guid),
+    /// Make and edit a texture's normal map and light mask.
+    Lighting(Guid),
     /// Prefab Mode.
     Prefab(Guid),
     /// Open this scene in place of the current one.
@@ -719,6 +721,25 @@ fn asset_cell(
             }
             _ => {}
         }
+        if matches!(info.kind, AssetKind::Texture | AssetKind::SpriteSheet)
+            && ui
+                .button("Open in Lighting")
+                .on_hover_text("Make its normal map and light mask")
+                .clicked()
+        {
+            state.open = Some(Open::Lighting(info.guid));
+            ui.close();
+        }
+        if matches!(info.kind, AssetKind::Texture | AssetKind::SpriteSheet)
+            && db.root().is_some()
+            && ui
+                .button("Generate lighting maps")
+                .on_hover_text("Make any missing normal map and light mask now, with the defaults")
+                .clicked()
+        {
+            state.status = Some(crate::lighting_editor::generate_for_texture(db, info.guid));
+            ui.close();
+        }
         if ui.button("Copy GUID").clicked() {
             ui.ctx().copy_text(info.guid.to_string());
             ui.close();
@@ -747,6 +768,14 @@ fn folder_menu(response: &egui::Response, db: &AssetDb, state: &mut ProjectState
         }
         if ui.button("Delete").clicked() {
             state.confirm = Some((Target::Folder(path.to_owned()), Vec::new()));
+            ui.close();
+        }
+        if ui
+            .button("Generate lighting maps")
+            .on_hover_text("Make normal maps and light masks for the textures in this folder")
+            .clicked()
+        {
+            state.status = Some(crate::lighting_editor::generate_for_folder(db, path));
             ui.close();
         }
     });
@@ -966,6 +995,14 @@ pub fn inspector(ui: &mut Ui, db: &AssetDb, state: &mut ProjectState, guid: Guid
             state.open = Some(Open::Particles(guid));
         }
         _ => {}
+    }
+    if matches!(kind, AssetKind::Texture | AssetKind::SpriteSheet)
+        && ui
+            .button("Open in Lighting")
+            .on_hover_text("Make its normal map and light mask")
+            .clicked()
+    {
+        state.open = Some(Open::Lighting(guid));
     }
     let ctx = ui.ctx().clone();
     if let Some(info) = db.assets().into_iter().find(|i| i.guid == guid)

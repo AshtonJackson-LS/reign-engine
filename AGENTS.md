@@ -91,6 +91,9 @@ The editor can't yet (see the roadmap).
 | --- | --- |
 | What scripts can call (`ctx.…`) | `app/src/runtime.rs` (`CtxExt`), `app/src/lib.rs` (`prelude`) |
 | Built-in components | `app/src/components.rs`, `app/src/physics.rs` |
+| Normal maps, light masks and the Lighting tab: the generator, edit and shading maths (pure, tested); the tab and its Modify dialog; the renderer's material pass and light shader; packing a sheet's maps for the renderer; `Light2D` / `AmbientLight` | `engine/reign_assets/src/lighting/` (`generate.rs`, `modify.rs`, `shade.rs`), `engine/reign_editor/src/lighting_editor.rs` and `lighting_modify.rs`, `engine/reign_render` (`Renderer::set_material`, the `LIGHT` and `SPRITE_MATERIAL` shaders in `shaders.rs`, `post.rs`), `app/src/view.rs` (`sheet_material`, `draw_lights`), `app/src/components.rs` |
+| Gizmos: the `Gizmos` line collector, the `Behaviour::gizmos` hook, what the Scene view draws and its toggles | `engine/reign_scene/src/gizmos.rs`, `engine/reign_behaviour/src/lib.rs` (`draw_gizmos`), `app/src/gizmos.rs`, `draw_scene` and `debug_ui` in `app/src/editor.rs` |
+| Trail Renderer: the `TrailRenderer` component (points are game state), its tick (`trail_system` in `runtime.rs`), drawing | `app/src/components.rs`, `app/src/trail.rs`, `app/src/view.rs`, `Renderer::line`/`parallelogram` in `engine/reign_render/src/lib.rs` |
 | Animation playback, scene changes, sound events | `app/src/runtime.rs` (`animation_system`, `tick`, `Event`) |
 | Sound output | `app/src/audio.rs`, `engine/reign_audio` |
 | Particle effects: the `*.particles.ron` format, the simulation, drawing, the Particles tab, the `ParticleSystem` component | `engine/reign_assets/src/particles.rs`, `engine/reign_particles` (`lib.rs` runs, `draw.rs` makes quads, `render.rs` draws), `engine/reign_editor/src/particle_editor.rs`, `app/src/particles.rs` (playing a scene's systems), `app/src/components.rs` |

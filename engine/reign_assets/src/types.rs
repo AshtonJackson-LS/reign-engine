@@ -73,6 +73,12 @@ pub struct SpriteSheet {
     /// The same layout drawn facing the other way, for sheets that come in
     /// left and right versions.
     pub mirrored: Handle<Texture>,
+    /// A normal map for the texture (made in the Lighting tab): same size
+    /// and layout as `texture`, green up. Lights shade the sprites with it.
+    pub normal: Handle<Texture>,
+    /// A light mask for the texture: how much direct light each pixel
+    /// receives (the red channel), same size and layout as `texture`.
+    pub light_mask: Handle<Texture>,
     /// Texels per world pixel.
     #[reflect(range(1, 4))]
     pub density: u8,
@@ -501,6 +507,26 @@ pub fn to_ron<T: Serialize>(value: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sheet_without_maps_loads_and_one_with_them_round_trips() {
+        // Sheets saved before normal maps existed have neither field.
+        let old =
+            SpriteSheet::load(b"(density: 2, sprites: [])", &Meta::new_for("a.sheet.ron")).unwrap();
+        assert!(old.normal.is_none() && old.light_mask.is_none());
+        assert_eq!(old.density, 2);
+
+        let sheet = SpriteSheet {
+            texture: Handle::new(crate::Guid::new()),
+            normal: Handle::new(crate::Guid::new()),
+            light_mask: Handle::new(crate::Guid::new()),
+            density: 1,
+            ..SpriteSheet::default()
+        };
+        let back =
+            SpriteSheet::load(to_ron(&sheet).as_bytes(), &Meta::new_for("a.sheet.ron")).unwrap();
+        assert_eq!(back, sheet);
+    }
 
     #[test]
     fn clip_sampling_matches_the_engine_clip() {

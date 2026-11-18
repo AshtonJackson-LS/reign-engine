@@ -45,6 +45,9 @@ pub enum Action {
     Prefab(PrefabAction),
     /// Add this tag to the project's tags (the object already has it).
     AddTag(String),
+    /// Add Component → Create Component: open the app's New Component
+    /// dialog, starting with this name (what was typed in the search box).
+    NewComponent(String),
 }
 
 /// The prefab instance buttons.
@@ -70,6 +73,9 @@ pub struct Lookups<'a> {
     pub layers: &'a [String],
     /// The project's tags (see `EditorApp::tag_names`).
     pub tags: &'a [String],
+    /// Whether Add Component ends with Create Component (see
+    /// `EditorApp::can_create_component`).
+    pub can_create_component: bool,
 }
 
 /// Draws the Inspector for `id`. Field edits go straight into the scene;
@@ -81,7 +87,7 @@ pub fn inspector(
     editable: bool,
     lookups: Lookups,
 ) -> Option<Action> {
-    let Lookups { registry, assets, prefab, layers, tags } = lookups;
+    let Lookups { registry, assets, prefab, layers, tags, can_create_component } = lookups;
     let Some(object) = scene.object(id) else {
         ui.weak("The selected object is gone.");
         return None;
@@ -198,18 +204,135 @@ pub fn inspector(
         if let Some(registry) = registry {
             ui.add_space(8.0);
             let present = scene.component_names(id);
-            ui.menu_button("Add Component", |ui| {
-                for name in registry.names().filter(|n| !present.contains(n)) {
-                    if ui.button(name).clicked() {
-                        registry.insert_default(scene, id, name);
-                        action = Some(Action::Edit(format!("Add {name}")));
-                        ui.close();
-                    }
+            let names: Vec<&'static str> =
+                registry.names().filter(|n| !present.contains(n)).collect();
+            // The search box's text and whether it still wants the focus
+            // live in egui's memory, and start afresh each time the menu opens.
+            let key = egui::Id::new(("add component", id));
+            let mut query: String = ui.data_mut(|d| d.get_temp(key)).unwrap_or_default();
+            let mut focus: bool = ui.data_mut(|d| d.get_temp(key.with("focus"))).unwrap_or(true);
+            let menu = ui.menu_button("Add Component", |ui| {
+                let choice =
+                    add_component_list(ui, &names, &mut query, can_create_component, &mut focus);
+                if choice.is_some() {
+                    ui.close();
                 }
+                choice
+            });
+            match menu.inner {
+                None => {
+                    query.clear();
+                    focus = true;
+                }
+                Some(Some(Choice::Add(name))) => {
+                    registry.insert_default(scene, id, name);
+                    action = Some(Action::Edit(format!("Add {name}")));
+                    query.clear();
+                    focus = true;
+                }
+                Some(Some(Choice::Create(name))) => {
+                    action = Some(Action::NewComponent(name));
+                    query.clear();
+                    focus = true;
+                }
+                Some(None) => {}
+            }
+            ui.data_mut(|d| {
+                d.insert_temp(key, query);
+                d.insert_temp(key.with("focus"), focus);
             });
         }
     });
     action
+}
+
+/// How wide the Add Component menu is, in points.
+const ADD_COMPONENT_WIDTH: f32 = 240.0;
+
+/// What Add Component's list chose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Choice<'a> {
+    /// Add this component to the object.
+    Add(&'a str),
+    /// Make a new component type, starting with the typed text as its name.
+    Create(String),
+}
+
+/// The names that match what was typed, best first: every word of `query`
+/// must be somewhere in the name, in any case ("trail rend" finds
+/// `TrailRenderer`), and names that start with the first word come before
+/// the rest. An empty query matches everything, in the order given.
+fn matching<'a>(names: &[&'a str], query: &str) -> Vec<&'a str> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let mut found: Vec<&'a str> = names
+        .iter()
+        .copied()
+        .filter(|name| {
+            let lower = name.to_lowercase();
+            words.iter().all(|w| lower.contains(w.as_str()))
+        })
+        .collect();
+    if let Some(first) = words.first() {
+        // Stable, so each group keeps the order given.
+        found.sort_by_key(|name| !name.to_lowercase().starts_with(first.as_str()));
+    }
+    found
+}
+
+/// The inside of the Add Component menu: a search box, the components that
+/// match it, then (when the app can) Create Component at the bottom. Enter
+/// takes the first match, or starts Create Component when nothing matches.
+/// `focus` is true until the box has taken the keyboard.
+fn add_component_list<'a>(
+    ui: &mut Ui,
+    names: &[&'a str],
+    query: &mut String,
+    can_create: bool,
+    focus: &mut bool,
+) -> Option<Choice<'a>> {
+    // A fixed width: a box that fills the space would stretch the menu across
+    // the whole window.
+    ui.set_width(ADD_COMPONENT_WIDTH);
+    let search = ui.add(
+        egui::TextEdit::singleline(&mut *query).hint_text("Search…").desired_width(f32::INFINITY),
+    );
+    if *focus {
+        search.request_focus();
+        *focus = false;
+    }
+    let found = matching(names, query);
+    let typed = !query.trim().is_empty();
+    let mut choice = None;
+    if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        choice = match found.first() {
+            Some(first) => Some(Choice::Add(first)),
+            None if can_create => Some(Choice::Create(query.trim().to_owned())),
+            None => None,
+        };
+    }
+    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+        for (i, name) in found.iter().enumerate() {
+            // With something typed, Enter takes the first: show which.
+            let button = egui::Button::new(*name).selected(typed && i == 0);
+            if ui.add(button).clicked() {
+                choice = Some(Choice::Add(name));
+            }
+        }
+        if found.is_empty() {
+            ui.weak("No matching components");
+        }
+    });
+    if can_create {
+        ui.separator();
+        if ui
+            .button("Create Component…")
+            .on_hover_text("Make a new component, as Scripts → New Component does")
+            .clicked()
+        {
+            choice = Some(Choice::Create(query.trim().to_owned()));
+        }
+    }
+    choice
 }
 
 /// The object's tag: picked from the project's tags, or typed. Typing a
@@ -712,7 +835,14 @@ mod tests {
         let input = egui::RawInput { events, ..Default::default() };
         let mut action = None;
         let mut output = ctx.run_ui(input, |ui| {
-            let lookups = Lookups { registry: None, assets: None, prefab: None, layers: &[], tags };
+            let lookups = Lookups {
+                registry: None,
+                assets: None,
+                prefab: None,
+                layers: &[],
+                tags,
+                can_create_component: false,
+            };
             action = inspector(ui, scene, id, true, lookups);
         });
         // Nothing draws these frames; egui panics if the font texture it
@@ -776,6 +906,97 @@ mod tests {
         let other = scene.spawn("Goblin");
         assert_eq!(type_tag(&ctx, &mut scene, other, &tags, "Enemy"), []);
         assert_eq!(scene.object(other).unwrap().tag, "Enemy");
+    }
+
+    const COMPONENTS: &[&str] = &["Animator", "ParticleSystem", "Rigidbody", "TrailRenderer"];
+
+    #[test]
+    fn searching_components_matches_words_anywhere_and_ignores_case() {
+        assert_eq!(matching(COMPONENTS, ""), COMPONENTS, "no search: everything, in order");
+        assert_eq!(matching(COMPONENTS, "  "), COMPONENTS);
+        assert_eq!(matching(COMPONENTS, "rend"), ["TrailRenderer"]);
+        assert_eq!(matching(COMPONENTS, "trail rend"), ["TrailRenderer"], "each word, any order");
+        assert_eq!(matching(COMPONENTS, "REND trail"), ["TrailRenderer"]);
+        assert!(matching(COMPONENTS, "zzz").is_empty());
+        // Names starting with it come first, then the rest in order.
+        assert_eq!(
+            matching(COMPONENTS, "r"),
+            ["Rigidbody", "Animator", "ParticleSystem", "TrailRenderer"]
+        );
+    }
+
+    /// One frame of the Add Component list, with what it chose as text.
+    fn list_frame(
+        ctx: &egui::Context,
+        query: &mut String,
+        can_create: bool,
+        focus: &mut bool,
+        events: Vec<egui::Event>,
+    ) -> Option<String> {
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut chosen = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            chosen =
+                add_component_list(ui, COMPONENTS, query, can_create, focus).map(|c| match c {
+                    Choice::Add(name) => format!("add {name}"),
+                    Choice::Create(name) => format!("create {name}"),
+                });
+        });
+        output.textures_delta.clear();
+        chosen
+    }
+
+    /// Opens the list, types `text` and presses Enter: what it chose.
+    fn search_and_enter(text: &str, can_create: bool) -> (Option<String>, String) {
+        let ctx = egui::Context::default();
+        let (mut query, mut focus) = (String::new(), true);
+        let mut chosen = Vec::new();
+        for events in [vec![], vec![], vec![egui::Event::Text(text.into())], vec![enter()], vec![]]
+        {
+            chosen.extend(list_frame(&ctx, &mut query, can_create, &mut focus, events));
+        }
+        (chosen.pop(), query)
+    }
+
+    #[test]
+    fn typing_in_add_component_and_pressing_enter_adds_the_first_match() {
+        let (chosen, query) = search_and_enter("rend", true);
+        assert_eq!(chosen.as_deref(), Some("add TrailRenderer"));
+        assert_eq!(query, "rend");
+        assert_eq!(
+            search_and_enter("r", true).0.as_deref(),
+            Some("add Rigidbody"),
+            "best match first"
+        );
+    }
+
+    #[test]
+    fn enter_with_no_match_starts_create_component_with_what_was_typed() {
+        assert_eq!(search_and_enter(" Fireball ", true).0.as_deref(), Some("create Fireball"));
+        assert_eq!(search_and_enter("Fireball", false).0, None, "an app that can't create");
+    }
+
+    #[test]
+    fn the_add_component_menu_is_a_fixed_width_not_the_whole_window() {
+        let ctx = egui::Context::default();
+        let (mut query, mut focus) = (String::new(), true);
+        let mut width = 0.0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            add_component_list(ui, COMPONENTS, &mut query, true, &mut focus);
+            width = ui.min_rect().width();
+        });
+        output.textures_delta.clear();
+        assert!((width - ADD_COMPONENT_WIDTH).abs() < 1.0, "{width}");
+    }
+
+    #[test]
+    fn the_list_chooses_nothing_until_asked() {
+        let ctx = egui::Context::default();
+        let (mut query, mut focus) = (String::new(), true);
+        for _ in 0..3 {
+            assert_eq!(list_frame(&ctx, &mut query, true, &mut focus, vec![]), None);
+        }
+        assert!(!focus, "the search box took the keyboard");
     }
 
     #[test]

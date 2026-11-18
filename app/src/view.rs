@@ -1,17 +1,23 @@
-//! Drawing a scene: sprites, images and tilemaps back to front, then
-//! particle effects over them, from the first camera. The editor's Play and edit views and the exported game all draw
-//! through here, so a game looks the same everywhere.
+//! Drawing a scene: sprites, images, tilemaps and trails back to front, then
+//! particle effects over them, from the first camera. The editor's Play and
+//! edit views and the exported game all draw through here, so a game looks
+//! the same everywhere.
 
 use std::collections::HashMap;
 
-use reign::assets::{AssetDb, Guid, Handle, SpriteSheet, Texture};
-use reign::render::{Color, Renderer, TextureId, VIEW_HEIGHT, VIEW_WIDTH};
+use reign::assets::lighting::compose_material;
+use reign::assets::{AssetDb, Guid, Handle, RgbaImage, SpriteSheet, Texture};
+use reign::render::{Color, Light, Lighting, Renderer, TextureId, VIEW_HEIGHT, VIEW_WIDTH};
 use reign::scene::{ObjectId, Scene, Transform};
 
-use crate::components::{Animator, Camera, Image, SpriteRenderer, Text, TilemapRenderer};
+use crate::components::{
+    AmbientLight, Animator, Camera, Image, Light2D, SpriteRenderer, Text, TilemapRenderer,
+    TrailRenderer,
+};
 use crate::font::glyph_rect;
 use crate::particles::SceneParticles;
 use crate::physics::TILE;
+use crate::trail;
 
 /// The colour behind everything, from Project Settings' `background`.
 pub fn background(rgb: [u8; 3]) -> Color {
@@ -72,12 +78,73 @@ pub fn current_frame(
     Some(Frame { sheet, rect, pivot })
 }
 
+/// What a texture's material was last packed from, so it is made again only
+/// when the texture, its normal map or its light mask changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MaterialKey {
+    color: u32,
+    normal: Option<(Guid, u32)>,
+    mask: Option<(Guid, u32)>,
+}
+
+/// The normal map and light mask of a sheet, packed into the one image the
+/// renderer shades with, if it has either and they are the texture's size.
+pub fn sheet_material(db: &AssetDb, sheet: &SpriteSheet) -> Option<RgbaImage> {
+    if sheet.normal.is_none() && sheet.light_mask.is_none() {
+        return None;
+    }
+    let albedo = db.load(sheet.texture).ok()?;
+    let size = (albedo.image.width, albedo.image.height);
+    let load = |handle: Handle<Texture>| {
+        if handle.is_none() {
+            return None;
+        }
+        match db.load(handle) {
+            Ok(t) if (t.image.width, t.image.height) == size => Some(t),
+            Ok(t) => {
+                log::warn!(
+                    "{handle:?} is {}x{} but its texture is {}x{}: ignored",
+                    t.image.width,
+                    t.image.height,
+                    size.0,
+                    size.1
+                );
+                None
+            }
+            Err(e) => {
+                log::warn!("{handle:?}: {e}");
+                None
+            }
+        }
+    };
+    let (normal, mask) = (load(sheet.normal), load(sheet.light_mask));
+    if normal.is_none() && mask.is_none() {
+        return None;
+    }
+    Some(compose_material(
+        &albedo.image,
+        normal.as_ref().map(|t| &t.image),
+        mask.as_ref().map(|t| &t.image),
+    ))
+}
+
+fn material_key(db: &AssetDb, sheet: &SpriteSheet) -> MaterialKey {
+    let version = |h: Handle<Texture>| (!h.is_none()).then(|| (h.guid, db.version(h.guid)));
+    MaterialKey {
+        color: db.version(sheet.texture.guid),
+        normal: version(sheet.normal),
+        mask: version(sheet.light_mask),
+    }
+}
+
 /// Textures uploaded to the renderer, kept across frames and replaced when
 /// their asset reloads.
 #[derive(Default)]
 pub struct Sprites {
     /// By asset, with the version that was uploaded.
     textures: HashMap<Guid, (u32, TextureId)>,
+    /// By texture, what its material was packed from.
+    materials: HashMap<Guid, MaterialKey>,
     /// The scene's particle effects.
     particles: SceneParticles,
     /// The [`crate::World::scenes_entered`] the particles belong to.
@@ -96,6 +163,51 @@ impl Sprites {
         if self.scene != Some(entered) {
             self.scene = Some(entered);
             self.particles.reset();
+        }
+    }
+
+    /// Gives the sheet's texture its material, or takes it away, when the
+    /// sheet's maps (or the texture) have changed since it was last done.
+    fn sync_material(
+        &mut self,
+        r: &mut Renderer,
+        db: &AssetDb,
+        sheet: &SpriteSheet,
+        tex: TextureId,
+    ) {
+        let key = material_key(db, sheet);
+        if self.materials.get(&sheet.texture.guid) == Some(&key) {
+            return;
+        }
+        self.materials.insert(sheet.texture.guid, key);
+        match sheet_material(db, sheet) {
+            Some(m) => r.set_material(tex, &m.rgba, m.width, m.height),
+            None => r.clear_material(tex),
+        }
+    }
+
+    /// Queues the scene's lights, and sets how bright it is where none reach:
+    /// from its [`AmbientLight`], or fully lit without one.
+    fn draw_lights(&self, r: &mut Renderer, scene: &Scene) {
+        let lighting = match scene.iter::<AmbientLight>().next() {
+            Some((_, a)) => Lighting {
+                ambient: Color::rgba8(a.color.r, a.color.g, a.color.b, 255),
+                ambient_intensity: a.intensity.to_f32(),
+                ..Lighting::default()
+            },
+            None => Lighting::default(),
+        };
+        r.set_lighting(lighting);
+        for (id, l) in scene.iter::<Light2D>().filter(|(_, l)| l.on) {
+            let at = scene.world_position(id);
+            r.light(Light {
+                x: at.x.to_f32(),
+                y: at.y.to_f32(),
+                radius: l.radius.to_f32(),
+                color: Color::rgba8(l.color.r, l.color.g, l.color.b, 255),
+                intensity: l.intensity.to_f32(),
+                height: l.height.to_f32(),
+            });
         }
     }
 
@@ -211,10 +323,17 @@ impl Sprites {
         for (id, _) in scene.iter::<Text>() {
             items.push((scene.transform(id).map_or(0, |t| t.z), id));
         }
+        for (id, _) in scene.iter::<TrailRenderer>() {
+            items.push((scene.transform(id).map_or(0, |t| t.z), id));
+        }
         items.sort();
         items.dedup();
         for (_, id) in items {
             let pos = scene.world_position(id);
+            // Behind its own object.
+            if let Some(trail) = scene.get::<TrailRenderer>(id) {
+                trail::draw(r, trail, pos);
+            }
             if let Some(tm) = scene.get::<TilemapRenderer>(id) {
                 let at = (pos.x.round_px(), pos.y.round_px());
                 self.draw_tilemap(r, db, tm, at, view);
@@ -235,6 +354,7 @@ impl Sprites {
                 && frame.rect[2] > 0
                 && frame.rect[3] > 0
             {
+                self.sync_material(r, db, &frame.sheet, tex);
                 let d = frame.sheet.density.max(1) as f32;
                 let [sx, sy, sw, sh] = frame.rect.map(|v| v as f32);
                 // Drawn size in world pixels, and how much that stretches it.
@@ -254,6 +374,7 @@ impl Sprites {
                 self.draw_text(r, db, text, (at.0.round(), at.1.round()));
             }
         }
+        self.draw_lights(r, scene);
         self.particles.draw(r, scene, db);
     }
 

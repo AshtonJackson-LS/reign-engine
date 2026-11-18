@@ -146,6 +146,17 @@ impl Code {
         self.mode = mode;
     }
 
+    /// Opens the New Component dialog (Scripts menu, or Add Component ->
+    /// Create Component), with `name` typed in.
+    pub fn open_component_dialog(&mut self, name: &str) {
+        self.dialog = Some(Dialog {
+            name: name.to_owned(),
+            template: Template::Behaviour,
+            error: None,
+            focus: true,
+        });
+    }
+
     /// Opens Input Actions (Scripts menu, or Project Settings' Edit
     /// bindings…) on the project's `assets/input.ron`.
     pub fn open_input_dialog(&mut self) {
@@ -429,12 +440,7 @@ impl Code {
 
         ui.menu_button("Scripts", |ui| {
             if ui.button("New Component…").clicked() {
-                self.dialog = Some(Dialog {
-                    name: String::new(),
-                    template: Template::Behaviour,
-                    error: None,
-                    focus: true,
-                });
+                self.open_component_dialog("");
                 ui.close();
             }
             if ui.button("Input Actions…").clicked() {
@@ -814,5 +820,15 @@ mod tests {
             assert!(!stale.exists(), "leftovers from earlier reloads are cleared");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn create_component_opens_the_new_component_dialog_with_the_typed_name() {
+        let mut code = Code::new(std::env::temp_dir().join("reign-no-such-project"), None);
+        assert!(code.dialog.is_none());
+        code.open_component_dialog("Fire Ball");
+        let dialog = code.dialog.as_ref().expect("the dialog opened");
+        assert_eq!(dialog.name, "Fire Ball");
+        assert!(dialog.focus, "its name box takes the keyboard");
     }
 }
