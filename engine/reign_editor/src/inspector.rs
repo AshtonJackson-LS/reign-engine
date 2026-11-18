@@ -246,6 +246,9 @@ pub fn inspector(
     action
 }
 
+/// How wide the Add Component menu is, in points.
+const ADD_COMPONENT_WIDTH: f32 = 240.0;
+
 /// What Add Component's list chose.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Choice<'a> {
@@ -287,7 +290,9 @@ fn add_component_list<'a>(
     can_create: bool,
     focus: &mut bool,
 ) -> Option<Choice<'a>> {
-    ui.set_min_width(220.0);
+    // A fixed width: a box that fills the space would stretch the menu across
+    // the whole window.
+    ui.set_width(ADD_COMPONENT_WIDTH);
     let search = ui.add(
         egui::TextEdit::singleline(&mut *query).hint_text("Search…").desired_width(f32::INFINITY),
     );
@@ -969,6 +974,19 @@ mod tests {
     fn enter_with_no_match_starts_create_component_with_what_was_typed() {
         assert_eq!(search_and_enter(" Fireball ", true).0.as_deref(), Some("create Fireball"));
         assert_eq!(search_and_enter("Fireball", false).0, None, "an app that can't create");
+    }
+
+    #[test]
+    fn the_add_component_menu_is_a_fixed_width_not_the_whole_window() {
+        let ctx = egui::Context::default();
+        let (mut query, mut focus) = (String::new(), true);
+        let mut width = 0.0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            add_component_list(ui, COMPONENTS, &mut query, true, &mut focus);
+            width = ui.min_rect().width();
+        });
+        output.textures_delta.clear();
+        assert!((width - ADD_COMPONENT_WIDTH).abs() < 1.0, "{width}");
     }
 
     #[test]
