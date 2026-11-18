@@ -134,7 +134,8 @@ one with a camera is made if missing). With no folder given, the editor uses
 The standalone editor's built-in components: `Camera` (centres the Game
 view), `SpriteRenderer` (one sprite of a sprite sheet, with a tint colour and
 an optional stretched size), `Image` (a whole texture), `Animator`, `Text`,
-`AudioSource`, `ParticleSystem`, `TrailRenderer`, `TilemapRenderer`, and the physics
+`AudioSource`, `ParticleSystem`, `TrailRenderer`, `Light2D`, `AmbientLight`,
+`TilemapRenderer`, and the physics
 components below. Every
 project gets `assets/Reign/Shapes` (Square, Circle, Triangle, Diamond,
 Hexagon, Capsule, Rounded Square) and `assets/Reign/Font`, a 5 by 7 pixel
@@ -245,6 +246,31 @@ object's position is added, and points older than `time` seconds fade away. The 
 `max_points` caps its length. It draws at the object's `z`, behind the object. Unlike particles the
 points are game state (whole subpixels), so a trail replays exactly and is in `state_hash`.
 `ctx.clear_trail(me)` empties it after a teleport.
+
+**Lighting.** A `Light2D` component puts a soft point light at an object, and an
+`AmbientLight` (on any object) sets how bright the scene is where no light reaches: dim it (it
+starts at 0.25) to let the lights show; without one the scene is fully lit, as it always was.
+Sprites can be shaded as if they had shape. The **Lighting** tab (right-click a texture or sprite
+sheet in the Project panel > Open in Lighting) makes a texture's **normal map** (which way each
+pixel faces) and **light mask** (how much light each pixel receives) from its colours, lets you
+edit them by hand, and previews one point light on the sprite as you work. Create Normal Map has
+Presets (Architecture, Character, Object, Terrain), Shape Strength, Normal Strength, Edge Width,
+Facet Splitting, Merge Outlines and "one sprite at a time" using the sheet's cells; Create Light
+Mask has Shading Strength, Darkest, Lightest and Cavity Darkening. Modify has the Wand (W),
+Pencil (B) and Marquee (M) with Shift to add and Alt to take away, Apply Direction (Average Angle,
+Face Angle with a direction sphere, nine direction buttons, Angle Strength) and Normal Strength
+for normals, and Brightness (Relative or Fixed) for masks. The preview has a draggable light with
+Follow Mouse, colour (RGB, HSL, HEX), Brightness, Falloff, Height, Ambient and Light Mask
+sliders, a View dropdown (Final, Albedo, Normal, Light Mask), and BG Color, Detect BG and Hide BG.
+Save writes `name_n.png` and `name_m.png` beside the texture and links them from every sprite
+sheet that uses it (`normal` and `light_mask` fields). "Generate lighting maps" in the Project
+panel's right-click menu makes the missing maps for a texture or a whole folder at once. In the
+game, a sprite whose sheet has maps is lit by every `Light2D` using its normals, and receives
+light in proportion to its mask; sprites without maps are lit by the plain soft disc as before.
+Normal maps are green-up (an image's top is +y); a flat pixel is (128, 128, 255). The light mask
+is the red channel. The generated maps are estimates (pixel art holds no real depth), so large or
+hard-surface art may need touching up with Modify. Lights and maps are only drawn: they never
+reach the simulation.
 
 **Finding and spawning:** `ctx.find("Player")` is the first object with
 that name (look it up in `start` and keep the id). `ctx.spawn("prefabs/bullet.prefab.ron", at)`

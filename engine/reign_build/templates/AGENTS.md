@@ -150,6 +150,12 @@ A scene is RON. Objects are listed parents before children.
 - Trail: `"TrailRenderer": (time: "0.5", start_width: "6", end_width: "0")` draws a
   ribbon behind the object that fades after `time` seconds. Also `min_vertex_distance`,
   `start_color`, `end_color`, `additive`, `max_points`, `emitting`.
+- Lights: `"Light2D": (color: (r: 255, g: 200, b: 120, a: 255), radius: "120", height: "24")`
+  is a soft point light at the object (also `intensity`, `on`). `"AmbientLight": (intensity: "0.25")`
+  on any object sets how bright the scene is where no light reaches; add one, or lights have
+  nothing to show against. A sprite sheet with `normal` and `light_mask` PNGs (make them in the
+  editor's Lighting tab: right-click the texture > Open in Lighting) is shaded by the lights using
+  its normals; sprites without maps just get the soft disc. Lights are only drawn.
 - A `BoxCollider` is centred on the object. With a `Rigidbody` the object
   moves (Dynamic falls, Kinematic moves by its velocity, Static never
   moves); without one it's solid scenery.

@@ -322,7 +322,7 @@ assets by handle.
 | Type | What it holds |
 | --- | --- |
 | `Texture` | Decoded RGBA8 pixels and their density. |
-| `SpriteSheet` | A texture (and an optional mirrored twin), named sprites (rect, pivot), an optional grid of cells for animation rows, and a density. Made in the Sprite slicer. |
+| `SpriteSheet` | A texture (and an optional mirrored twin), named sprites (rect, pivot), an optional grid of cells for animation rows, a density, and optionally a `normal` map and a `light_mask` of the texture's size (made in the Lighting tab). Made in the Sprite slicer. |
 | `AnimationClip` | A sheet, a row, a loop mode and frames: cell, duration in ms, a hit flag, an event and presentation cues (shake, flash, dim). Sampled on the 120 Hz tick exactly as `reign_core::animation::Clip` samples (`frame_at_tick`, `to_clip`). |
 | `Tileset` | A texture cut into square tiles, numbered row by row. |
 | `Tilemap` | A tileset, a `collision` layer (`#` solid, `-` one-way, `/` `\` slopes, `.` empty), a `markers` layer (one glyph per cell that the game spawns from) and visual tile layers. `collision_map()` gives the physics `TileMap`. |
@@ -404,8 +404,56 @@ sim-affecting asset.
   height, add boxes on the current frame, drag them or type their numbers;
   Save boxes writes the move sets. Undo covers frames and boxes.
 
+- **Lighting**: a texture's normal map and light mask (see
+  [Lighting](#lighting)). Three slots (albedo, normal map, light mask) with
+  Create, Modify, Remove, Export, Link (or drag a texture from the Project
+  panel); a lit preview of one point light with every control of the original
+  browser tool this follows (Follow Mouse, Light Cursor, colour, Brightness,
+  Falloff, Height, Ambient, Light Mask, View, BG Color, zoom and pan); exports
+  of the final lit image and the canvas into the project's `exports` folder;
+  undo. Generating runs on a worker thread. A map of another size than the
+  texture asks before clearing the others.
+
 Each tool has its own undo history; Ctrl+Z and Ctrl+Y go to the tool under
 the pointer, otherwise to the scene.
+
+### Lighting
+
+Sprites are lit by `Light2D` components, on a scene dimmed by an
+`AmbientLight` (neither is part of the simulation; they are drawn). A sprite
+sheet with a `normal` map and/or a `light_mask` (PNGs the size of its texture)
+is shaded per pixel; the engine's own lights are otherwise plain discs.
+
+- **Normal map**: red is the normal's x (right is more red), green its y with
+  **up** as the bright side (OpenGL style, so an image's top is +y), blue its
+  z. A flat pixel is (128, 128, 255). Alpha is the sprite's alpha.
+- **Light mask**: the red channel is how much *direct* light the pixel gets,
+  0 to 1 (grey images are fine). It does not cast shadows: it is an artistic
+  control, made from the sprite's brightness and darkening crevices.
+- **The formula**, for one light and one mapped pixel:
+  `light.color * intensity * falloff(d) * max(N . L, 0) * mask`, where `L` is
+  the way to the light, which hangs `height` pixels in front of the sprites,
+  and `falloff` is `(1 - u)^2 / (1 + 8u)` with `u = (d / radius)^2`. Pixels
+  with no maps get `falloff` alone. `reign_assets::lighting::shade_pixel` is
+  this formula for the editor's preview, and the light shader in
+  `reign_render` follows it (a test renders it on the GPU and compares).
+- **How it is drawn**: the app packs a sheet's maps into one "material" image
+  (`lighting::compose_material`: normal x and y, mask, and a has-maps flag) and
+  gives it to the renderer with `Renderer::set_material`. After the world pass a
+  material pass draws the world's sprites again into a material target the size
+  of the world, so the frontmost sprite at a pixel decides how it is lit (a
+  sprite without maps in front of one with them lights the plain way). The
+  light map is the same size, and each light reads the material target. Additive
+  sprites, rectangles and fog don't change a pixel's material.
+- **Making the maps**: `reign_assets::lighting` has the maths with no editor in
+  it (`generate_normal_map`, `generate_light_mask`, the `Selection` and edit
+  functions, `shade_image`), and the Lighting tab is its interface. The normal
+  map estimate works on colour clusters and the silhouette: it guesses a height
+  from brightness and the distance to the edge, turns its slope into one of
+  eight headings and a few tilt steps per cluster, splits big clusters into
+  facets, merges tiny ones, lets thin dark outlines take the surface beside
+  them, and bevels the silhouette outwards. It is an estimate: touch up what
+  it gets wrong with Modify.
 
 ### Adding an asset type
 

@@ -43,6 +43,10 @@
 //!   density), saving a sprite sheet.
 //! - **Animation**: the Animation editor (frame timeline, durations, loop
 //!   mode, events, and a 120 Hz preview with play, pause, step and scrub).
+//! - **Lighting**: a texture's normal map and light mask: create them from
+//!   its colours, edit them by hand (wand, pencil, marquee, directions,
+//!   brightness) and preview one point light on the sprite; saving links the
+//!   maps from the sprite sheets that use the texture.
 //! - A toolbar with Play, Pause, Step, Stop, the time scale, undo and redo,
 //!   and the Scene menu (New Scene, Save, Open). Opening or making a scene
 //!   while this one has unsaved changes asks whether to save them first.
