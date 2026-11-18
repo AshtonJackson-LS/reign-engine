@@ -144,6 +144,18 @@ pub trait EditorApp: App {
         None
     }
 
+    /// Whether the app can make a new component type from the editor. If so,
+    /// Add Component ends with Create Component, which calls
+    /// [`EditorApp::create_component`].
+    fn can_create_component(&self) -> bool {
+        false
+    }
+
+    /// Starts making a new component type, as Add Component → Create
+    /// Component asks, with `name` (what was typed in the search box, maybe
+    /// empty) as its suggested name: an app opens its own dialog.
+    fn create_component(&mut self, _name: &str) {}
+
     /// Called every frame before the editor reads the scene: copy state
     /// that still lives outside the scene into it, so it shows up.
     fn sync_scene(&mut self) {}

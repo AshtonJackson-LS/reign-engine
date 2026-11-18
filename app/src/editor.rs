@@ -313,6 +313,14 @@ impl EditorApp for ReignEngine {
         Some(&mut self.world.scene)
     }
 
+    fn can_create_component(&self) -> bool {
+        true
+    }
+
+    fn create_component(&mut self, name: &str) {
+        self.code.open_component_dialog(name);
+    }
+
     fn registry(&self) -> Option<&ComponentRegistry> {
         Some(&self.registry)
     }

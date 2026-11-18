@@ -221,8 +221,12 @@ the scene:
   for the top level. Right-click to create an empty child, duplicate or
   delete.
 - **Inspector**: name and active flag, tag, Transform, then each component through
-  reflection. Right-click a component's header to Reset or Remove; Add
-  Component lists the registry.
+  reflection. Right-click a component's header to Reset or Remove. Add
+  Component opens a list of the registry with a search box: type any part of
+  a name (words in any order, any case) and Enter adds the first match. The
+  list ends with Create Component, which opens the Scripts → New Component
+  dialog with the typed text as the name (an app says it can through
+  `EditorApp::can_create_component` and `create_component`).
 - **Game view**, while not playing: click selects the topmost object under the
   cursor (highest `z`, then drawn last), using its component bounds or a
   default 16 px box. Drag moves it, snapped to pixels; hold Ctrl to snap to

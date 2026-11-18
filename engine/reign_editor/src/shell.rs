@@ -1807,39 +1807,48 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                     assets_ui::inspector(ui, db, &mut self.panels.project, guid);
                 }
             }
-            Tab::Inspector => match (self.panels.selected, self.app.scene_mut()) {
-                (Some(id), Some(scene)) => {
-                    if self.play.in_run() {
-                        ui.weak("Changes made while playing are discarded on Stop.");
-                    }
-                    let info = match (self.prefabs, self.assets) {
-                        (Some(p), Some(db)) => prefab_ui::info(scene, id, &p.with(db), db),
-                        _ => None,
-                    };
-                    let lookups = inspector::Lookups {
-                        registry: self.registry,
-                        assets: self.assets,
-                        prefab: info.as_ref(),
-                        layers: self.layer_names,
-                        tags: self.tag_names,
-                    };
-                    let action = inspector::inspector(ui, scene, id, true, lookups);
-                    match action {
-                        Some(inspector::Action::Edit(label)) => {
-                            self.panels.edit_label = Some(label)
+            Tab::Inspector => {
+                let can_create_component = self.app.can_create_component();
+                match (self.panels.selected, self.app.scene_mut()) {
+                    (Some(id), Some(scene)) => {
+                        if self.play.in_run() {
+                            ui.weak("Changes made while playing are discarded on Stop.");
                         }
-                        Some(inspector::Action::Prefab(a)) => self.panels.prefab_action = Some(a),
-                        Some(inspector::Action::AddTag(tag)) => match self.app.add_tag(&tag) {
-                            Ok(()) => log::info!("added the tag {tag:?} to the project"),
-                            Err(e) => log::error!("couldn't add the tag {tag:?}: {e}"),
-                        },
-                        None => {}
+                        let info = match (self.prefabs, self.assets) {
+                            (Some(p), Some(db)) => prefab_ui::info(scene, id, &p.with(db), db),
+                            _ => None,
+                        };
+                        let lookups = inspector::Lookups {
+                            registry: self.registry,
+                            assets: self.assets,
+                            prefab: info.as_ref(),
+                            layers: self.layer_names,
+                            tags: self.tag_names,
+                            can_create_component,
+                        };
+                        let action = inspector::inspector(ui, scene, id, true, lookups);
+                        match action {
+                            Some(inspector::Action::Edit(label)) => {
+                                self.panels.edit_label = Some(label)
+                            }
+                            Some(inspector::Action::Prefab(a)) => {
+                                self.panels.prefab_action = Some(a)
+                            }
+                            Some(inspector::Action::AddTag(tag)) => match self.app.add_tag(&tag) {
+                                Ok(()) => log::info!("added the tag {tag:?} to the project"),
+                                Err(e) => log::error!("couldn't add the tag {tag:?}: {e}"),
+                            },
+                            Some(inspector::Action::NewComponent(name)) => {
+                                self.app.create_component(&name)
+                            }
+                            None => {}
+                        }
+                    }
+                    _ => {
+                        ui.weak("Select an object in the Hierarchy or the Game view.");
                     }
                 }
-                _ => {
-                    ui.weak("Select an object in the Hierarchy or the Game view.");
-                }
-            },
+            }
             Tab::Debug => {
                 let view = self.panels.game_rect_px(ui.ctx().pixels_per_point());
                 let mut ctx =
