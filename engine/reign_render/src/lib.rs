@@ -47,7 +47,11 @@ const INITIAL_SPRITE_CAPACITY: usize = 64;
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct RectInstance {
     pos: [f32; 2],
-    size: [f32; 2],
+    /// The edge from `pos` to the next corner along x, and along y. A plain
+    /// rectangle is `(w, 0)` and `(0, h)`; a line or a trail segment is a
+    /// parallelogram with the same two edges turned.
+    edge_x: [f32; 2],
+    edge_y: [f32; 2],
     color: [f32; 4],
 }
 
@@ -283,10 +287,40 @@ impl Renderer {
     /// Queues a solid rectangle in world pixels, origin top-left. Fractional
     /// positions are honoured down to one screen pixel.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
-        let pos = [(x + self.offset[0]) * self.draw_scale, (y + self.offset[1]) * self.draw_scale];
+        self.parallelogram((x, y), (w, 0.0), (0.0, h), color);
+    }
+
+    /// Queues a solid line from `a` to `b` in world pixels, `width` thick
+    /// (centred on the line), with flat ends. Like everything else it is
+    /// shifted by the offset and scaled by the draw scale, so the width
+    /// scales too: divide it by the zoom for a constant on-screen width.
+    pub fn line(&mut self, a: (f32, f32), b: (f32, f32), width: f32, color: Color) {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx.hypot(dy);
+        if len <= f32::EPSILON || width <= 0.0 {
+            return;
+        }
+        // The line's unit normal, scaled to half the width.
+        let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
+        self.parallelogram((a.0 + nx, a.1 + ny), (dx, dy), (-2.0 * nx, -2.0 * ny), color);
+    }
+
+    /// Queues a solid parallelogram: `origin`, then the two edges leaving it.
+    /// This is what [`Renderer::rect`] and [`Renderer::line`] draw, and what
+    /// a trail's segments are made of.
+    pub fn parallelogram(
+        &mut self,
+        origin: (f32, f32),
+        edge_x: (f32, f32),
+        edge_y: (f32, f32),
+        color: Color,
+    ) {
+        let s = self.draw_scale;
+        let pos = [(origin.0 + self.offset[0]) * s, (origin.1 + self.offset[1]) * s];
         self.rects.push(RectInstance {
             pos,
-            size: [w * self.draw_scale, h * self.draw_scale],
+            edge_x: [edge_x.0 * s, edge_x.1 * s],
+            edge_y: [edge_y.0 * s, edge_y.1 * s],
             color: color.to_linear(),
         });
         let end = self.rects.len() as u32;
@@ -789,8 +823,8 @@ fn create_rect_pipeline(
         label: Some("rect layout"),
         ..Default::default()
     });
-    const ATTRS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
+    const ATTRS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("rect pipeline"),
         layout: Some(&layout),

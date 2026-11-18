@@ -6,8 +6,9 @@ const VIEW: vec2<f32> = vec2<f32>(640.0, 360.0);
 
 struct Rect {
     @location(0) pos: vec2<f32>,
-    @location(1) size: vec2<f32>,
-    @location(2) color: vec4<f32>,
+    @location(1) edge_x: vec2<f32>,
+    @location(2) edge_y: vec2<f32>,
+    @location(3) color: vec4<f32>,
 };
 
 struct VsOut {
@@ -22,7 +23,8 @@ fn vs_main(@builtin(vertex_index) i: u32, rect: Rect) -> VsOut {
         vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0),
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
     );
-    let px = rect.pos + corners[i] * rect.size;
+    let c = corners[i];
+    let px = rect.pos + c.x * rect.edge_x + c.y * rect.edge_y;
     let ndc = px / VIEW * 2.0 - 1.0;
     var out: VsOut;
     out.clip = vec4(ndc.x, -ndc.y, 0.0, 1.0);
