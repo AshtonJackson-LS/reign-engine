@@ -78,6 +78,8 @@ mod hierarchy;
 mod history;
 mod hitboxes;
 mod inspector;
+mod lighting_editor;
+mod lighting_modify;
 mod particle_editor;
 mod play;
 mod prefab_ui;
