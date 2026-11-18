@@ -10,7 +10,7 @@ use reign::behaviour::Behaviours;
 use reign::render::{Color, Layer, Renderer, VIEW_HEIGHT, VIEW_WIDTH};
 use reign::scene::{Gizmos, Rgba8, Scene};
 
-use crate::components::{Camera, ParticleSystem};
+use crate::components::{Camera, Light2D, ParticleSystem};
 use crate::physics::TILE;
 use crate::runtime::World;
 
@@ -31,6 +31,7 @@ impl Default for Options {
 
 const CAMERA: Rgba8 = Rgba8::rgba(90, 170, 255, 230);
 const EMITTER: Rgba8 = Rgba8::rgba(255, 130, 220, 230);
+const LIGHT: Rgba8 = Rgba8::rgba(255, 220, 110, 230);
 const GRID: Rgba8 = Rgba8::rgba(255, 255, 255, 28);
 
 /// Every gizmo for `scene`: the built-in ones, then each Behaviour's. `view`
@@ -62,6 +63,14 @@ pub fn collect(
         let p = scene.world_position(id);
         g.cross((p.x.to_f32(), p.y.to_f32()), 5.0);
         g.circle((p.x.to_f32(), p.y.to_f32()), 3.0);
+    }
+    // A light: where it is, and how far it reaches.
+    g.set_color(LIGHT);
+    for (id, l) in scene.iter::<Light2D>() {
+        let p = scene.world_position(id);
+        let at = (p.x.to_f32(), p.y.to_f32());
+        g.cross(at, 5.0);
+        g.circle(at, l.radius.to_f32());
     }
     g.set_color(Rgba8::WHITE);
     behaviours.draw_gizmos(scene, &mut g);
@@ -128,6 +137,21 @@ mod tests {
         let circle = &g.lines()[6..];
         assert!(circle.iter().all(|l| l.color == Rgba8::WHITE));
         assert!((circle[0].from.0 - 130.0).abs() < 1e-3, "centred on the guard, radius 30");
+    }
+
+    #[test]
+    fn a_light_shows_where_it_is_and_how_far_it_reaches() {
+        let mut scene = Scene::new();
+        let lamp = scene.spawn("Lamp");
+        scene.set_world_position(lamp, FxVec2::from_px(40, 30));
+        scene.insert(lamp, Light2D { radius: reign::core::Fx::from_px(50), ..Light2D::default() });
+        let g = collect(&scene, &Behaviours::new(), [0.0, 0.0, 640.0, 360.0], Options::default());
+        // A cross (2 lines) and a circle (32) in the light's colour.
+        assert_eq!(g.lines().len(), 2 + 32);
+        assert!(g.lines().iter().all(|l| l.color == LIGHT));
+        let circle = &g.lines()[2..];
+        assert!((circle[0].from.0 - 90.0).abs() < 1e-3, "centred on the lamp, radius 50");
+        assert!((circle[0].from.1 - 30.0).abs() < 1e-3);
     }
 
     #[test]

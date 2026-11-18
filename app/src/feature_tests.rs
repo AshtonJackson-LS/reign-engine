@@ -615,3 +615,91 @@ fn clear_trail_empties_it_and_a_stopped_trail_fades_out() {
     game.run(&mut world, 100);
     assert!(ball_trail(&world).points.is_empty(), "no new points, and the rest faded");
 }
+
+fn png(pixels: &[[u8; 4]], width: u32, height: u32) -> Vec<u8> {
+    let rgba = pixels.iter().flatten().copied().collect();
+    reign::assets::encode_png(&reign::assets::RgbaImage { rgba, width, height })
+}
+
+#[test]
+fn a_sheets_maps_are_packed_into_the_material_the_renderer_shades_with() {
+    let clear = [0, 0, 0, 0];
+    let game = Game::new(
+        "material",
+        &[
+            ("hero.png", png(&[[10, 20, 30, 255], clear], 2, 1)),
+            ("hero_n.png", png(&[[204, 128, 255, 255], [128, 128, 255, 255]], 2, 1)),
+            ("hero_m.png", png(&[[77, 77, 77, 255], [255, 255, 255, 255]], 2, 1)),
+            ("odd.png", png(&[[1, 2, 3, 255]; 9], 3, 3)),
+        ],
+    );
+    let handle = |path: &str| game.db.handle::<Texture>(path).expect(path);
+    let sheet = |normal: &str, mask: &str| SpriteSheet {
+        texture: handle("hero.png"),
+        normal: if normal.is_empty() { Handle::NONE } else { handle(normal) },
+        light_mask: if mask.is_empty() { Handle::NONE } else { handle(mask) },
+        ..SpriteSheet::default()
+    };
+    let material = |s: &SpriteSheet| crate::view::sheet_material(&game.db, s);
+
+    // Both maps: normal x and y, the mask, and "has maps" where the sprite is solid.
+    let both = material(&sheet("hero_n.png", "hero_m.png")).expect("a material");
+    assert_eq!((both.width, both.height), (2, 1));
+    assert_eq!(both.rgba[0..4], [204, 128, 77, 255]);
+    assert_eq!(both.rgba[4..8], [0, 0, 0, 0], "see-through pixels have none");
+    // One map: the other is flat, or lets all the light in.
+    assert_eq!(material(&sheet("hero_n.png", "")).unwrap().rgba[0..4], [204, 128, 255, 255]);
+    assert_eq!(material(&sheet("", "hero_m.png")).unwrap().rgba[0..4], [128, 128, 77, 255]);
+    // None, or a map of another size: no material at all.
+    assert!(material(&sheet("", "")).is_none());
+    assert!(material(&sheet("odd.png", "")).is_none(), "a map of the wrong size is ignored");
+    assert_eq!(material(&sheet("odd.png", "hero_m.png")).unwrap().rgba[0..4], [128, 128, 77, 255]);
+}
+
+#[test]
+fn lights_save_in_scenes_and_old_scenes_without_them_load() {
+    let game = Game::new("lights", &[]);
+    let mut scene = Scene::new();
+    let lamp = scene.spawn("Lamp");
+    scene.insert(
+        lamp,
+        Light2D {
+            color: Rgba8::rgb(255, 160, 60),
+            intensity: Fx::from_subpx(1, 128),
+            radius: Fx::from_px(140),
+            ..Light2D::default()
+        },
+    );
+    scene
+        .insert(lamp, AmbientLight { intensity: Fx::from_subpx(0, 32), ..AmbientLight::default() });
+    let text = scene.to_ron().unwrap();
+    let back = Scene::from_ron(&text, &game.registry).expect("the scene loads");
+    let id = back.iter::<Light2D>().next().expect("the light came back").0;
+    let light = back.get::<Light2D>(id).unwrap();
+    assert_eq!(light.radius, Fx::from_px(140));
+    assert_eq!(light.color, Rgba8::rgb(255, 160, 60));
+    assert!(light.on && light.height == Fx::from_px(24), "unwritten fields keep their defaults");
+    assert_eq!(back.iter::<AmbientLight>().next().unwrap().1.intensity, Fx::from_subpx(0, 32));
+    // A scene file that names the components with nothing in them gets the defaults.
+    let bare = text.replace(&light_fields(&text), "()");
+    let _ = Scene::from_ron(&bare, &game.registry).expect("empty light components load");
+}
+
+/// The text of the `Light2D` component's fields in a scene file, to blank out.
+fn light_fields(text: &str) -> String {
+    let start = text.find("\"Light2D\": ").map(|i| i + "\"Light2D\": ".len()).unwrap();
+    let mut depth = 0;
+    for (i, c) in text[start..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return text[start..start + i + 1].to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced scene text");
+}

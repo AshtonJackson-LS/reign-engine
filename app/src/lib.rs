@@ -55,8 +55,8 @@ use reign::assets::AssetDb;
 use reign::editor::{EditorConfig, init_logger, run_editor};
 
 pub use components::{
-    Animator, AudioSource, Camera, Image, NamedClip, ParticleSystem, SpriteRenderer, Text,
-    TextAlign, TilemapRenderer, TrailPoint, TrailRenderer,
+    AmbientLight, Animator, AudioSource, Camera, Image, Light2D, NamedClip, ParticleSystem,
+    SpriteRenderer, Text, TextAlign, TilemapRenderer, TrailPoint, TrailRenderer,
 };
 pub use player::{GAME_FILE, GameInfo, PACK_FILE};
 pub use runtime::{Ctx, CtxExt, Event, Message, Scripts, TICKS_PER_SECOND, World};
@@ -78,8 +78,9 @@ pub mod prelude {
 
     pub use crate::physics::{BodyType, BoxCollider, Rigidbody, TilemapCollider};
     pub use crate::{
-        Animator, AudioSource, Camera, Ctx, CtxExt, Image, Message, NamedClip, ParticleSystem,
-        SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, TrailRenderer, World,
+        AmbientLight, Animator, AudioSource, Camera, Ctx, CtxExt, Image, Light2D, Message,
+        NamedClip, ParticleSystem, SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign,
+        TilemapRenderer, TrailRenderer, World,
     };
 }
 

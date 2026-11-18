@@ -329,6 +329,62 @@ impl Default for ParticleSystem {
     }
 }
 
+/// A point light at the object: it brightens the scene around it, most at the
+/// middle. On a sprite with a normal map (made in the Lighting tab) it shades
+/// by which way each pixel faces, as if the light hung `height` pixels in
+/// front of it, and by the sprite's light mask; everything else gets the
+/// plain soft disc of light. Lights add to the scene's [`AmbientLight`], so
+/// they show most when that is dim. Lights are only drawn, never part of the
+/// game's simulation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+pub struct Light2D {
+    /// Untick to switch it off.
+    pub on: bool,
+    pub color: Rgba8,
+    /// Above 1 overexposes into bloom.
+    #[reflect(range(0, 8))]
+    pub intensity: reign::core::Fx,
+    /// How far the light reaches, in pixels.
+    #[reflect(range(1, 1000))]
+    pub radius: reign::core::Fx,
+    /// How far in front of the sprites it hangs, in pixels: lower is more
+    /// grazing, higher lights flat surfaces more evenly. Only matters for
+    /// sprites with normal maps.
+    #[reflect(range(0, 200))]
+    pub height: reign::core::Fx,
+}
+
+impl Default for Light2D {
+    fn default() -> Self {
+        Light2D {
+            on: true,
+            color: Rgba8::WHITE,
+            intensity: reign::core::Fx::ONE,
+            radius: reign::core::Fx::from_px(96),
+            height: reign::core::Fx::from_px(24),
+        }
+    }
+}
+
+/// How bright the scene is where no light reaches. Add one to any object
+/// (the first one counts); without one the scene is fully lit, as every scene
+/// always was. Lower it to darken the scene and let [`Light2D`]s show.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+pub struct AmbientLight {
+    pub color: Rgba8,
+    /// 1 is full brightness, 0 is black.
+    #[reflect(range(0, 4))]
+    pub intensity: reign::core::Fx,
+}
+
+impl Default for AmbientLight {
+    fn default() -> Self {
+        AmbientLight { color: Rgba8::WHITE, intensity: reign::core::Fx::from_subpx(0, 64) }
+    }
+}
+
 /// One point of a [`TrailRenderer`]'s path: where the object was, and how
 /// many ticks ago.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -442,6 +498,8 @@ pub fn register_builtins(r: &mut ComponentRegistry) {
         .register::<AudioSource>()
         .register::<ParticleSystem>()
         .register::<TrailRenderer>()
+        .register::<Light2D>()
+        .register::<AmbientLight>()
         .register::<physics::Rigidbody>()
         .register::<physics::BoxCollider>()
         .register::<physics::TilemapCollider>();
