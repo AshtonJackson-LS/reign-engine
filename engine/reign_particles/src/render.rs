@@ -88,6 +88,7 @@ impl ParticleRenderer {
                 radius: l.radius,
                 color: Color { r: cr, g: cg, b: cb, a: 1.0 },
                 intensity: l.intensity,
+                height: Light::DEFAULT_HEIGHT,
             });
         }
     }
