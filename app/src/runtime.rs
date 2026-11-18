@@ -13,7 +13,7 @@ use reign::behaviour::{
 use reign::core::{Button, FxVec2, InputBuffer, InputFrame, Rng};
 use reign::scene::{Component, ComponentRegistry, ObjectId, Scene};
 
-use crate::components::{Animator, AudioSource, Text};
+use crate::components::{Animator, AudioSource, ParticleSystem, Text};
 use crate::{components, physics};
 
 /// Fixed ticks per second: divide a per-second speed by this for one tick.
@@ -153,6 +153,9 @@ pub struct World {
     next_scene: Option<String>,
     /// Parsed prefabs for `ctx.spawn`, set by [`tick`].
     prefabs: PrefabCache,
+    /// How many scenes have been entered: drawing notices a new scene by
+    /// it, and starts its particle effects afresh.
+    entered: u32,
 }
 
 /// The prefabs `ctx.spawn` stamps, parsed once and shared by every copy of
@@ -189,6 +192,7 @@ impl World {
             contacts: Vec::new(),
             next_scene: None,
             prefabs: PrefabCache::default(),
+            entered: 0,
         }
     }
 
@@ -207,6 +211,12 @@ impl World {
         self.scene = scene;
         self.behaviours = BehaviourState::default();
         self.contacts.clear();
+        self.entered = self.entered.wrapping_add(1);
+    }
+
+    /// How many scenes [`World::enter`] has entered.
+    pub fn scenes_entered(&self) -> u32 {
+        self.entered
     }
 
     /// The scene a script asked for this tick, if any; asking clears it.
@@ -470,6 +480,12 @@ pub trait CtxExt {
     fn play_sound(&mut self, path: &str);
     /// Plays an object's [`AudioSource`].
     fn play(&mut self, id: ObjectId);
+    /// Starts an object's [`ParticleSystem`] again from the start (the
+    /// particles still out finish).
+    fn play_particles(&mut self, id: ObjectId);
+    /// Stops an object's [`ParticleSystem`] emitting; the particles still
+    /// out finish their lives.
+    fn stop_particles(&mut self, id: ObjectId);
     /// Switches the music to a `.wav` by its path in `assets/`, looping.
     fn play_music(&mut self, path: &str);
     fn stop_music(&mut self);
@@ -623,6 +639,21 @@ impl CtxExt for Ctx<'_> {
         {
             let event = Event::Sound { clip: source.clip.guid, volume: source.volume };
             self.emit(event);
+        }
+    }
+
+    fn play_particles(&mut self, id: ObjectId) {
+        if let Some(p) = self.game.scene.get_mut::<ParticleSystem>(id) {
+            p.plays = p.plays.wrapping_add(1);
+            p.emitting = true;
+        }
+    }
+
+    fn stop_particles(&mut self, id: ObjectId) {
+        if self.game.scene.get::<ParticleSystem>(id).is_some_and(|p| p.emitting)
+            && let Some(p) = self.game.scene.get_mut::<ParticleSystem>(id)
+        {
+            p.emitting = false;
         }
     }
 

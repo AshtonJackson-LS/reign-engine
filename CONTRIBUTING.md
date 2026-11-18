@@ -54,6 +54,7 @@ its own. `scripts/bundle-macos.sh` builds `dist/Reign Hub.app` with both, and
 | `engine/reign_behaviour` | Per-object Behaviours and Systems run in fixed stages. |
 | `engine/reign_assets` | GUIDs, `.meta` files, handles, prefabs, hot reload, packing. |
 | `engine/reign_render`, `reign_app`, `reign_audio` | Renderer, window and loop, audio. |
+| `engine/reign_particles` | Particle systems for `*.particles.ron` effects. |
 | `engine/reign_physics`, `reign_combat`, `reign_net` | Platformer physics, frame-data combat, rollback netcode. |
 | `engine/reign_editor` | The editor shell (egui). |
 | `engine/reign_build` | Project tooling and component templates. |

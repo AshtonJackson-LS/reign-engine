@@ -1,6 +1,8 @@
 //! The built-in components every project has.
 
-use reign::assets::{AnimationClip, AudioClip, Font, Handle, SpriteSheet, Texture, Tilemap};
+use reign::assets::{
+    AnimationClip, AudioClip, Font, Handle, ParticleEffect, SpriteSheet, Texture, Tilemap,
+};
 use reign::scene::{Bounds, Component, ComponentRegistry, ObjectId, Reflect, Rgba8, Scene};
 use serde::{Deserialize, Serialize};
 
@@ -300,6 +302,33 @@ impl Default for AudioSource {
     }
 }
 
+/// Plays a particle effect (`*.particles.ron`: make one with + Create >
+/// Particle Effect in the Project panel and edit it in the Particles tab)
+/// at the object. It follows the object as it moves and mirrors with it
+/// (`flip_x`). With `play_on_start` it starts when the object appears;
+/// scripts start it again with `ctx.play_particles(me)` and stop it with
+/// `ctx.stop_particles(me)`. Particles are only drawn, over the scene: the
+/// game itself never sees them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+pub struct ParticleSystem {
+    pub effect: Handle<ParticleEffect>,
+    pub play_on_start: bool,
+    /// Untick to stop emitting; the particles already out finish their
+    /// lives. `ctx.play_particles` starts it again.
+    pub emitting: bool,
+    /// How many times scripts have started it. State, not a setting.
+    #[serde(skip)]
+    #[reflect(read_only)]
+    pub plays: u32,
+}
+
+impl Default for ParticleSystem {
+    fn default() -> Self {
+        ParticleSystem { effect: Handle::NONE, play_on_start: true, emitting: true, plays: 0 }
+    }
+}
+
 /// The built-in components, before a project's own.
 pub fn register_builtins(r: &mut ComponentRegistry) {
     r.register::<Camera>()
@@ -309,6 +338,7 @@ pub fn register_builtins(r: &mut ComponentRegistry) {
         .register::<Animator>()
         .register::<Text>()
         .register::<AudioSource>()
+        .register::<ParticleSystem>()
         .register::<physics::Rigidbody>()
         .register::<physics::BoxCollider>()
         .register::<physics::TilemapCollider>();

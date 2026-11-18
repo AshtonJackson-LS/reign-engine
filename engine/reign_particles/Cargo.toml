@@ -1,0 +1,12 @@
+[package]
+name = "reign_particles"
+description = "Particle systems: plays particle effect assets and draws them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_assets.workspace = true
+reign_render.workspace = true
+log.workspace = true

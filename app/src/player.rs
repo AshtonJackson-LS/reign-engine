@@ -185,6 +185,7 @@ impl App for Player {
     }
 
     fn draw(&mut self, r: &mut Renderer, _alpha: f32) {
+        self.sprites.note_scene(self.world.scenes_entered());
         self.sprites.draw_game(r, &self.world.scene, DB.get(), self.background);
     }
 

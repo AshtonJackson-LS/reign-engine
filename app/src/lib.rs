@@ -34,6 +34,7 @@ mod font;
 pub mod headless;
 pub mod icon;
 mod input;
+mod particles;
 pub mod physics;
 mod player;
 mod project_settings;
@@ -52,8 +53,8 @@ use reign::assets::AssetDb;
 use reign::editor::{EditorConfig, init_logger, run_editor};
 
 pub use components::{
-    Animator, AudioSource, Camera, Image, NamedClip, SpriteRenderer, Text, TextAlign,
-    TilemapRenderer,
+    Animator, AudioSource, Camera, Image, NamedClip, ParticleSystem, SpriteRenderer, Text,
+    TextAlign, TilemapRenderer,
 };
 pub use player::{GAME_FILE, GameInfo, PACK_FILE};
 pub use runtime::{Ctx, CtxExt, Event, Message, Scripts, TICKS_PER_SECOND, World};
@@ -66,7 +67,7 @@ pub(crate) static DB: OnceLock<AssetDb> = OnceLock::new();
 /// Everything a component file needs: `use reign_engine::prelude::*;`.
 pub mod prelude {
     pub use reign::assets::{
-        AnimationClip, AudioClip, Font, Handle, SpriteSheet, Texture, Tilemap,
+        AnimationClip, AudioClip, Font, Handle, ParticleEffect, SpriteSheet, Texture, Tilemap,
     };
     pub use reign::behaviour::{Behaviour, Envelope, To};
     pub use reign::core::{Button, Fx, FxVec2};
@@ -75,8 +76,8 @@ pub mod prelude {
 
     pub use crate::physics::{BodyType, BoxCollider, Rigidbody, TilemapCollider};
     pub use crate::{
-        Animator, AudioSource, Camera, Ctx, CtxExt, Image, Message, NamedClip, SpriteRenderer,
-        TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, World,
+        Animator, AudioSource, Camera, Ctx, CtxExt, Image, Message, NamedClip, ParticleSystem,
+        SpriteRenderer, TICKS_PER_SECOND, Text, TextAlign, TilemapRenderer, World,
     };
 }
 

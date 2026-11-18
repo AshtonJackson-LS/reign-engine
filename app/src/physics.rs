@@ -349,6 +349,53 @@ fn grids(scene: &Scene, tilemaps: &impl TilemapSource) -> Vec<Grid> {
         .collect()
 }
 
+/// Where a scene's solid tilemap colliders are, for things that aren't
+/// bodies: particles that hit the level. Solid tiles stop them, the top
+/// row of one-way tiles catches them falling from above, and trigger
+/// tilemaps don't count.
+pub struct SolidTiles(Vec<Grid>);
+
+impl SolidTiles {
+    pub fn of(scene: &Scene) -> Self {
+        SolidTiles::with(scene, &project_tilemaps)
+    }
+
+    pub(crate) fn with(scene: &Scene, tilemaps: &impl TilemapSource) -> Self {
+        SolidTiles(grids(scene, tilemaps).into_iter().filter(|g| !g.trigger).collect())
+    }
+
+    /// Whether the world pixel at (`x`, `y`) is in a solid tile.
+    pub fn solid(&self, x: f32, y: f32) -> bool {
+        self.any(x, y, |_, kind| kind == TileKind::Solid)
+    }
+
+    /// Whether the world pixel at (`x`, `y`) is in the top row of a
+    /// one-way tile.
+    pub fn one_way(&self, x: f32, y: f32) -> bool {
+        self.any(x, y, |below_top, kind| kind == TileKind::OneWay && below_top < 1.0)
+    }
+
+    /// Whether any grid's cell at the pixel passes `test`, given how far
+    /// below the cell's top the pixel is and the cell's kind.
+    fn any(&self, x: f32, y: f32, test: impl Fn(f32, TileKind) -> bool) -> bool {
+        self.0.iter().any(|g| {
+            let tx = ((x - g.x as f32) / TILE as f32).floor() as i32;
+            let ty = ((y - g.y as f32) / TILE as f32).floor() as i32;
+            tx < g.w && ty < g.h && test(y - g.top(ty) as f32, g.kind(tx, ty))
+        })
+    }
+}
+
+impl reign::particles::Ground for SolidTiles {
+    fn solid(&self, x: f32, y: f32) -> bool {
+        SolidTiles::solid(self, x, y)
+    }
+
+    fn one_way(&self, x: f32, y: f32) -> bool {
+        SolidTiles::one_way(self, x, y)
+    }
+}
+
 /// Outlines of every tilemap collider's tiles inside `view`, as one-pixel
 /// rectangles: the outer edges of solid areas, and the top edge of each
 /// one-way tile (`true`).

@@ -104,6 +104,7 @@ pub enum Open {
     Tilemap(Guid),
     Slicer(Guid),
     Animation(Guid),
+    Particles(Guid),
     /// Prefab Mode.
     Prefab(Guid),
     /// Open this scene in place of the current one.
@@ -273,6 +274,21 @@ fn free_name(root: &Path, folder: &str, name: &str) -> String {
         .expect("some number is free")
 }
 
+/// Makes a new particle effect in the folder being shown, and opens it in
+/// the Particle editor.
+fn new_particle_effect(db: &AssetDb, state: &mut ProjectState) {
+    let path = crate::particle_editor::new_effect_path(&state.folder, |p| db.guid(p).is_some());
+    let text = reign_assets::ParticleEffect::default().to_ron();
+    state.status = Some(match db.create(&path, text.as_bytes()) {
+        Ok(guid) => {
+            state.selected = Some(guid);
+            state.open = Some(Open::Particles(guid));
+            format!("Created {path}")
+        }
+        Err(e) => format!("Couldn't create {path}: {e}"),
+    });
+}
+
 fn kind_color(kind: AssetKind) -> Color32 {
     match kind {
         AssetKind::Texture => Color32::from_rgb(110, 170, 230),
@@ -285,6 +301,7 @@ fn kind_color(kind: AssetKind) -> Color32 {
         AssetKind::Scene => Color32::from_rgb(240, 120, 120),
         AssetKind::Prefab => Color32::from_rgb(90, 160, 240),
         AssetKind::MoveSet => Color32::from_rgb(240, 90, 90),
+        AssetKind::ParticleEffect => Color32::from_rgb(255, 140, 190),
         AssetKind::Data => Color32::GRAY,
     }
 }
@@ -325,6 +342,10 @@ pub fn project(ui: &mut Ui, db: &AssetDb, state: &mut ProjectState) {
                 }
                 if ui.button("Scene").clicked() {
                     state.open = Some(Open::NewScene { folder: state.folder.clone() });
+                    ui.close();
+                }
+                if ui.button("Particle Effect").clicked() {
+                    new_particle_effect(db, state);
                     ui.close();
                 }
             });
@@ -661,6 +682,7 @@ fn asset_cell(
             AssetKind::Tilemap => Some(Open::Tilemap(info.guid)),
             AssetKind::SpriteSheet | AssetKind::Texture => Some(Open::Slicer(info.guid)),
             AssetKind::AnimationClip => Some(Open::Animation(info.guid)),
+            AssetKind::ParticleEffect => Some(Open::Particles(info.guid)),
             AssetKind::Prefab => Some(Open::Prefab(info.guid)),
             AssetKind::Scene => Some(Open::Scene(info.guid)),
             _ => None,
@@ -681,6 +703,10 @@ fn asset_cell(
             }
             AssetKind::AnimationClip if ui.button("Open in Animation editor").clicked() => {
                 state.open = Some(Open::Animation(info.guid));
+                ui.close();
+            }
+            AssetKind::ParticleEffect if ui.button("Open in Particle editor").clicked() => {
+                state.open = Some(Open::Particles(info.guid));
                 ui.close();
             }
             AssetKind::Prefab if ui.button("Open in Prefab Mode").clicked() => {
@@ -935,6 +961,9 @@ pub fn inspector(ui: &mut Ui, db: &AssetDb, state: &mut ProjectState, guid: Guid
         }
         AssetKind::AnimationClip if ui.button("Open in Animation editor").clicked() => {
             state.open = Some(Open::Animation(guid));
+        }
+        AssetKind::ParticleEffect if ui.button("Open in Particle editor").clicked() => {
+            state.open = Some(Open::Particles(guid));
         }
         _ => {}
     }

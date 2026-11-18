@@ -7,7 +7,8 @@
 //!   can move and be renamed freely.
 //! - [`AssetDb`] maps GUIDs to files and loads them as typed assets
 //!   ([`Texture`], [`SpriteSheet`], [`AnimationClip`], [`Tileset`],
-//!   [`Tilemap`], [`AudioClip`], [`Music`], [`Font`], [`SceneAsset`]).
+//!   [`Tilemap`], [`AudioClip`], [`Music`], [`Font`], [`SceneAsset`],
+//!   [`ParticleEffect`]).
 //! - Development and the editor read loose files and can hot reload them
 //!   ([`AssetDb::watch`] queues changes, [`AssetDb::apply_changes`] applies
 //!   them at a frame boundary). Release builds read a packed archive
@@ -21,6 +22,7 @@ mod handle;
 mod image;
 mod meta;
 mod pack;
+pub mod particles;
 pub mod prefab;
 pub mod scan;
 mod types;
@@ -33,6 +35,7 @@ pub use handle::Handle;
 pub use image::{PngError, RgbaImage, decode_png};
 pub use meta::{AudioSettings, Importer, META_EXT, Meta, TextureSettings};
 pub use pack::{PackEntry, pack_dir, read_pack};
+pub use particles::ParticleEffect;
 pub use prefab::{InstantiateExt, Prefab, PrefabInstance, Prefabs, Template};
 pub use reign_scene::Reflect;
 pub use types::{
@@ -54,11 +57,12 @@ pub enum AssetKind {
     Scene,
     Prefab,
     MoveSet,
+    ParticleEffect,
     Data,
 }
 
 impl AssetKind {
-    pub const ALL: [AssetKind; 12] = [
+    pub const ALL: [AssetKind; 13] = [
         AssetKind::Texture,
         AssetKind::SpriteSheet,
         AssetKind::AnimationClip,
@@ -70,6 +74,7 @@ impl AssetKind {
         AssetKind::Scene,
         AssetKind::Prefab,
         AssetKind::MoveSet,
+        AssetKind::ParticleEffect,
         AssetKind::Data,
     ];
 
@@ -86,6 +91,7 @@ impl AssetKind {
             AssetKind::Scene => "Scene",
             AssetKind::Prefab => "Prefab",
             AssetKind::MoveSet => "MoveSet",
+            AssetKind::ParticleEffect => "ParticleEffect",
             AssetKind::Data => "Data",
         }
     }
