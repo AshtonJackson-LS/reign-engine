@@ -43,6 +43,10 @@
 //!   density), saving a sprite sheet.
 //! - **Animation**: the Animation editor (frame timeline, durations, loop
 //!   mode, events, and a 120 Hz preview with play, pause, step and scrub).
+//! - **Lighting**: a texture's normal map and light mask: create them from
+//!   its colours, edit them by hand (wand, pencil, marquee, directions,
+//!   brightness) and preview one point light on the sprite; saving links the
+//!   maps from the sprite sheets that use the texture.
 //! - A toolbar with Play, Pause, Step, Stop, the time scale, undo and redo,
 //!   and the Scene menu (New Scene, Save, Open). Opening or making a scene
 //!   while this one has unsaved changes asks whether to save them first.
@@ -78,6 +82,8 @@ mod hierarchy;
 mod history;
 mod hitboxes;
 mod inspector;
+mod lighting_editor;
+mod lighting_modify;
 mod particle_editor;
 mod play;
 mod prefab_ui;
@@ -143,6 +149,18 @@ pub trait EditorApp: App {
     fn registry(&self) -> Option<&ComponentRegistry> {
         None
     }
+
+    /// Whether the app can make a new component type from the editor. If so,
+    /// Add Component ends with Create Component, which calls
+    /// [`EditorApp::create_component`].
+    fn can_create_component(&self) -> bool {
+        false
+    }
+
+    /// Starts making a new component type, as Add Component → Create
+    /// Component asks, with `name` (what was typed in the search box, maybe
+    /// empty) as its suggested name: an app opens its own dialog.
+    fn create_component(&mut self, _name: &str) {}
 
     /// Called every frame before the editor reads the scene: copy state
     /// that still lives outside the scene into it, so it shows up.

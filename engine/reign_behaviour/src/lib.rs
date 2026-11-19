@@ -44,7 +44,7 @@ use std::hash::Hash;
 
 use reign_assets::AssetDb;
 use reign_core::{InputBuffer, Rng};
-use reign_scene::{Commands, Component, ObjectId, Scene};
+use reign_scene::{Commands, Component, Gizmos, ObjectId, Scene};
 
 /// The game's side of the runtime: where its scene and shared simulation
 /// state live. Implemented by the game's world type.
@@ -141,6 +141,10 @@ pub trait Behaviour<G: Game>: Component {
     fn on_message(ctx: &mut Ctx<'_, G>, me: ObjectId, msg: &Envelope<G::Message>) {}
     /// Just before the object is despawned through the command buffer.
     fn on_destroy(ctx: &mut Ctx<'_, G>, me: ObjectId) {}
+    /// Draws this component's gizmos: lines shown in the editor's Scene view
+    /// while the game is stopped, like Unity's `OnDrawGizmos`. Never called
+    /// in Play or an exported game, and it can't change the scene.
+    fn gizmos(scene: &Scene, me: ObjectId, gizmos: &mut Gizmos) {}
 }
 
 /// What a Behaviour or system can reach while the tick runs.
@@ -208,6 +212,7 @@ struct Entry<G: Game> {
     ids: fn(&Scene) -> Vec<ObjectId>,
     has: fn(&Scene, ObjectId) -> bool,
     call: fn(&mut Ctx<'_, G>, ObjectId, Call<'_, G::Message>),
+    gizmos: fn(&Scene, ObjectId, &mut Gizmos),
 }
 
 #[derive(Clone, Copy)]
@@ -262,11 +267,22 @@ impl<G: Game> Behaviours<G> {
             ids: |scene| scene.iter::<T>().map(|(id, _)| id).collect(),
             has: |scene, id| scene.has::<T>(id),
             call: call::<G, T>,
+            gizmos: T::gizmos,
         };
         // Stable: after every type with an order <= this one's.
         let at = self.entries.iter().position(|e| e.order > T::ORDER).unwrap_or(self.entries.len());
         self.entries.insert(at, entry);
         self
+    }
+
+    /// Collects every Behaviour's [`Behaviour::gizmos`] in execution order:
+    /// for the editor's Scene view.
+    pub fn draw_gizmos(&self, scene: &Scene, gizmos: &mut Gizmos) {
+        for entry in &self.entries {
+            for id in (entry.ids)(scene) {
+                (entry.gizmos)(scene, id, gizmos);
+            }
+        }
     }
 
     /// Registered type names, in execution order.

@@ -24,6 +24,7 @@ use crate::create::{self, CreateRequest};
 use crate::gizmo::{self, Drag, ViewMap};
 use crate::hierarchy::{HierarchyState, Rename};
 use crate::history::History;
+use crate::lighting_editor::LightingEditor;
 use crate::particle_editor::ParticleEditor;
 use crate::play::{PlayControl, PlayMode, TIME_SCALES};
 use crate::prefab_ui;
@@ -64,12 +65,16 @@ enum Tab {
     Sprites,
     Animation,
     Particles,
+    Lighting,
 }
 
 impl Tab {
     /// The asset tools, which keep their own undo history.
     fn is_tool(self) -> bool {
-        matches!(self, Tab::Tilemap | Tab::Sprites | Tab::Animation | Tab::Particles)
+        matches!(
+            self,
+            Tab::Tilemap | Tab::Sprites | Tab::Animation | Tab::Particles | Tab::Lighting
+        )
     }
 }
 
@@ -128,6 +133,7 @@ struct Panels {
     slicer: Slicer,
     anim: AnimEditor,
     particles: ParticleEditor,
+    lighting: LightingEditor,
     /// The Inspector shows the selected asset rather than the object.
     inspect_asset: bool,
     /// The asset tool under the pointer last frame (it gets Ctrl+Z), and
@@ -255,6 +261,7 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
             Tab::Sprites,
             Tab::Animation,
             Tab::Particles,
+            Tab::Lighting,
         ]);
         let surface = dock.main_surface_mut();
         let [game, _] = surface.split_left(NodeIndex::root(), 0.18, vec![Tab::Hierarchy]);
@@ -311,6 +318,7 @@ impl<A: EditorApp, F: FnOnce(&mut Ctx) -> A> ApplicationHandler for Editor<A, F>
                 slicer: Slicer::default(),
                 anim: AnimEditor::default(),
                 particles: ParticleEditor::default(),
+                lighting: LightingEditor::default(),
                 inspect_asset: false,
                 tool_hover: None,
                 tool_hover_now: None,
@@ -861,6 +869,7 @@ impl<A: EditorApp> Session<A> {
             self.panels.painter.reloaded(db, change.guid);
             self.panels.anim.reloaded(db, change.guid);
             self.panels.particles.reloaded(db, change.guid);
+            self.panels.lighting.reloaded(db, change.guid);
         }
     }
 
@@ -942,6 +951,10 @@ impl<A: EditorApp> Session<A> {
             Open::Particles(guid) => {
                 panels.particles.open(db, guid);
                 Tab::Particles
+            }
+            Open::Lighting(guid) => {
+                panels.lighting.open(db, guid);
+                Tab::Lighting
             }
             Open::Prefab(guid) => {
                 self.enter_prefab_mode(guid);
@@ -1491,6 +1504,8 @@ fn shortcuts<A: EditorApp>(
             (Tab::Animation, _, true) => panels.anim.redo(),
             (Tab::Particles, true, _) => panels.particles.undo(),
             (Tab::Particles, _, true) => panels.particles.redo(),
+            (Tab::Lighting, true, _) => panels.lighting.undo(),
+            (Tab::Lighting, _, true) => panels.lighting.redo(),
             _ => false,
         };
         if done {
@@ -1744,6 +1759,7 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
             Tab::Sprites => self.panels.slicer.editing().is_some_and(|(_, d)| d),
             Tab::Animation => self.panels.anim.editing().is_some_and(|(_, d)| d),
             Tab::Particles => self.panels.particles.editing().is_some_and(|(_, d)| d),
+            Tab::Lighting => self.panels.lighting.editing().is_some_and(|(_, d)| d),
             _ => false,
         };
         if *tab == Tab::Game && self.play.mode() != PlayMode::Playing {
@@ -1763,7 +1779,9 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         match tab {
             Tab::Game | Tab::Console | Tab::Project => [false, false],
-            Tab::Tilemap | Tab::Sprites | Tab::Animation | Tab::Particles => [false, false],
+            Tab::Tilemap | Tab::Sprites | Tab::Animation | Tab::Particles | Tab::Lighting => {
+                [false, false]
+            }
             _ => [false, true],
         }
     }
@@ -1807,39 +1825,48 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                     assets_ui::inspector(ui, db, &mut self.panels.project, guid);
                 }
             }
-            Tab::Inspector => match (self.panels.selected, self.app.scene_mut()) {
-                (Some(id), Some(scene)) => {
-                    if self.play.in_run() {
-                        ui.weak("Changes made while playing are discarded on Stop.");
-                    }
-                    let info = match (self.prefabs, self.assets) {
-                        (Some(p), Some(db)) => prefab_ui::info(scene, id, &p.with(db), db),
-                        _ => None,
-                    };
-                    let lookups = inspector::Lookups {
-                        registry: self.registry,
-                        assets: self.assets,
-                        prefab: info.as_ref(),
-                        layers: self.layer_names,
-                        tags: self.tag_names,
-                    };
-                    let action = inspector::inspector(ui, scene, id, true, lookups);
-                    match action {
-                        Some(inspector::Action::Edit(label)) => {
-                            self.panels.edit_label = Some(label)
+            Tab::Inspector => {
+                let can_create_component = self.app.can_create_component();
+                match (self.panels.selected, self.app.scene_mut()) {
+                    (Some(id), Some(scene)) => {
+                        if self.play.in_run() {
+                            ui.weak("Changes made while playing are discarded on Stop.");
                         }
-                        Some(inspector::Action::Prefab(a)) => self.panels.prefab_action = Some(a),
-                        Some(inspector::Action::AddTag(tag)) => match self.app.add_tag(&tag) {
-                            Ok(()) => log::info!("added the tag {tag:?} to the project"),
-                            Err(e) => log::error!("couldn't add the tag {tag:?}: {e}"),
-                        },
-                        None => {}
+                        let info = match (self.prefabs, self.assets) {
+                            (Some(p), Some(db)) => prefab_ui::info(scene, id, &p.with(db), db),
+                            _ => None,
+                        };
+                        let lookups = inspector::Lookups {
+                            registry: self.registry,
+                            assets: self.assets,
+                            prefab: info.as_ref(),
+                            layers: self.layer_names,
+                            tags: self.tag_names,
+                            can_create_component,
+                        };
+                        let action = inspector::inspector(ui, scene, id, true, lookups);
+                        match action {
+                            Some(inspector::Action::Edit(label)) => {
+                                self.panels.edit_label = Some(label)
+                            }
+                            Some(inspector::Action::Prefab(a)) => {
+                                self.panels.prefab_action = Some(a)
+                            }
+                            Some(inspector::Action::AddTag(tag)) => match self.app.add_tag(&tag) {
+                                Ok(()) => log::info!("added the tag {tag:?} to the project"),
+                                Err(e) => log::error!("couldn't add the tag {tag:?}: {e}"),
+                            },
+                            Some(inspector::Action::NewComponent(name)) => {
+                                self.app.create_component(&name)
+                            }
+                            None => {}
+                        }
+                    }
+                    _ => {
+                        ui.weak("Select an object in the Hierarchy or the Game view.");
                     }
                 }
-                _ => {
-                    ui.weak("Select an object in the Hierarchy or the Game view.");
-                }
-            },
+            }
             Tab::Debug => {
                 let view = self.panels.game_rect_px(ui.ctx().pixels_per_point());
                 let mut ctx =
@@ -1847,7 +1874,12 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                 self.app.debug_ui(&mut ctx, ui);
             }
             Tab::Console => console(ui, self.panels),
-            Tab::Project | Tab::Tilemap | Tab::Sprites | Tab::Animation | Tab::Particles => {
+            Tab::Project
+            | Tab::Tilemap
+            | Tab::Sprites
+            | Tab::Animation
+            | Tab::Particles
+            | Tab::Lighting => {
                 let Some(db) = self.assets else {
                     ui.weak("This app has no asset database.");
                     return;
@@ -1866,6 +1898,7 @@ impl<A: EditorApp> TabViewer for Viewer<'_, A> {
                     Tab::Tilemap => panels.painter.ui(ui, db, &mut panels.project.thumbs),
                     Tab::Sprites => panels.slicer.ui(ui, db, &mut panels.project.thumbs),
                     Tab::Particles => panels.particles.ui(ui, db, &mut panels.project.thumbs),
+                    Tab::Lighting => panels.lighting.ui(ui, db),
                     _ => panels.anim.ui(ui, db, &mut panels.project.thumbs),
                 }
                 if tab.is_tool() && ui.ui_contains_pointer() {

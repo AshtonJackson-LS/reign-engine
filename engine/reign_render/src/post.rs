@@ -1,8 +1,9 @@
 //! Lighting and post effects, after Unity's URP 2D renderer.
 //!
-//! The world is drawn into an HDR target. Lights are drawn into a light map
-//! at view size, cleared to the ambient colour, and the world is multiplied
-//! by it. Whatever ends up brighter than the threshold blooms through a
+//! The world is drawn into an HDR target, and its sprites' normals and light
+//! masks into a material target the same size. Lights are drawn into a light
+//! map the same size, cleared to the ambient colour, shaded by what the
+//! material target says about each pixel; the world is multiplied by it. Whatever ends up brighter than the threshold blooms through a
 //! chain of half-size targets (dual-filter blur). Light shafts are a radial
 //! blur of the bright parts around one light, usually the moon. The final
 //! pass adds it all up, tone maps, grades and vignettes it into the window.
@@ -16,6 +17,12 @@ const BLOOM_LEVELS: usize = 6;
 
 /// A 2D point light, in world pixels. Brightens everything within `radius`,
 /// softly, most at the centre. `intensity` above 1 overexposes into bloom.
+///
+/// Pixels of sprites that have a normal map (see
+/// [`crate::Renderer::set_material`]) are shaded as if the light hung
+/// `height` pixels in front of them, so surfaces facing it are brighter, and
+/// receive light in proportion to their light mask. Other pixels get the
+/// plain disc of light, whatever `height` is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     pub x: f32,
@@ -23,6 +30,13 @@ pub struct Light {
     pub radius: f32,
     pub color: Color,
     pub intensity: f32,
+    /// How far in front of the world the light is, in pixels.
+    pub height: f32,
+}
+
+impl Light {
+    /// A height that lights a sprite's surface well up to a good way out.
+    pub const DEFAULT_HEIGHT: f32 = 24.0;
 }
 
 /// God rays streaming out from around one light.
@@ -86,8 +100,19 @@ impl Default for Lighting {
 struct LightInstance {
     pos: [f32; 2],
     radius: f32,
-    _pad: f32,
+    height: f32,
     color: [f32; 4],
+}
+
+/// A light instance's bytes, for tests that draw lights without a window.
+#[cfg(test)]
+pub(crate) fn light_instance_bytes(
+    pos: [f32; 2],
+    radius: f32,
+    height: f32,
+    color: [f32; 4],
+) -> Vec<u8> {
+    bytemuck::bytes_of(&LightInstance { pos, radius, height, color }).to_vec()
 }
 
 /// Mirrors `Post` in the WGSL; every field a vec4 so the layouts agree.
@@ -117,6 +142,8 @@ struct Mip {
 /// Targets sized to the window, rebuilt when the scale changes.
 struct Targets {
     light: wgpu::TextureView,
+    /// Lets the light pass read the material target.
+    material: wgpu::BindGroup,
     mips: Vec<Mip>,
     shafts: wgpu::TextureView,
     prefilter: wgpu::BindGroup,
@@ -154,6 +181,7 @@ impl Post {
         nearest: &wgpu::Sampler,
         surface_format: wgpu::TextureFormat,
         world: &wgpu::TextureView,
+        material: &wgpu::TextureView,
         size: (u32, u32),
     ) -> Self {
         let linear = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -175,7 +203,7 @@ impl Post {
         let composite_layout =
             layout(device, "composite bindings", &[Tex, Tex, Tex, Tex, Samp, Samp, Uniform]);
 
-        let light_pipeline = light_pipeline(device);
+        let light_pipeline = light_pipeline(device, tex_layout);
         let fullscreen = |label: &str,
                           fragment: &str,
                           layout: &wgpu::BindGroupLayout,
@@ -210,6 +238,7 @@ impl Post {
             nearest,
             &uniform,
             world,
+            material,
             size,
         );
         Post {
@@ -240,6 +269,7 @@ impl Post {
         device: &wgpu::Device,
         nearest: &wgpu::Sampler,
         world: &wgpu::TextureView,
+        material: &wgpu::TextureView,
         size: (u32, u32),
     ) {
         self.targets = Targets::new(
@@ -252,6 +282,7 @@ impl Post {
             nearest,
             &self.uniform,
             world,
+            material,
             size,
         );
     }
@@ -266,7 +297,7 @@ impl Post {
         self.lights.push(LightInstance {
             pos: [light.x + offset[0], light.y + offset[1]],
             radius: light.radius,
-            _pad: 0.0,
+            height: light.height,
             color: [r * i, g * i, b * i, 1.0],
         });
     }
@@ -318,17 +349,13 @@ impl Post {
         queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&self.lights));
 
         let t = &self.targets;
-        let [ar, ag, ab, _] = l.ambient.to_linear();
-        let ambient = Color {
-            r: ar * l.ambient_intensity,
-            g: ag * l.ambient_intensity,
-            b: ab * l.ambient_intensity,
-            a: 1.0,
-        };
         {
-            let mut pass = crate::begin_pass(encoder, &t.light, Some(ambient), "light pass");
+            // Already linear: `begin_pass` would convert it a second time.
+            let ambient = ambient_linear(&l);
+            let mut pass = crate::begin_pass_linear(encoder, &t.light, Some(ambient), "light pass");
             if !self.lights.is_empty() {
                 pass.set_pipeline(&self.light_pipeline);
+                pass.set_bind_group(0, &t.material, &[]);
                 pass.set_vertex_buffer(0, self.light_buffer.slice(..));
                 pass.draw(0..6, 0..self.lights.len() as u32);
             }
@@ -375,6 +402,14 @@ impl Post {
     }
 }
 
+/// What the light map is cleared to: the ambient colour in linear light,
+/// times its intensity.
+fn ambient_linear(l: &Lighting) -> [f32; 4] {
+    let [r, g, b, _] = l.ambient.to_linear();
+    let k = l.ambient_intensity;
+    [r * k, g * k, b * k, 1.0]
+}
+
 impl Targets {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -387,9 +422,12 @@ impl Targets {
         nearest: &wgpu::Sampler,
         uniform: &wgpu::Buffer,
         world: &wgpu::TextureView,
+        material: &wgpu::TextureView,
         size: (u32, u32),
     ) -> Self {
-        let light = hdr_target(device, "light map", (VIEW_WIDTH, VIEW_HEIGHT));
+        // As big as the world, so a light shades each pixel of a normal map.
+        let light = hdr_target(device, "light map", size);
+        let material = crate::bind_texture(device, tex_layout, material, nearest);
         let mut mips = Vec::new();
         let (mut w, mut h) = (size.0 / 2, size.1 / 2);
         while mips.len() < BLOOM_LEVELS && w >= 8 && h >= 8 {
@@ -422,7 +460,7 @@ impl Targets {
                 Res::Buf(uniform),
             ],
         );
-        Targets { light, mips, shafts, prefilter, shafts_read, composite }
+        Targets { light, material, mips, shafts, prefilter, shafts_read, composite }
     }
 }
 
@@ -443,6 +481,21 @@ pub(crate) fn hdr_target(
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// An HDR target as a texture that can be read back, for tests.
+#[cfg(test)]
+pub(crate) fn hdr_target_texture(device: &wgpu::Device, size: (u32, u32)) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test target"),
+        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -553,13 +606,18 @@ fn fullscreen_pipeline(
     })
 }
 
-fn light_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
+/// The light pass's pipeline; `tex_layout` is how it reads the material target.
+pub(crate) fn light_pipeline(
+    device: &wgpu::Device,
+    tex_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("light shader"),
         source: wgpu::ShaderSource::Wgsl(shaders::LIGHT.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("light layout"),
+        bind_group_layouts: &[Some(tex_layout)],
         ..Default::default()
     });
     const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![

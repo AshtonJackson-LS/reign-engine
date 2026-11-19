@@ -252,17 +252,7 @@ pub fn resize(image: &RgbaImage, size: u32) -> RgbaImage {
 }
 
 /// `image` as PNG bytes.
-pub fn encode_png(image: &RgbaImage) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, image.width, image.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .and_then(|mut writer| writer.write_image_data(&image.rgba))
-        .expect("encoding to memory can't fail");
-    out
-}
+pub use reign::assets::encode_png;
 
 /// The window icon for `image`: 64 × 64, which the system scales for its
 /// title bar (16-32 px) and taskbar (32-48 px). A little over those sizes

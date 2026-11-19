@@ -329,6 +329,164 @@ impl Default for ParticleSystem {
     }
 }
 
+/// A point light at the object: it brightens the scene around it, most at the
+/// middle. On a sprite with a normal map (made in the Lighting tab) it shades
+/// by which way each pixel faces, as if the light hung `height` pixels in
+/// front of it, and by the sprite's light mask; everything else gets the
+/// plain soft disc of light. Lights add to the scene's [`AmbientLight`], so
+/// they show most when that is dim. Lights are only drawn, never part of the
+/// game's simulation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+pub struct Light2D {
+    /// Untick to switch it off.
+    pub on: bool,
+    pub color: Rgba8,
+    /// Above 1 overexposes into bloom.
+    #[reflect(range(0, 8))]
+    pub intensity: reign::core::Fx,
+    /// How far the light reaches, in pixels.
+    #[reflect(range(1, 1000))]
+    pub radius: reign::core::Fx,
+    /// How far in front of the sprites it hangs, in pixels: lower is more
+    /// grazing, higher lights flat surfaces more evenly. Only matters for
+    /// sprites with normal maps.
+    #[reflect(range(0, 200))]
+    pub height: reign::core::Fx,
+}
+
+impl Default for Light2D {
+    fn default() -> Self {
+        Light2D {
+            on: true,
+            color: Rgba8::WHITE,
+            intensity: reign::core::Fx::ONE,
+            radius: reign::core::Fx::from_px(96),
+            height: reign::core::Fx::from_px(24),
+        }
+    }
+}
+
+/// How bright the scene is where no light reaches. Add one to any object
+/// (the first one counts); without one the scene is fully lit, as every scene
+/// always was. Lower it to darken the scene and let [`Light2D`]s show.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+pub struct AmbientLight {
+    pub color: Rgba8,
+    /// 1 is full brightness, 0 is black.
+    #[reflect(range(0, 4))]
+    pub intensity: reign::core::Fx,
+}
+
+impl Default for AmbientLight {
+    fn default() -> Self {
+        AmbientLight { color: Rgba8::WHITE, intensity: reign::core::Fx::from_subpx(0, 64) }
+    }
+}
+
+/// One point of a [`TrailRenderer`]'s path: where the object was, and how
+/// many ticks ago.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TrailPoint {
+    pub at: reign::core::FxVec2,
+    pub age: u32,
+}
+
+/// Draws a ribbon behind a moving object, like Unity's Trail Renderer. Every
+/// tick the object's position is added to the trail; points older than
+/// `time` fade away. The ribbon runs from `start_width` and `start_color`
+/// at the object to `end_width` and `end_color` at the oldest point, and is
+/// drawn with the object's `z`, so sprites in front of it hide it.
+/// `ctx.clear_trail(me)` empties it, for a teleport.
+///
+/// The points are part of the game's state (whole subpixels, replayed
+/// exactly), so a trail looks the same in every run and after a rewind.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Component)]
+#[serde(default)]
+pub struct TrailRenderer {
+    /// Untick to stop adding points; the trail already drawn fades out.
+    pub emitting: bool,
+    /// How long a point stays, in seconds.
+    #[reflect(range(0, 10))]
+    pub time: reign::core::Fx,
+    /// How far the object moves, in pixels, before the trail gets a new point.
+    #[reflect(range(0, 64))]
+    pub min_vertex_distance: reign::core::Fx,
+    /// Width in pixels at the object.
+    #[reflect(range(0, 256))]
+    pub start_width: reign::core::Fx,
+    /// Width in pixels at the oldest point.
+    #[reflect(range(0, 256))]
+    pub end_width: reign::core::Fx,
+    /// Colour at the object. Its alpha fades like the colour does.
+    pub start_color: Rgba8,
+    /// Colour at the oldest point.
+    pub end_color: Rgba8,
+    /// Adds its colour to what's under it instead of covering it: glows.
+    pub additive: bool,
+    /// Most points kept: the oldest go first.
+    #[reflect(range(2, 512))]
+    pub max_points: u16,
+    /// Where the object has been, newest last. State, not a setting.
+    #[serde(skip)]
+    #[reflect(skip)]
+    pub points: Vec<TrailPoint>,
+}
+
+impl Default for TrailRenderer {
+    fn default() -> Self {
+        TrailRenderer {
+            emitting: true,
+            time: reign::core::Fx::from_subpx(0, 128),
+            min_vertex_distance: reign::core::Fx::from_px(2),
+            start_width: reign::core::Fx::from_px(6),
+            end_width: reign::core::Fx::ZERO,
+            start_color: Rgba8::WHITE,
+            end_color: Rgba8::rgba(255, 255, 255, 0),
+            additive: false,
+            max_points: 128,
+            points: Vec::new(),
+        }
+    }
+}
+
+impl TrailRenderer {
+    /// How many ticks a point lives.
+    pub fn lifetime_ticks(&self) -> u32 {
+        let ticks = i64::from(self.time.raw().max(0)) * i64::from(reign::core::TICK_HZ)
+            / i64::from(reign::core::Fx::ONE.raw());
+        ticks.clamp(0, i64::from(u32::MAX)) as u32
+    }
+
+    /// One tick: ages and drops points, then adds the object's position at
+    /// `at` if it has moved far enough.
+    pub fn step(&mut self, at: reign::core::FxVec2) {
+        let lifetime = self.lifetime_ticks();
+        for p in &mut self.points {
+            p.age = p.age.saturating_add(1);
+        }
+        self.points.retain(|p| p.age <= lifetime);
+        if self.emitting {
+            let far_enough = self.points.last().is_none_or(|last| {
+                let (dx, dy) = (
+                    i64::from(at.x.raw()) - i64::from(last.at.x.raw()),
+                    i64::from(at.y.raw()) - i64::from(last.at.y.raw()),
+                );
+                let min = i64::from(self.min_vertex_distance.raw().max(1));
+                dx * dx + dy * dy >= min * min
+            });
+            if far_enough {
+                self.points.push(TrailPoint { at, age: 0 });
+            }
+        }
+        let cap = usize::from(self.max_points.max(2));
+        if self.points.len() > cap {
+            self.points.drain(..self.points.len() - cap);
+        }
+    }
+}
+
 /// The built-in components, before a project's own.
 pub fn register_builtins(r: &mut ComponentRegistry) {
     r.register::<Camera>()
@@ -339,6 +497,9 @@ pub fn register_builtins(r: &mut ComponentRegistry) {
         .register::<Text>()
         .register::<AudioSource>()
         .register::<ParticleSystem>()
+        .register::<TrailRenderer>()
+        .register::<Light2D>()
+        .register::<AmbientLight>()
         .register::<physics::Rigidbody>()
         .register::<physics::BoxCollider>()
         .register::<physics::TilemapCollider>();

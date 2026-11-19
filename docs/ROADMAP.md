@@ -54,6 +54,22 @@ text or command-line way in, and a way to see the result.
 - [x] **Particles**: `*.particles.ron` effects with Unity's modules, the
   Particles tab with a live preview, the `ParticleSystem` component and
   `ctx.play_particles` / `ctx.stop_particles`.
+- [x] **Trail Renderer**: the `TrailRenderer` component draws a fading, tapering
+  ribbon behind a moving object, with its points kept in the scene so it
+  replays exactly; `ctx.clear_trail`. `Renderer::line` and
+  `Renderer::parallelogram` draw it.
+- [x] **Lighting maps**: normal maps and light masks for sprites. The Lighting
+  tab makes them from a texture's colours (four presets, every strength and
+  threshold, per-sprite generation), edits them (wand, pencil, marquee,
+  directions, brightness) and previews them; `SpriteSheet` links them; a
+  material pass and a per-pixel light shader use them in the game; `Light2D`
+  and `AmbientLight` place lights. Still to do: cast shadows (the mask is
+  artistic, not occlusion), normal-mapped tilemaps and images, and map pickers
+  in the Sprites tab.
+- [x] **Gizmos**: lines drawn over the stopped Scene view (camera view,
+  particle emitters, an optional grid) and `Behaviour::gizmos` for a
+  component's own, like Unity's `OnDrawGizmos`. Editor only; no runtime
+  debug-draw yet.
 - [ ] An Add Component shortcut for Animator: dragging an `.anim.ron` into
   the view could make an animated sprite in one step.
 - [ ] Sound volume settings (master, music, effects) for players, and

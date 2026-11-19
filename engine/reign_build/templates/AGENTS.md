@@ -147,6 +147,15 @@ A scene is RON. Objects are listed parents before children.
 - Particles: `"ParticleSystem": (effect: "<particles GUID>", play_on_start: true)`
   plays a `*.particles.ron` effect at the object, following it. Effects are
   made in the editor's Particles tab; they're only drawn, never simulated.
+- Trail: `"TrailRenderer": (time: "0.5", start_width: "6", end_width: "0")` draws a
+  ribbon behind the object that fades after `time` seconds. Also `min_vertex_distance`,
+  `start_color`, `end_color`, `additive`, `max_points`, `emitting`.
+- Lights: `"Light2D": (color: (r: 255, g: 200, b: 120, a: 255), radius: "120", height: "24")`
+  is a soft point light at the object (also `intensity`, `on`). `"AmbientLight": (intensity: "0.25")`
+  on any object sets how bright the scene is where no light reaches; add one, or lights have
+  nothing to show against. A sprite sheet with `normal` and `light_mask` PNGs (make them in the
+  editor's Lighting tab: right-click the texture > Open in Lighting) is shaded by the lights using
+  its normals; sprites without maps just get the soft disc. Lights are only drawn.
 - A `BoxCollider` is centred on the object. With a `Rigidbody` the object
   moves (Dynamic falls, Kinematic moves by its velocity, Static never
   moves); without one it's solid scenery.
@@ -183,6 +192,8 @@ What a script can call (`ctx` is the `&mut Ctx`):
 | `ctx.play_sound("sounds/jump.wav")`, `ctx.play(id)` | A sound by path in `assets/`; an object's `AudioSource` |
 | `ctx.play_music("music/theme.wav")`, `ctx.stop_music()` | Looping music |
 | `ctx.play_particles(id)`, `ctx.stop_particles(id)` | Start an object's `ParticleSystem` again; stop it emitting |
+| `fn gizmos(scene: &Scene, me: ObjectId, g: &mut Gizmos)` in `impl Behaviour<World>` | Lines drawn in the editor's Scene view while stopped: `g.set_color(..)`, `g.line`, `g.rect`, `g.circle`, `g.arrow`, `g.cross`, `g.polyline`. Never drawn in Play |
+| `ctx.clear_trail(id)` | Empty an object's `TrailRenderer` (after a teleport) |
 | `ctx.load_scene("scenes/level2.scene.ron")` | Go to another scene when this tick ends |
 | `ctx.rng()` | The only allowed source of randomness |
 | `ctx.tick()` | Ticks since the game started |

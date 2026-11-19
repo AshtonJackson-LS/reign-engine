@@ -147,6 +147,8 @@ pub struct ReignEngine {
     sprites: Sprites,
     view_origin: (f32, f32),
     show_origin: bool,
+    /// What the Scene view's gizmos show.
+    gizmos: crate::gizmos::Options,
 }
 
 impl ReignEngine {
@@ -179,6 +181,7 @@ impl ReignEngine {
             sprites: Sprites::default(),
             view_origin: (0.0, 0.0),
             show_origin: true,
+            gizmos: crate::gizmos::Options::default(),
         };
         app.use_settings(&crate::settings::Settings::read(&app.project.root));
         let path = scene.unwrap_or_else(|| app.project.start_scene());
@@ -310,6 +313,14 @@ impl EditorApp for ReignEngine {
         Some(&mut self.world.scene)
     }
 
+    fn can_create_component(&self) -> bool {
+        true
+    }
+
+    fn create_component(&mut self, name: &str) {
+        self.code.open_component_dialog(name);
+    }
+
     fn registry(&self) -> Option<&ComponentRegistry> {
         Some(&self.registry)
     }
@@ -362,6 +373,10 @@ impl EditorApp for ReignEngine {
             self.sprites.draw_objects(r, &self.world.scene, db, seen);
         }
         self.draw_colliders(r, view);
+        let (w, h) = view.size();
+        let seen = [view.origin.0, view.origin.1, w, h];
+        let gizmos = crate::gizmos::collect(&self.world.scene, &self.behaviours, seen, self.gizmos);
+        crate::gizmos::draw(r, &gizmos, view.zoom);
         r.present(self.background);
         true
     }
@@ -415,6 +430,11 @@ impl EditorApp for ReignEngine {
         ui.label(format!("Project: {}", self.project.root.display()));
         ui.label(format!("Objects: {}", self.world.scene.len()));
         ui.checkbox(&mut self.show_origin, "Show world origin");
+        ui.checkbox(&mut self.gizmos.show, "Show gizmos");
+        ui.add_enabled(
+            self.gizmos.show,
+            egui::Checkbox::new(&mut self.gizmos.grid, "Show tile grid"),
+        );
     }
 
     fn assets(&self) -> Option<&'static AssetDb> {

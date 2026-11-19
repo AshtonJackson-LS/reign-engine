@@ -3578,6 +3578,7 @@ dependencies = [
  "env_logger",
  "log",
  "png",
+ "pollster 1.0.1",
  "reign",
  "reign_build",
  "rfd",
