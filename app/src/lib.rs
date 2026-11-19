@@ -313,4 +313,6 @@ mod export_tests;
 #[cfg(test)]
 mod feature_tests;
 #[cfg(test)]
+mod lighting_tests;
+#[cfg(test)]
 mod tests;

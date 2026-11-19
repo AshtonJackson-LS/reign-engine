@@ -171,7 +171,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let n = vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
         // Image y grows down, normals have up as positive.
         let to_light = in.centre - in.world;
-        let l = normalize(vec3(to_light.x, -to_light.y, in.height));
+        let v = vec3(to_light.x, -to_light.y, in.height);
+        // Not normalize(): a light at height 0 right on a pixel's centre
+        // would be a zero vector, which some GPUs (Vulkan) turn into NaN, and
+        // the bloom blur spreads a NaN over much of the frame.
+        let l = v / max(length(v), 1e-6);
         shade = max(dot(n, l), 0.0) * m.b;
     }
     return vec4(in.color.rgb * f * shade, 0.0);

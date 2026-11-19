@@ -349,15 +349,10 @@ impl Post {
         queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&self.lights));
 
         let t = &self.targets;
-        let [ar, ag, ab, _] = l.ambient.to_linear();
-        let ambient = Color {
-            r: ar * l.ambient_intensity,
-            g: ag * l.ambient_intensity,
-            b: ab * l.ambient_intensity,
-            a: 1.0,
-        };
         {
-            let mut pass = crate::begin_pass(encoder, &t.light, Some(ambient), "light pass");
+            // Already linear: `begin_pass` would convert it a second time.
+            let ambient = ambient_linear(&l);
+            let mut pass = crate::begin_pass_linear(encoder, &t.light, Some(ambient), "light pass");
             if !self.lights.is_empty() {
                 pass.set_pipeline(&self.light_pipeline);
                 pass.set_bind_group(0, &t.material, &[]);
@@ -405,6 +400,14 @@ impl Post {
         }
         self.lights.clear();
     }
+}
+
+/// What the light map is cleared to: the ambient colour in linear light,
+/// times its intensity.
+fn ambient_linear(l: &Lighting) -> [f32; 4] {
+    let [r, g, b, _] = l.ambient.to_linear();
+    let k = l.ambient_intensity;
+    [r * k, g * k, b * k, 1.0]
 }
 
 impl Targets {

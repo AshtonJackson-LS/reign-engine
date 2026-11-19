@@ -54,7 +54,10 @@ binary (`cargo run --bin <crate>-editor -- . --check` inside the project),
 because `reign-engine` only knows the built-in components.
 
 The hub can save PNGs of its own UI: `REIGN_HUB_SNAPSHOTS=<dir> reign-hub`.
-The editor can't yet (see the roadmap).
+The editor can't yet (see the roadmap). To check what a scene looks like
+in a test, `Renderer::headless` (feature `hooks`) draws without a window
+and `read_offscreen` returns the frame's pixels; `app/src/lighting_tests.rs`
+draws scenes through `view.rs` that way (skipped where there's no GPU).
 
 ## Rules that aren't obvious from the code
 

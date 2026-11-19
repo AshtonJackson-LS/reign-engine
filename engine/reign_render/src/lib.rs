@@ -111,7 +111,8 @@ enum Batch {
 }
 
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    /// The window; `None` for a renderer made with `Renderer::headless`.
+    surface: Option<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -213,7 +214,54 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
+        Ok(Self::with_device(device, queue, Some(surface), config))
+    }
 
+    /// A renderer with no window, on the default adapter: it only draws into
+    /// an offscreen frame ([`Renderer::set_offscreen`]), which starts out
+    /// `size` pixels in `format`. For tests and tools that need to see a
+    /// frame; [`Renderer::present`] does nothing until an offscreen is set.
+    #[cfg(feature = "hooks")]
+    pub async fn headless(size: (u32, u32), format: wgpu::TextureFormat) -> Result<Self, String> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("reign headless device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.0.max(1),
+            height: size.1.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let mut renderer = Self::with_device(device, queue, None, config);
+        let offscreen = renderer.create_offscreen(size.0, size.1);
+        renderer.set_offscreen(Some(offscreen));
+        Ok(renderer)
+    }
+
+    /// Everything but the window: pipelines, targets and post, for frames
+    /// in `config.format`.
+    fn with_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: Option<wgpu::Surface<'static>>,
+        config: wgpu::SurfaceConfiguration,
+    ) -> Self {
+        let format = config.format;
         let rect_pipelines =
             [Blend::Alpha, Blend::Add].map(|b| create_rect_pipeline(&device, HDR_FORMAT, b));
         let overlay_rect_pipelines =
@@ -248,7 +296,7 @@ impl Renderer {
             target.size(),
         );
 
-        Ok(Renderer {
+        Renderer {
             surface,
             device,
             queue,
@@ -280,7 +328,7 @@ impl Renderer {
             post,
             #[cfg(feature = "hooks")]
             offscreen: None,
-        })
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -289,7 +337,9 @@ impl Renderer {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
         self.fit_target();
     }
 
@@ -572,7 +622,9 @@ impl Renderer {
         let mode = if on { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         if self.config.present_mode != mode {
             self.config.present_mode = mode;
-            self.surface.configure(&self.device, &self.config);
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.config);
+            }
         }
     }
 
@@ -631,14 +683,15 @@ impl Renderer {
 
     /// The window's next texture, or `None` to skip this frame.
     fn acquire(&mut self) -> Option<wgpu::SurfaceTexture> {
-        match self.surface.get_current_texture() {
+        let surface = self.surface.as_ref()?;
+        match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => Some(frame),
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 Some(frame)
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 None
             }
             other => {
@@ -780,7 +833,9 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -798,6 +853,14 @@ impl Renderer {
 
     pub fn offscreen(&self) -> Option<&Offscreen> {
         self.offscreen.as_ref()
+    }
+
+    /// The offscreen frame's pixels as last presented, four bytes each in
+    /// its format's order, rows top to bottom; `None` without an offscreen.
+    /// Waits for the GPU, so it is for tests and snapshots, not every frame.
+    pub fn read_offscreen(&self) -> Option<Vec<u8>> {
+        let o = self.offscreen.as_ref()?;
+        Some(read_back(&self.device, &self.queue, &o.texture, o.size, 4))
     }
 
     /// Draws the window with `draw`, at its full resolution, and presents
@@ -915,6 +978,54 @@ impl Target {
     }
 }
 
+#[cfg(any(test, feature = "hooks"))]
+/// Copies a `width` x `height` texture with `bytes` bytes a pixel into
+/// memory, rows packed. Waits for the GPU.
+pub(crate) fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    (width, height): (u32, u32),
+    bytes: u32,
+) -> Vec<u8> {
+    let row = width * bytes;
+    let padded = row.div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: u64::from(padded * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |result| result.unwrap());
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = buffer.slice(..).get_mapped_range().expect("the buffer is mapped");
+    let mut out = Vec::new();
+    for y in 0..height {
+        let start = (y * padded) as usize;
+        out.extend_from_slice(&data[start..start + row as usize]);
+    }
+    out
+}
+
 /// A texture and the pixel sampler, for the upscale and sprite shaders.
 pub(crate) fn bind_texture(
     device: &wgpu::Device,
@@ -940,7 +1051,19 @@ pub(crate) fn begin_pass<'e>(
     clear: Option<Color>,
     label: &str,
 ) -> wgpu::RenderPass<'e> {
-    let load = match clear.map(Color::to_linear) {
+    begin_pass_linear(encoder, view, clear.map(Color::to_linear), label)
+}
+
+/// [`begin_pass`] with the clear colour already in linear light (and not
+/// limited to 0..1, for HDR targets): for values that were converted, or
+/// scaled, before they got here.
+pub(crate) fn begin_pass_linear<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    clear: Option<[f32; 4]>,
+    label: &str,
+) -> wgpu::RenderPass<'e> {
+    let load = match clear {
         Some([r, g, b, a]) => {
             wgpu::LoadOp::Clear(wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: a as f64 })
         }
@@ -1214,53 +1337,6 @@ mod tests {
             };
             adapter.request_device(&wgpu::DeviceDescriptor::default()).await.ok()
         })
-    }
-
-    /// Copies a `width` x `height` texture with `bytes` bytes a pixel into
-    /// memory, rows packed.
-    fn read_back(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        texture: &wgpu::Texture,
-        (width, height): (u32, u32),
-        bytes: u32,
-    ) -> Vec<u8> {
-        let row = width * bytes;
-        let padded = row.div_ceil(256) * 256;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: u64::from(padded * height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
-        queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |result| result.unwrap());
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let data = buffer.slice(..).get_mapped_range().expect("the buffer is mapped");
-        let mut out = Vec::new();
-        for y in 0..height {
-            let start = (y * padded) as usize;
-            out.extend_from_slice(&data[start..start + row as usize]);
-        }
-        out
     }
 
     fn half(bits: u16) -> f32 {
