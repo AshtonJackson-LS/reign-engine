@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.2 (2026-11-19)
+
+### Other changes
+
+- Lightng and particle fixes (#11)
+
 ## v0.2.1 (2026-11-18)
 
 ### Other changes
