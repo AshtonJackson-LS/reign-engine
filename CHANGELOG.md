@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.1 (2026-11-18)
+
+### Other changes
+
+- Particle System Feature (#7)
+
 ## v0.2.0 (2026-11-15)
 
 ### Features

@@ -134,8 +134,7 @@ one with a camera is made if missing). With no folder given, the editor uses
 The standalone editor's built-in components: `Camera` (centres the Game
 view), `SpriteRenderer` (one sprite of a sprite sheet, with a tint colour and
 an optional stretched size), `Image` (a whole texture), `Animator`, `Text`,
-`AudioSource`, `ParticleSystem`, `TrailRenderer`, `Light2D`, `AmbientLight`,
-`TilemapRenderer`, and the physics
+`AudioSource`, `ParticleSystem`, `TilemapRenderer`, and the physics
 components below. Every
 project gets `assets/Reign/Shapes` (Square, Circle, Triangle, Diamond,
 Hexagon, Capsule, Rounded Square) and `assets/Reign/Font`, a 5 by 7 pixel
