@@ -5,11 +5,14 @@ use reign_render::{VIEW_HEIGHT, VIEW_WIDTH};
 pub struct SceneView {
     pub origin: (f32, f32),
     pub zoom: f32,
+    /// The object selected in the editor, if any, when the view is drawn:
+    /// for gizmos that show only the selection.
+    pub selected: Option<reign_scene::ObjectId>,
 }
 
 impl SceneView {
     pub fn new(origin: (f32, f32)) -> Self {
-        Self { origin, zoom: 1.0 }
+        Self { origin, zoom: 1.0, selected: None }
     }
 
     pub fn size(self) -> (f32, f32) {

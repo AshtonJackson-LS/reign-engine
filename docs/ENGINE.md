@@ -232,9 +232,22 @@ the scene:
   default 16 px box. Drag moves it, snapped to pixels; hold Ctrl to snap to
   the 16 px grid.
 - **Gizmos**: while stopped, the Scene view draws helper lines over the
-  scene: each camera's view rectangle, a marker at each particle emitter, an
-  optional tile grid, and whatever a Behaviour's `gizmos` adds (see
-  Behaviours). "Show gizmos" and "Show tile grid" are in the debug panel.
+  scene, unlit: each camera's view rectangle; collider outlines (boxes in
+  green, triggers in blue, tilemaps' solid edges, one-way tops in yellow);
+  each `Light2D`'s reach (dim when it's off) and a sun at the
+  `AmbientLight`; each particle emitter's shape from its effect, like
+  Unity's Shape module (a cone, line or point is a closed fan from its mouth
+  opening at the spread out to about how far particles fly; a circle or its
+  slice; a box), its heading, and its floor;
+  the world origin; an optional tile grid; and whatever a Behaviour's
+  `gizmos` adds (see Behaviours). They're drawn for every object, selected
+  or not. The Scene view's strip has a **Gizmos** toggle for all of them
+  and a **▾** menu with a box for each kind (Colliders, Lights, Particle
+  shapes, Cameras, Component gizmos, World origin, Tile grid), All / None,
+  and **Selected object only**. The menu stays open while you tick boxes.
+  An app adds its own controls to that strip with
+  `EditorApp::scene_view_ui`, and `SceneView::selected` tells
+  `draw_scene` what is selected.
 - **Undo/redo**: Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z. Each step is a whole-scene
   snapshot (cheap, thanks to copy-on-write), so every kind of edit restores
   exactly.
@@ -753,6 +766,11 @@ Layer) sorts it, and `quads_in(orders, ..)` / `draw_in(.., orders)` draw a
 range at a time: a game can draw ground stains (negative orders) behind
 its characters and everything else in front. Particles use their own random numbers and never feed
 back into the simulation, so they can't change a replay or an online game.
+
+`shape_outline(effect, spawn)` is the emission shape as lines, like Unity's
+Shape module gizmo (a cone's fan out to `reach(effect)`, a circle, a box,
+and the heading), placed and turned as particles are. The Particles tab's
+preview and the Scene view's gizmos both draw it.
 
 ## Combat data
 

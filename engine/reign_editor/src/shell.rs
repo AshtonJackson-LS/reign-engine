@@ -515,7 +515,10 @@ impl<A: EditorApp> Session<A> {
             if self.play.mode() != PlayMode::Playing
                 && !self.panels.game_fullscreen
                 && let Some(camera) = camera
-                && self.app.draw_scene(&mut self.renderer, camera)
+                && self.app.draw_scene(
+                    &mut self.renderer,
+                    SceneView { selected: self.panels.selected, ..camera },
+                )
             {
                 self.panels.drawn_scene = Some(camera);
             } else {
@@ -1927,6 +1930,7 @@ impl<A: EditorApp> Viewer<'_, A> {
                 if let Some(camera) = self.panels.scene_camera {
                     ui.label(format!("{:.0}%", camera.zoom * 100.0));
                 }
+                self.app.scene_view_ui(ui);
                 ui.weak("Middle-drag / Space-drag: pan · Scroll: zoom · Drag object: move");
             });
             focus |= (self.panels.game_focused || ui.ui_contains_pointer())

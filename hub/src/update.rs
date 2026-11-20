@@ -205,7 +205,41 @@ fn can_install_here() -> bool {
         dir.file_name().is_some_and(|name| name == "target")
             && dir.parent().is_some_and(|root| root.join("Cargo.toml").is_file())
     });
-    PACKAGE.is_some() && !cfg!(debug_assertions) && !in_cargo_target
+    PACKAGE.is_some() && !cfg!(debug_assertions) && !in_cargo_target && !translocated(&exe)
+}
+
+/// Whether macOS is running the hub from a translocated copy: a quarantined
+/// app opened where it was unzipped runs from a random read-only mount under
+/// `.../AppTranslocation/...` until it is moved.
+pub fn translocated(exe: &Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == "AppTranslocation")
+}
+
+/// Why `dir`, the hub's own folder, can't take new files, in words that
+/// say what to do; `None` if it can. Writes and removes a small file to
+/// find out.
+pub fn cant_write_reason(dir: &Path) -> Option<String> {
+    let fix = if cfg!(target_os = "macos") {
+        "Quit Reign Hub, drag it into Applications in Finder, and open it from there."
+    } else {
+        "Move Reign Hub to a folder you can write to and open it from there."
+    };
+    if translocated(dir) {
+        return Some(format!(
+            "macOS is running Reign Hub from a read-only copy because it was opened \
+             where it was downloaded. {fix}"
+        ));
+    }
+    let probe = dir.join(format!(".reign-write-test-{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            None
+        }
+        Err(e) => {
+            Some(format!("Reign Hub's folder ({}) can't be written to: {e}. {fix}", dir.display()))
+        }
+    }
 }
 
 /// A release version, ordered so that `1.2.3-beta.4` comes after
@@ -344,6 +378,10 @@ fn release_url(tag: &str, name: &str) -> String {
 fn install(version: &str, progress: &Progress) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or("the hub has no folder")?;
+    // Before downloading: there's no point fetching what can't be placed.
+    if let Some(reason) = cant_write_reason(dir) {
+        return Err(reason);
+    }
     let programs = fetch_release(version, progress)?;
     progress.set_phase(Phase::Installing);
     let files: Vec<(&str, &[u8])> =
@@ -356,6 +394,25 @@ fn install(version: &str, progress: &Progress) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_a_translocated_hub() {
+        let moved = Path::new(
+            "/private/var/folders/j3/x/T/AppTranslocation/C702/d/Reign Hub.app/Contents/MacOS/reign-hub",
+        );
+        assert!(translocated(moved));
+        assert!(cant_write_reason(moved.parent().unwrap()).unwrap().contains("read-only copy"));
+        assert!(!translocated(Path::new("/Applications/Reign Hub.app/Contents/MacOS/reign-hub")));
+    }
+
+    #[test]
+    fn a_writable_folder_has_no_reason_and_keeps_no_probe() {
+        let dir = std::env::temp_dir().join(format!("reign-hub-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(cant_write_reason(&dir), None);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "the probe is removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn compares_versions_numerically() {

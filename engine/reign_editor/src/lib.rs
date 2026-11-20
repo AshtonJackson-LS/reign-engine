@@ -210,6 +210,10 @@ pub trait EditorApp: App {
         false
     }
 
+    /// The app's own controls in the Scene view's strip, after Focus and
+    /// Reset view, while the scene is stopped: a Gizmos menu, say.
+    fn scene_view_ui(&mut self, _ui: &mut egui::Ui) {}
+
     /// The app's own toolbar menus and status, drawn after the GameObject
     /// menu every frame. It may also open windows through `ui.ctx()`.
     fn toolbar_ui(&mut self, _ui: &mut egui::Ui) -> EditorRequests {

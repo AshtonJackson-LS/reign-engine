@@ -278,8 +278,19 @@ impl<G: Game> Behaviours<G> {
     /// Collects every Behaviour's [`Behaviour::gizmos`] in execution order:
     /// for the editor's Scene view.
     pub fn draw_gizmos(&self, scene: &Scene, gizmos: &mut Gizmos) {
+        self.draw_gizmos_where(scene, |_| true, gizmos);
+    }
+
+    /// [`Behaviours::draw_gizmos`] for only the objects `keep` accepts:
+    /// the selected one, say.
+    pub fn draw_gizmos_where(
+        &self,
+        scene: &Scene,
+        keep: impl Fn(ObjectId) -> bool,
+        gizmos: &mut Gizmos,
+    ) {
         for entry in &self.entries {
-            for id in (entry.ids)(scene) {
+            for id in (entry.ids)(scene).into_iter().filter(|&id| keep(id)) {
                 (entry.gizmos)(scene, id, gizmos);
             }
         }

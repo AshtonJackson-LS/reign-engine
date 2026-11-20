@@ -13,7 +13,9 @@ use std::sync::mpsc::{Receiver, channel};
 use eframe::egui;
 
 use super::download::{Phase, Progress};
-use super::update::{PACKAGE, fetch_release, is_beta, parse_version, releases, sort_newest_first};
+use super::update::{
+    PACKAGE, cant_write_reason, fetch_release, is_beta, parse_version, releases, sort_newest_first,
+};
 
 /// Where downloaded versions go: `versions/<version>/` beside the hub.
 fn versions_dir() -> Option<PathBuf> {
@@ -134,7 +136,12 @@ pub fn background<T: Send + 'static>(
 }
 
 fn install_version(version: &str, progress: &Progress) -> Result<(), String> {
-    let dir = versions_dir().ok_or("the hub has no folder")?.join(version);
+    let versions = versions_dir().ok_or("the hub has no folder")?;
+    let hub_dir = versions.parent().ok_or("the hub has no folder")?;
+    if let Some(reason) = cant_write_reason(hub_dir) {
+        return Err(reason);
+    }
+    let dir = versions.join(version);
     let programs = fetch_release(version, progress)?;
     progress.set_phase(Phase::Installing);
     let _ = std::fs::remove_dir_all(&dir);

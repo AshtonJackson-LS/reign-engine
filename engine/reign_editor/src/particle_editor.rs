@@ -324,8 +324,15 @@ impl ParticleEditor {
         if let Some(id) = self.system
             && let Some(spawn) = self.world.spawn_mut(id)
         {
-            let at = to_screen(spawn.x, spawn.y);
-            painter.circle_stroke(at, 4.0, Stroke::new(1.0, Color32::from_rgb(255, 120, 200)));
+            // The emission shape, as the Scene view's gizmo draws it.
+            let pink = Color32::from_rgba_unmultiplied(255, 120, 200, 220);
+            if let Some(effect) = &self.shown {
+                for (a, b) in reign_particles::shape_outline(effect, spawn) {
+                    let line = [to_screen(a.0, a.1), to_screen(b.0, b.1)];
+                    painter.line_segment(line, Stroke::new(1.0, pink));
+                }
+            }
+            painter.circle_filled(to_screen(spawn.x, spawn.y), 2.0, pink);
         }
         painter.text(
             space.right_top() + Vec2::new(-8.0, 8.0),

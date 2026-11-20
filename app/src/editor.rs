@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::Audio;
 use crate::code::Code;
-use crate::components::{Camera, Image, SpriteRenderer, TilemapRenderer, sprite_size};
+use crate::components::{Camera, Image, SpriteRenderer, TilemapRenderer};
 use crate::project_settings::ProjectSettings;
 use crate::runtime::{self, Keyboard, Scripts, World, schedule};
 use crate::view::{self, Sprites};
@@ -146,7 +146,6 @@ pub struct ReignEngine {
     scene_file: Option<PathBuf>,
     sprites: Sprites,
     view_origin: (f32, f32),
-    show_origin: bool,
     /// What the Scene view's gizmos show.
     gizmos: crate::gizmos::Options,
 }
@@ -180,7 +179,6 @@ impl ReignEngine {
             scene_file: None,
             sprites: Sprites::default(),
             view_origin: (0.0, 0.0),
-            show_origin: true,
             gizmos: crate::gizmos::Options::default(),
         };
         app.use_settings(&crate::settings::Settings::read(&app.project.root));
@@ -191,35 +189,12 @@ impl ReignEngine {
         app
     }
 
-    pub(crate) fn scene(&self) -> &Scene {
-        &self.world.scene
-    }
-
     fn db(&self) -> Option<&'static AssetDb> {
         DB.get()
     }
 
     /// Green outlines on every collider, in the edit view: whole boxes,
     /// and the outer edges of solid tiles (one-way tops in yellow).
-    fn draw_colliders(&self, r: &mut Renderer, view: SceneView) {
-        let line = Color::rgba8(120, 230, 140, 220);
-        let one_way = Color::rgba8(230, 220, 110, 220);
-        let (w, h) = view.size();
-        let (x, y) = (view.origin.0.floor() as i32, view.origin.1.floor() as i32);
-        let seen = physics::Rect { x, y, w: w.ceil() as i32 + 1, h: h.ceil() as i32 + 1 };
-        for (e, top) in physics::tile_outlines(self.scene(), seen) {
-            let color = if top { one_way } else { line };
-            r.rect(e.x as f32, e.y as f32, e.w as f32, e.h as f32, color);
-        }
-        for (_, b) in physics::colliders(self.scene(), &sprite_size) {
-            let (x, y, w, h) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
-            r.rect(x, y, w, 1.0, line);
-            r.rect(x, y + h - 1.0, w, 1.0, line);
-            r.rect(x, y + 1.0, 1.0, h - 2.0, line);
-            r.rect(x + w - 1.0, y + 1.0, 1.0, h - 2.0, line);
-        }
-    }
-
     /// A Tilemap object, its top-left at `at`, drawing (and colliding
     /// with) a new starter map in `assets/tilemaps/`. Without a writable
     /// project the map is left empty for the Inspector.
@@ -241,14 +216,6 @@ impl ReignEngine {
         scene.insert(id, TilemapRenderer { tilemap, ..TilemapRenderer::default() });
         scene.insert(id, physics::TilemapCollider::default());
         id
-    }
-
-    fn draw_origin(&self, r: &mut Renderer) {
-        if self.show_origin {
-            let axis = Color::rgba8(255, 255, 255, 60);
-            r.rect(-4000.0, 0.0, 8000.0, 1.0, axis);
-            r.rect(0.0, -4000.0, 1.0, 8000.0, axis);
-        }
     }
 }
 
@@ -365,20 +332,29 @@ impl EditorApp for ReignEngine {
         r.set_draw_scale(view.zoom);
         r.set_offset(-view.origin.0, -view.origin.1);
         self.view_origin = view.origin;
-        self.draw_origin(r);
         if let Some(db) = DB.get() {
             let (w, h) = view.size();
             let seen = [view.origin.0, view.origin.1, w, h];
             self.sprites.note_scene(self.world.scenes_entered());
             self.sprites.draw_objects(r, &self.world.scene, db, seen);
         }
-        self.draw_colliders(r, view);
         let (w, h) = view.size();
         let seen = [view.origin.0, view.origin.1, w, h];
-        let gizmos = crate::gizmos::collect(&self.world.scene, &self.behaviours, seen, self.gizmos);
+        let gizmos = crate::gizmos::collect(
+            &self.world.scene,
+            &self.behaviours,
+            DB.get(),
+            seen,
+            view.selected,
+            self.gizmos,
+        );
         crate::gizmos::draw(r, &gizmos, view.zoom);
         r.present(self.background);
         true
+    }
+
+    fn scene_view_ui(&mut self, ui: &mut egui::Ui) {
+        crate::gizmos::menu(ui, &mut self.gizmos);
     }
 
     fn input_heard(&mut self, heard: &[reign::editor::Heard]) -> bool {
@@ -429,12 +405,7 @@ impl EditorApp for ReignEngine {
     fn debug_ui(&mut self, _ctx: &mut Ctx, ui: &mut egui::Ui) {
         ui.label(format!("Project: {}", self.project.root.display()));
         ui.label(format!("Objects: {}", self.world.scene.len()));
-        ui.checkbox(&mut self.show_origin, "Show world origin");
-        ui.checkbox(&mut self.gizmos.show, "Show gizmos");
-        ui.add_enabled(
-            self.gizmos.show,
-            egui::Checkbox::new(&mut self.gizmos.grid, "Show tile grid"),
-        );
+        ui.weak("Gizmos are in the Scene view's strip: Gizmos ▾");
     }
 
     fn assets(&self) -> Option<&'static AssetDb> {
