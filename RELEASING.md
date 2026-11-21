@@ -20,7 +20,7 @@ feature branch ──PR──► main ──► beta release (v0.3.0-beta.4)  �
 3. **Every merge into `main` makes a beta.** `release.yml` tests it, builds
    Windows (x64, ARM64), macOS (Apple Silicon and Intel) and Linux (x64,
    ARM64), signs everything and publishes a pre-release such as
-   `v0.3.0-beta.4`. Hubs with **Settings → Beta updates** on install it.
+   `v0.3.0-beta.4`. Hubs with **Engine → Beta release** (About page) install it.
    Only the newest three betas are kept.
 4. **The Release PR keeps itself up to date.** The same run opens or
    updates a pull request called **Release v0.3.0**. It holds the version
@@ -69,8 +69,8 @@ In the repository's **Settings**:
    changelog, fix any labels on the merged pull requests if the version
    looks wrong (the PR updates on the next merge), and merge it.
 
-That's all. To check a beta yourself first, turn on **Beta updates** in your
-hub's Settings.
+That's all. To check a beta yourself first, set **Engine** to **Beta release** in your
+hub's About page.
 
 ## If something goes wrong
 
