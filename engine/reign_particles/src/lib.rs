@@ -19,6 +19,7 @@
 //! can't change what a replay or an online game does.
 
 mod draw;
+mod outline;
 mod render;
 
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use reign_assets::particles::{CollisionMode, ShapeKind, Space, SubTrigger};
 use reign_assets::{AssetDb, Guid, Handle};
 
 pub use draw::{ParticleLight, Quad, QuadImage};
+pub use outline::{Segment, reach, shape_outline};
 pub use reign_assets::ParticleEffect;
 pub use reign_assets::particles;
 pub use render::{GLOW_SIZE, ParticleRenderer, glow_image};

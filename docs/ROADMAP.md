@@ -67,7 +67,7 @@ text or command-line way in, and a way to see the result.
   artistic, not occlusion), normal-mapped tilemaps and images, and map pickers
   in the Sprites tab.
 - [x] **Gizmos**: lines drawn over the stopped Scene view (camera view,
-  particle emitters, an optional grid) and `Behaviour::gizmos` for a
+  colliders, lights, particle emitters' shapes, an optional grid) and `Behaviour::gizmos` for a
   component's own, like Unity's `OnDrawGizmos`. Editor only; no runtime
   debug-draw yet.
 - [ ] An Add Component shortcut for Animator: dragging an `.anim.ron` into
