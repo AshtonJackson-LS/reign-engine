@@ -44,6 +44,29 @@ struct Entry {
     last_opened: u64,
 }
 
+/// Which engine Reign uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    /// The official release.
+    Stable,
+    /// The beta release, built from every change to `main`.
+    Beta,
+    /// A copy of the engine on this computer.
+    Local,
+}
+
+impl Channel {
+    const ALL: [Channel; 3] = [Channel::Stable, Channel::Beta, Channel::Local];
+
+    fn label(self) -> &'static str {
+        match self {
+            Channel::Stable => "Official release (main)",
+            Channel::Beta => "Beta release",
+            Channel::Local => "Local version",
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -110,6 +133,26 @@ impl Settings {
     /// Tells the build tools which engine checkout "local" means.
     fn apply_local_engine(&self) {
         project::set_engine_root(self.local_engine_dir());
+    }
+
+    fn channel(&self) -> Channel {
+        if self.use_local_engine {
+            Channel::Local
+        } else if self.beta_updates {
+            Channel::Beta
+        } else {
+            Channel::Stable
+        }
+    }
+
+    fn set_channel(&mut self, channel: Channel) {
+        self.use_local_engine = channel == Channel::Local;
+        // Choosing Local leaves the Stable/Beta choice as it was.
+        match channel {
+            Channel::Stable => self.beta_updates = false,
+            Channel::Beta => self.beta_updates = true,
+            Channel::Local => {}
+        }
     }
 
     fn location(&self) -> PathBuf {
@@ -1073,52 +1116,97 @@ impl Hub {
         action
     }
 
-    /// "Use my own engine folder": opens projects with an engine built from a
-    /// checkout on this computer (whatever branch it's on) instead of the
-    /// installed release. Changes there show up the next time a project opens.
-    fn local_engine_setting(&mut self, ui: &mut egui::Ui) {
-        let label = text(
-            "Use my own engine folder (a local copy of the engine, on any branch)",
-            Face::Medium,
-            14.0,
-            TEXT,
-            -0.2,
-        );
-        let mut changed = ui.checkbox(&mut self.settings.use_local_engine, label).changed();
-        if self.settings.use_local_engine {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let shown = self
-                    .settings
-                    .local_engine
-                    .as_ref()
-                    .map_or_else(|| "No folder chosen".to_owned(), |p| p.display().to_string());
-                ui.label(text(shown, Face::Regular, 12.5, FAINT, -0.1));
-                if ui.add(theme::secondary("Browse…")).clicked() {
-                    let mut dialog = rfd::FileDialog::new().set_title("Your Reign engine folder");
-                    if let Some(dir) = &self.settings.local_engine {
-                        dialog = dialog.set_directory(dir);
+    /// Which engine Reign uses: the official release, the beta release (both
+    /// kept up to date from GitHub, automatically if asked) or a local copy
+    /// of the engine (any branch) on this computer, which projects open with
+    /// after it's built from that folder.
+    fn engine_setting(&mut self, ui: &mut egui::Ui) {
+        let before = self.settings.channel();
+        let mut channel = before;
+        ui.horizontal(|ui| {
+            ui.label(text("Engine", Face::Medium, 14.0, TEXT, -0.2));
+            egui::ComboBox::from_id_salt("engine channel").selected_text(channel.label()).show_ui(
+                ui,
+                |ui| {
+                    for option in Channel::ALL {
+                        ui.selectable_value(&mut channel, option, option.label());
                     }
-                    if let Some(dir) = dialog.pick_folder() {
-                        self.settings.local_engine = Some(dir);
-                        changed = true;
-                    }
-                }
-            });
-            let (note, color) = match &self.settings.local_engine {
-                None => ("Pick the folder you cloned the engine into.".to_owned(), RED_HOT),
-                Some(dir) if !project::is_engine_checkout(dir) => {
-                    ("That folder isn't a Reign engine checkout.".to_owned(), RED_HOT)
-                }
-                Some(_) => (
-                    "Projects open with the editor built from this folder, rebuilt when it \
-                     changes. Rust is needed."
-                        .to_owned(),
-                    MUTED,
-                ),
-            };
-            ui.label(text(note, Face::Regular, 12.5, color, -0.1));
+                },
+            );
+        });
+        if channel != before {
+            self.settings.set_channel(channel);
+            self.updater.set_beta(self.settings.beta_updates);
+            self.settings.apply_local_engine();
+            self.settings.save();
         }
+        ui.add_space(4.0);
+        if channel == Channel::Local {
+            self.local_engine_path(ui);
+            return;
+        }
+        ui.label(text(
+            match channel {
+                Channel::Beta => "Newest features, built from every change to main. Less tested.",
+                _ => "The official release.",
+            },
+            Face::Regular,
+            12.5,
+            MUTED,
+            -0.1,
+        ));
+        ui.add_space(4.0);
+        let mut automatic = !self.settings.manual_updates;
+        let label = text("Install updates automatically", Face::Medium, 14.0, TEXT, -0.2);
+        if ui.checkbox(&mut automatic, label).changed() {
+            self.settings.manual_updates = !automatic;
+            self.updater.automatic = automatic;
+            self.settings.save();
+        }
+    }
+
+    /// The Local engine's folder: typed or pasted, or picked in the file
+    /// explorer.
+    fn local_engine_path(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            let mut shown = self
+                .settings
+                .local_engine
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let edit = egui::TextEdit::singleline(&mut shown)
+                .hint_text("Paste the engine folder's path")
+                .desired_width(420.0);
+            if ui.add(edit).changed() {
+                let typed = shown.trim().trim_matches('"');
+                self.settings.local_engine = (!typed.is_empty()).then(|| PathBuf::from(typed));
+                changed = true;
+            }
+            if ui.add(theme::secondary("Browse…")).clicked() {
+                let mut dialog = rfd::FileDialog::new().set_title("Your Reign engine folder");
+                if let Some(dir) = &self.settings.local_engine {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    self.settings.local_engine = Some(dir);
+                    changed = true;
+                }
+            }
+        });
+        let (note, color) = match &self.settings.local_engine {
+            None => ("Pick or paste the folder you cloned the engine into.", RED_HOT),
+            Some(dir) if !project::is_engine_checkout(dir) => {
+                ("That folder isn't a Reign engine checkout.", RED_HOT)
+            }
+            Some(_) => (
+                "Projects open with the editor built from this folder, rebuilt when it changes. \
+                 Needs Rust. Updates don't apply.",
+                MUTED,
+            ),
+        };
+        ui.label(text(note, Face::Regular, 12.5, color, -0.1));
         if changed {
             self.settings.apply_local_engine();
             self.settings.save();
@@ -1177,27 +1265,7 @@ impl Hub {
                 self.intro = Intro::new();
             }
             ui.add_space(10.0);
-            let mut automatic = !self.settings.manual_updates;
-            if ui
-                .checkbox(
-                    &mut automatic,
-                    text("Install updates automatically", Face::Medium, 14.0, TEXT, -0.2),
-                )
-                .changed()
-            {
-                self.settings.manual_updates = !automatic;
-                self.updater.automatic = automatic;
-                self.settings.save();
-            }
-            ui.add_space(4.0);
-            let label =
-                text("Beta updates (newest features, less tested)", Face::Medium, 14.0, TEXT, -0.2);
-            if ui.checkbox(&mut self.settings.beta_updates, label).changed() {
-                self.updater.set_beta(self.settings.beta_updates);
-                self.settings.save();
-            }
-            ui.add_space(14.0);
-            self.local_engine_setting(ui);
+            self.engine_setting(ui);
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 ui.label(text("Code editor", Face::Medium, 14.0, TEXT, -0.2));
@@ -1772,7 +1840,9 @@ impl eframe::App for Hub {
         self.reap();
         self.poll_builds();
         let ctx = ui.ctx().clone();
-        if self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some() {
+        if (self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some())
+            && !self.settings.use_local_engine
+        {
             self.updater.check(&ctx);
         }
         match self.updater.poll(&ctx) {
@@ -2094,4 +2164,43 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("Reign Hub", options, Box::new(|cc| Ok(Box::new(Hub::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_choice_follows_the_old_settings_files() {
+        // A file from before the dropdown: no new fields.
+        let old: Settings = ron::from_str("(beta_updates: true)").unwrap();
+        assert_eq!(old.channel(), Channel::Beta);
+        let older: Settings = ron::from_str("()").unwrap();
+        assert_eq!(older.channel(), Channel::Stable);
+    }
+
+    #[test]
+    fn local_remembers_whether_stable_or_beta_was_picked() {
+        let mut s = Settings::default();
+        s.set_channel(Channel::Beta);
+        s.set_channel(Channel::Local);
+        assert_eq!(s.channel(), Channel::Local);
+        s.set_channel(Channel::Beta);
+        assert_eq!(s.channel(), Channel::Beta);
+        s.set_channel(Channel::Stable);
+        assert_eq!(s.channel(), Channel::Stable);
+    }
+
+    #[test]
+    fn local_only_applies_to_a_real_engine_folder() {
+        let mut s = Settings::default();
+        s.set_channel(Channel::Local);
+        assert_eq!(s.local_engine_dir(), None, "no folder chosen");
+        s.local_engine = Some(std::env::temp_dir());
+        assert_eq!(s.local_engine_dir(), None, "not an engine checkout");
+        s.local_engine = Some(project::engine_root());
+        assert!(s.local_engine_dir().is_some());
+        s.set_channel(Channel::Stable);
+        assert_eq!(s.local_engine_dir(), None, "switched off");
+    }
 }
