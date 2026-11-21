@@ -44,6 +44,29 @@ struct Entry {
     last_opened: u64,
 }
 
+/// Which engine Reign uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    /// The official release.
+    Stable,
+    /// The beta release, built from every change to `main`.
+    Beta,
+    /// A copy of the engine on this computer.
+    Local,
+}
+
+impl Channel {
+    const ALL: [Channel; 3] = [Channel::Stable, Channel::Beta, Channel::Local];
+
+    fn label(self) -> &'static str {
+        match self {
+            Channel::Stable => "Official release (main)",
+            Channel::Beta => "Beta release",
+            Channel::Local => "Local version",
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -57,6 +80,11 @@ struct Settings {
     manual_updates: bool,
     /// Take beta releases, built from every change to `main`.
     beta_updates: bool,
+    /// Use the engine in `local_engine` (a checkout on this computer, with
+    /// whatever branch is checked out) instead of a downloaded release.
+    use_local_engine: bool,
+    /// The engine checkout to use when `use_local_engine` is on.
+    local_engine: Option<PathBuf>,
 }
 
 /// What `ReignProject.ron` holds.
@@ -92,6 +120,38 @@ impl Settings {
             std::fs::create_dir_all(config_dir()).and_then(|_| std::fs::write(&path, text));
         if let Err(e) = result {
             log::error!("{}: {e}", path.display());
+        }
+    }
+
+    /// The engine folder to use instead of a release: only when it's switched
+    /// on and still looks like an engine checkout.
+    fn local_engine_dir(&self) -> Option<PathBuf> {
+        let dir = self.local_engine.as_ref().filter(|_| self.use_local_engine)?;
+        project::is_engine_checkout(dir).then(|| dir.clone())
+    }
+
+    /// Tells the build tools which engine checkout "local" means.
+    fn apply_local_engine(&self) {
+        project::set_engine_root(self.local_engine_dir());
+    }
+
+    fn channel(&self) -> Channel {
+        if self.use_local_engine {
+            Channel::Local
+        } else if self.beta_updates {
+            Channel::Beta
+        } else {
+            Channel::Stable
+        }
+    }
+
+    fn set_channel(&mut self, channel: Channel) {
+        self.use_local_engine = channel == Channel::Local;
+        // Choosing Local leaves the Stable/Beta choice as it was.
+        match channel {
+            Channel::Stable => self.beta_updates = false,
+            Channel::Beta => self.beta_updates = true,
+            Channel::Local => {}
         }
     }
 
@@ -242,6 +302,9 @@ struct HubBuild {
     cancelled: bool,
     /// How far cargo says it has got; `None` until it says.
     progress: Option<reign_build::progress::BuildProgress>,
+    /// The editor to open when it's done, if it isn't the project's own
+    /// (a project without code, opened in an editor built from the engine).
+    exe: Option<PathBuf>,
 }
 
 enum BuildEvent {
@@ -320,6 +383,7 @@ impl Hub {
     fn new(cc: &eframe::CreationContext) -> Self {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
+        settings.apply_local_engine();
         let intro = if settings.skip_intro { Intro::finished() } else { Intro::new() };
         let updater = update::Updater::new(!settings.manual_updates, settings.beta_updates);
         Hub {
@@ -382,6 +446,11 @@ impl Hub {
         if project::has_code(path) {
             return self.build(path);
         }
+        // With "use my own engine folder" on, the editor is built from that
+        // folder, not the installed release.
+        if let Some(engine) = self.settings.local_engine_dir() {
+            return self.build_local_editor(path, &engine);
+        }
         let mut command = if let Some(version) = project_version(path).filter(|v| v != VERSION) {
             if self.versions.installing.as_deref() == Some(version.as_str()) {
                 return self.info(format!("Engine {version} is still downloading…"));
@@ -411,6 +480,21 @@ impl Hub {
         }
     }
 
+    /// Builds the editor from the engine checkout `engine`, then opens the
+    /// project (which has no code of its own) in it.
+    fn build_local_editor(&mut self, path: &Path, engine: &Path) {
+        if self.building.contains_key(path) {
+            return;
+        }
+        if !self.cargo {
+            return self.error(
+                "Using your own engine folder needs Rust to build it: get it from rustup.rs",
+            );
+        }
+        let command = project::engine_editor_command(engine);
+        self.start_build(path, command, Some(project::engine_editor_path(engine)));
+    }
+
     /// Builds a project's own editor, then opens it (see [`Self::poll_builds`]).
     fn build(&mut self, path: &Path) {
         if self.building.contains_key(path) {
@@ -423,7 +507,23 @@ impl Hub {
         let Some(name) = project::read_crate_name(path) else {
             return self.error(format!("{}/Cargo.toml has no package name", path.display()));
         };
-        let mut command = project::build_command(path, &name);
+        // With "use my own engine folder" on, the project builds against
+        // that folder: point its Cargo.toml there if it doesn't already.
+        if let Some(engine) = self.settings.local_engine_dir()
+            && !project::project_uses_checkout(path, &engine)
+        {
+            let source = project::EngineSource::Local(engine);
+            if let Err(e) = project::set_project_engine(path, &source) {
+                return self.error(format!("Can't point {} at your engine folder: {e}", name));
+            }
+        }
+        let command = project::build_command(path, &name);
+        self.start_build(path, command, None);
+    }
+
+    /// Runs `command` to build for the project at `path`, then opens it with
+    /// `exe` (the project's own editor when `None`).
+    fn start_build(&mut self, path: &Path, mut command: Command, exe: Option<PathBuf>) {
         command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
         launch::own_process_group(&mut command);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -454,6 +554,7 @@ impl Hub {
                         pid,
                         cancelled: false,
                         progress: None,
+                        exe,
                     },
                 );
                 self.info(format!("Compiling {}…", project_name(path)));
@@ -490,8 +591,13 @@ impl Hub {
                 self.info(format!("Build of {} cancelled", project_name(&path)));
                 continue;
             }
-            let Some(name) = project::read_crate_name(&path) else { continue };
-            let exe = project::editor_path(&path, &name);
+            let exe = match build.exe.clone() {
+                Some(exe) => exe,
+                None => {
+                    let Some(name) = project::read_crate_name(&path) else { continue };
+                    project::editor_path(&path, &name)
+                }
+            };
             let failure =
                 (!ok).then(|| build.first_error.unwrap_or_else(|| "cargo build failed".to_owned()));
             if let Some(first) = &failure {
@@ -1010,6 +1116,103 @@ impl Hub {
         action
     }
 
+    /// Which engine Reign uses: the official release, the beta release (both
+    /// kept up to date from GitHub, automatically if asked) or a local copy
+    /// of the engine (any branch) on this computer, which projects open with
+    /// after it's built from that folder.
+    fn engine_setting(&mut self, ui: &mut egui::Ui) {
+        let before = self.settings.channel();
+        let mut channel = before;
+        ui.horizontal(|ui| {
+            ui.label(text("Engine", Face::Medium, 14.0, TEXT, -0.2));
+            egui::ComboBox::from_id_salt("engine channel").selected_text(channel.label()).show_ui(
+                ui,
+                |ui| {
+                    for option in Channel::ALL {
+                        ui.selectable_value(&mut channel, option, option.label());
+                    }
+                },
+            );
+        });
+        if channel != before {
+            self.settings.set_channel(channel);
+            self.updater.set_beta(self.settings.beta_updates);
+            self.settings.apply_local_engine();
+            self.settings.save();
+        }
+        ui.add_space(4.0);
+        if channel == Channel::Local {
+            self.local_engine_path(ui);
+            return;
+        }
+        ui.label(text(
+            match channel {
+                Channel::Beta => "Newest features, built from every change to main. Less tested.",
+                _ => "The official release.",
+            },
+            Face::Regular,
+            12.5,
+            MUTED,
+            -0.1,
+        ));
+        ui.add_space(4.0);
+        let mut automatic = !self.settings.manual_updates;
+        let label = text("Install updates automatically", Face::Medium, 14.0, TEXT, -0.2);
+        if ui.checkbox(&mut automatic, label).changed() {
+            self.settings.manual_updates = !automatic;
+            self.updater.automatic = automatic;
+            self.settings.save();
+        }
+    }
+
+    /// The Local engine's folder: typed or pasted, or picked in the file
+    /// explorer.
+    fn local_engine_path(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            let mut shown = self
+                .settings
+                .local_engine
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let edit = egui::TextEdit::singleline(&mut shown)
+                .hint_text("Paste the engine folder's path")
+                .desired_width(420.0);
+            if ui.add(edit).changed() {
+                let typed = shown.trim().trim_matches('"');
+                self.settings.local_engine = (!typed.is_empty()).then(|| PathBuf::from(typed));
+                changed = true;
+            }
+            if ui.add(theme::secondary("Browse…")).clicked() {
+                let mut dialog = rfd::FileDialog::new().set_title("Your Reign engine folder");
+                if let Some(dir) = &self.settings.local_engine {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    self.settings.local_engine = Some(dir);
+                    changed = true;
+                }
+            }
+        });
+        let (note, color) = match &self.settings.local_engine {
+            None => ("Pick or paste the folder you cloned the engine into.", RED_HOT),
+            Some(dir) if !project::is_engine_checkout(dir) => {
+                ("That folder isn't a Reign engine checkout.", RED_HOT)
+            }
+            Some(_) => (
+                "Projects open with the editor built from this folder, rebuilt when it changes. \
+                 Needs Rust. Updates don't apply.",
+                MUTED,
+            ),
+        };
+        ui.label(text(note, Face::Regular, 12.5, color, -0.1));
+        if changed {
+            self.settings.apply_local_engine();
+            self.settings.save();
+        }
+    }
+
     fn about_page(&mut self, ui: &mut egui::Ui) {
         let facts = vec![
             "Deterministic 2D simulation".to_owned(),
@@ -1018,120 +1221,107 @@ impl Hub {
         ];
         self.hero(ui, "About", "REIGN ENGINE", &facts);
 
+        // Inside the page margin, so the scrollbar shows (as on Projects)
+        // when the settings are taller than the window.
         egui::Frame::NONE.inner_margin(Margin::symmetric(GUTTER as i8, 28)).show(ui, |ui| {
-            let stats = [
-                ("13", "Engine crates", "One facade crate re-exports them all."),
-                ("640×360", "Render target", "Pixel art, scaled up by whole numbers."),
-                ("120 Hz", "Fixed tick", "The simulation steps at a fixed rate."),
-            ];
-            ui.columns(stats.len(), |cols| {
-                for (col, (number, label, body)) in cols.iter_mut().zip(stats) {
-                    col.label(text(number, Face::Bold, 52.0, TEXT, -2.2));
-                    col.add_space(6.0);
-                    let (line, _) = col.allocate_exact_size(
-                        Vec2::new(col.available_width() - 24.0, 1.0),
-                        Sense::hover(),
-                    );
-                    col.painter().hline(
-                        line.x_range(),
-                        line.center().y,
-                        Stroke::new(1.0, HAIRLINE),
-                    );
-                    col.add_space(8.0);
-                    col.label(text(label, Face::SemiBold, 15.0, TEXT, -0.3));
-                    col.label(text(body, Face::Regular, 12.5, MUTED, -0.1));
-                }
-            });
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                let stats = [
+                    ("13", "Engine crates", "One facade crate re-exports them all."),
+                    ("640×360", "Render target", "Pixel art, scaled up by whole numbers."),
+                    ("120 Hz", "Fixed tick", "The simulation steps at a fixed rate."),
+                ];
+                ui.columns(stats.len(), |cols| {
+                    for (col, (number, label, body)) in cols.iter_mut().zip(stats) {
+                        col.label(text(number, Face::Bold, 52.0, TEXT, -2.2));
+                        col.add_space(6.0);
+                        let (line, _) = col.allocate_exact_size(
+                            Vec2::new(col.available_width() - 24.0, 1.0),
+                            Sense::hover(),
+                        );
+                        col.painter().hline(
+                            line.x_range(),
+                            line.center().y,
+                            Stroke::new(1.0, HAIRLINE),
+                        );
+                        col.add_space(8.0);
+                        col.label(text(label, Face::SemiBold, 15.0, TEXT, -0.3));
+                        col.label(text(body, Face::Regular, 12.5, MUTED, -0.1));
+                    }
+                });
 
-            ui.add_space(36.0);
-            ui.label(eyebrow("— Settings", MUTED));
-            ui.add_space(6.0);
-            let mut play = !self.settings.skip_intro;
-            if ui
-                .checkbox(
-                    &mut play,
-                    text("Play the intro on launch", Face::Medium, 14.0, TEXT, -0.2),
-                )
-                .changed()
-            {
-                self.settings.skip_intro = !play;
-                self.settings.save();
-            }
-            ui.add_space(4.0);
-            if ui.add(theme::secondary("Replay intro")).clicked() {
-                self.intro = Intro::new();
-            }
-            ui.add_space(10.0);
-            let mut automatic = !self.settings.manual_updates;
-            if ui
-                .checkbox(
-                    &mut automatic,
-                    text("Install updates automatically", Face::Medium, 14.0, TEXT, -0.2),
-                )
-                .changed()
-            {
-                self.settings.manual_updates = !automatic;
-                self.updater.automatic = automatic;
-                self.settings.save();
-            }
-            ui.add_space(4.0);
-            let label =
-                text("Beta updates (newest features, less tested)", Face::Medium, 14.0, TEXT, -0.2);
-            if ui.checkbox(&mut self.settings.beta_updates, label).changed() {
-                self.updater.set_beta(self.settings.beta_updates);
-                self.settings.save();
-            }
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                ui.label(text("Code editor", Face::Medium, 14.0, TEXT, -0.2));
-                let installed = ide::installed();
-                let current = ide::preferred().map(|i| i.name);
-                egui::ComboBox::from_id_salt("ide")
-                    .selected_text(current.unwrap_or("None found"))
-                    .show_ui(ui, |ui| {
-                        for choice in installed {
-                            if ui
-                                .selectable_label(current == Some(choice.name), choice.name)
-                                .clicked()
-                            {
-                                let prefs = ide::Preferences { ide: Some(choice.name.to_owned()) };
-                                if let Err(e) = prefs.save() {
-                                    log::error!("can't save the code editor choice: {e}");
+                ui.add_space(36.0);
+                ui.label(eyebrow("— Settings", MUTED));
+                ui.add_space(6.0);
+                let mut play = !self.settings.skip_intro;
+                if ui
+                    .checkbox(
+                        &mut play,
+                        text("Play the intro on launch", Face::Medium, 14.0, TEXT, -0.2),
+                    )
+                    .changed()
+                {
+                    self.settings.skip_intro = !play;
+                    self.settings.save();
+                }
+                ui.add_space(4.0);
+                if ui.add(theme::secondary("Replay intro")).clicked() {
+                    self.intro = Intro::new();
+                }
+                ui.add_space(10.0);
+                self.engine_setting(ui);
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.label(text("Code editor", Face::Medium, 14.0, TEXT, -0.2));
+                    let installed = ide::installed();
+                    let current = ide::preferred().map(|i| i.name);
+                    egui::ComboBox::from_id_salt("ide")
+                        .selected_text(current.unwrap_or("None found"))
+                        .show_ui(ui, |ui| {
+                            for choice in installed {
+                                if ui
+                                    .selectable_label(current == Some(choice.name), choice.name)
+                                    .clicked()
+                                {
+                                    let prefs =
+                                        ide::Preferences { ide: Some(choice.name.to_owned()) };
+                                    if let Err(e) = prefs.save() {
+                                        log::error!("can't save the code editor choice: {e}");
+                                    }
                                 }
                             }
-                        }
-                    });
-            });
-            let rust = if self.cargo {
-                "Rust is installed"
-            } else {
-                "Rust isn't installed: get it from rustup.rs to write components"
-            };
-            ui.label(text(
-                rust,
-                Face::Regular,
-                12.5,
-                if self.cargo { MUTED } else { RED_HOT },
-                -0.1,
-            ));
-
-            ui.add_space(28.0);
-            ui.label(eyebrow("— Paths", MUTED));
-            ui.add_space(4.0);
-            let editor = editor_path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "not found".into());
-            for (k, v) in
-                [("Editor", editor), ("Project list", settings_path().display().to_string())]
-            {
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [110.0, 18.0],
-                        egui::Label::new(text(k, Face::Medium, 12.5, MUTED, -0.1)),
-                    );
-                    ui.label(text(v, Face::Regular, 12.5, FAINT, -0.1));
+                        });
                 });
-            }
+                let rust = if self.cargo {
+                    "Rust is installed"
+                } else {
+                    "Rust isn't installed: get it from rustup.rs to write components"
+                };
+                ui.label(text(
+                    rust,
+                    Face::Regular,
+                    12.5,
+                    if self.cargo { MUTED } else { RED_HOT },
+                    -0.1,
+                ));
+
+                ui.add_space(28.0);
+                ui.label(eyebrow("— Paths", MUTED));
+                ui.add_space(4.0);
+                let editor = editor_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "not found".into());
+                for (k, v) in
+                    [("Editor", editor), ("Project list", settings_path().display().to_string())]
+                {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [110.0, 18.0],
+                            egui::Label::new(text(k, Face::Medium, 12.5, MUTED, -0.1)),
+                        );
+                        ui.label(text(v, Face::Regular, 12.5, FAINT, -0.1));
+                    });
+                }
+            });
         });
     }
 
@@ -1655,7 +1845,9 @@ impl eframe::App for Hub {
         self.reap();
         self.poll_builds();
         let ctx = ui.ctx().clone();
-        if self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some() {
+        if (self.snapshots.is_none() || std::env::var_os("REIGN_UPDATE_FAKE").is_some())
+            && !self.settings.use_local_engine
+        {
             self.updater.check(&ctx);
         }
         match self.updater.poll(&ctx) {
@@ -1977,4 +2169,43 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("Reign Hub", options, Box::new(|cc| Ok(Box::new(Hub::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_choice_follows_the_old_settings_files() {
+        // A file from before the dropdown: no new fields.
+        let old: Settings = ron::from_str("(beta_updates: true)").unwrap();
+        assert_eq!(old.channel(), Channel::Beta);
+        let older: Settings = ron::from_str("()").unwrap();
+        assert_eq!(older.channel(), Channel::Stable);
+    }
+
+    #[test]
+    fn local_remembers_whether_stable_or_beta_was_picked() {
+        let mut s = Settings::default();
+        s.set_channel(Channel::Beta);
+        s.set_channel(Channel::Local);
+        assert_eq!(s.channel(), Channel::Local);
+        s.set_channel(Channel::Beta);
+        assert_eq!(s.channel(), Channel::Beta);
+        s.set_channel(Channel::Stable);
+        assert_eq!(s.channel(), Channel::Stable);
+    }
+
+    #[test]
+    fn local_only_applies_to_a_real_engine_folder() {
+        let mut s = Settings::default();
+        s.set_channel(Channel::Local);
+        assert_eq!(s.local_engine_dir(), None, "no folder chosen");
+        s.local_engine = Some(std::env::temp_dir());
+        assert_eq!(s.local_engine_dir(), None, "not an engine checkout");
+        s.local_engine = Some(project::engine_root());
+        assert!(s.local_engine_dir().is_some());
+        s.set_channel(Channel::Stable);
+        assert_eq!(s.local_engine_dir(), None, "switched off");
+    }
 }
