@@ -733,13 +733,13 @@ impl<A: EditorApp> Session<A> {
             Some((id, _)) => {
                 self.egui_wgpu.update_egui_texture_from_wgpu_texture(
                     device,
-                    &offscreen.view,
+                    &offscreen.raw_view,
                     filter,
                     id,
                 );
                 id
             }
-            None => self.egui_wgpu.register_native_texture(device, &offscreen.view, filter),
+            None => self.egui_wgpu.register_native_texture(device, &offscreen.raw_view, filter),
         };
         self.game_texture = Some((id, size));
         self.game_texture_smooth = smooth;
