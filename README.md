@@ -73,8 +73,13 @@ version. If there is one, it downloads this platform's archive
 key built into the hub (`hub/src/signing.rs`), swaps the new programs in
 beside itself and shows a green arrow that restarts into them. Settings →
 **Install updates automatically** off makes it wait for a click on the arrow
-instead. **Beta updates** on also takes betas (`v0.3.0-beta.4`), which are
-built from every merge to `main`. Debug builds and builds inside a Cargo
+instead. The **Engine** dropdown (About page) picks what the hub follows:
+**Official release (main)**; **Beta release**, which also takes betas
+(`v0.3.0-beta.4`), built from every merge to `main`; or **Local version**,
+which never updates and opens projects with an editor built from an engine
+folder on this computer (type or paste its path, or **Browse…**), on
+whatever branch you have checked out there. Projects with code are pointed
+at that folder before they build. Debug builds and builds inside a Cargo
 `target` folder never update on their own. `REIGN_NO_UPDATE_CHECK=1` turns
 the check off; `REIGN_UPDATE_FAKE=9.9.9` shows the arrow, for UI checks.
 While an update (or an engine version from **Engine version…**) downloads, a

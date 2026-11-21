@@ -425,11 +425,65 @@ pub fn engine_source() -> EngineSource {
 /// or the checkout these tools were built from. On a downloaded release it
 /// may not exist; [`engine_source`] says what to use then.
 pub fn engine_root() -> PathBuf {
+    if let Some(dir) = engine_root_override() {
+        return dir;
+    }
     if let Some(dir) = std::env::var_os("REIGN_ENGINE_SOURCE") {
         return PathBuf::from(dir);
     }
     let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     here.canonicalize().map(strip_verbatim).unwrap_or(here)
+}
+
+/// The engine folder a program has been told to use (the Hub's "Use my own
+/// engine folder" setting), which beats `$REIGN_ENGINE_SOURCE`.
+static ENGINE_ROOT_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+fn engine_root_override() -> Option<PathBuf> {
+    ENGINE_ROOT_OVERRIDE.lock().ok()?.clone()
+}
+
+/// Makes [`engine_root`] (so [`EngineSource::local`] and [`engine_source`])
+/// answer `dir`; `None` goes back to `$REIGN_ENGINE_SOURCE` or the checkout
+/// the tools were built from.
+pub fn set_engine_root(dir: Option<PathBuf>) {
+    if let Ok(mut slot) = ENGINE_ROOT_OVERRIDE.lock() {
+        *slot = dir;
+    }
+}
+
+/// Whether `dir` looks like a Reign engine checkout: it has the `reign`
+/// crate and the editor's `app` crate.
+pub fn is_engine_checkout(dir: &Path) -> bool {
+    dir.join("engine/reign/Cargo.toml").is_file() && dir.join("app/Cargo.toml").is_file()
+}
+
+/// Where `cargo build` puts the editor built from the engine checkout `root`
+/// (see [`engine_editor_command`]).
+pub fn engine_editor_path(root: &Path) -> PathBuf {
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    target_dir(root).join("debug").join(format!("reign-engine{exe}"))
+}
+
+/// The command that builds the editor from the engine checkout `root`, for
+/// projects without code of their own.
+pub fn engine_editor_command(root: &Path) -> Command {
+    build_bin(root, "reign-engine", false, &[])
+}
+
+/// Whether the project with code at `root` already builds against the
+/// engine checkout `engine`: a `path` dependency that leads there, however
+/// it's written.
+pub fn project_uses_checkout(root: &Path, engine: &Path) -> bool {
+    let Some(EngineSource::Local(dir)) = project_engine(root) else { return false };
+    let resolve = |p: &Path| {
+        let full = if p.is_absolute() { p.to_owned() } else { root.join(p) };
+        full.canonicalize().ok()
+    };
+    match (resolve(&dir), resolve(engine)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Drops the `\\?\` prefix `canonicalize` adds on Windows, which Cargo
@@ -1133,6 +1187,39 @@ mod tests {
         assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\x".into()), PathBuf::from(r"\\srv\share\x"));
         assert_eq!(strip_verbatim("/home/x".into()), PathBuf::from("/home/x"));
         assert!(!engine_root().to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn an_engine_folder_can_be_chosen_and_recognised() {
+        let default = engine_root();
+        assert!(is_engine_checkout(&default), "tests run inside a checkout");
+        assert!(!is_engine_checkout(&std::env::temp_dir()));
+        // The same folder, so tests running alongside see no change.
+        set_engine_root(Some(default.clone()));
+        assert_eq!(engine_root(), default);
+        set_engine_root(None);
+        assert_eq!(engine_root(), default);
+        let editor = engine_editor_path(&default);
+        assert!(editor.starts_with(target_dir(&default)));
+        assert!(editor.to_string_lossy().contains("reign-engine"));
+    }
+
+    #[test]
+    fn a_project_is_told_apart_by_the_engine_folder_it_points_at() {
+        let base = std::env::temp_dir().join(format!("reign-uses-checkout-{}", std::process::id()));
+        let (engine, other, project) = (base.join("engine"), base.join("other"), base.join("game"));
+        for dir in [&engine, &other, &project] {
+            std::fs::create_dir_all(dir.join("engine/reign")).unwrap();
+        }
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[dependencies]\nreign = { path = \"../engine/engine/reign\" }\n",
+        )
+        .unwrap();
+        // A relative path leads to the folder, so it counts.
+        assert!(project_uses_checkout(&project, &engine));
+        assert!(!project_uses_checkout(&project, &other));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
