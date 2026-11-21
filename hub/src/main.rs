@@ -1221,102 +1221,107 @@ impl Hub {
         ];
         self.hero(ui, "About", "REIGN ENGINE", &facts);
 
+        // Inside the page margin, so the scrollbar shows (as on Projects)
+        // when the settings are taller than the window.
         egui::Frame::NONE.inner_margin(Margin::symmetric(GUTTER as i8, 28)).show(ui, |ui| {
-            let stats = [
-                ("13", "Engine crates", "One facade crate re-exports them all."),
-                ("640×360", "Render target", "Pixel art, scaled up by whole numbers."),
-                ("120 Hz", "Fixed tick", "The simulation steps at a fixed rate."),
-            ];
-            ui.columns(stats.len(), |cols| {
-                for (col, (number, label, body)) in cols.iter_mut().zip(stats) {
-                    col.label(text(number, Face::Bold, 52.0, TEXT, -2.2));
-                    col.add_space(6.0);
-                    let (line, _) = col.allocate_exact_size(
-                        Vec2::new(col.available_width() - 24.0, 1.0),
-                        Sense::hover(),
-                    );
-                    col.painter().hline(
-                        line.x_range(),
-                        line.center().y,
-                        Stroke::new(1.0, HAIRLINE),
-                    );
-                    col.add_space(8.0);
-                    col.label(text(label, Face::SemiBold, 15.0, TEXT, -0.3));
-                    col.label(text(body, Face::Regular, 12.5, MUTED, -0.1));
-                }
-            });
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                let stats = [
+                    ("13", "Engine crates", "One facade crate re-exports them all."),
+                    ("640×360", "Render target", "Pixel art, scaled up by whole numbers."),
+                    ("120 Hz", "Fixed tick", "The simulation steps at a fixed rate."),
+                ];
+                ui.columns(stats.len(), |cols| {
+                    for (col, (number, label, body)) in cols.iter_mut().zip(stats) {
+                        col.label(text(number, Face::Bold, 52.0, TEXT, -2.2));
+                        col.add_space(6.0);
+                        let (line, _) = col.allocate_exact_size(
+                            Vec2::new(col.available_width() - 24.0, 1.0),
+                            Sense::hover(),
+                        );
+                        col.painter().hline(
+                            line.x_range(),
+                            line.center().y,
+                            Stroke::new(1.0, HAIRLINE),
+                        );
+                        col.add_space(8.0);
+                        col.label(text(label, Face::SemiBold, 15.0, TEXT, -0.3));
+                        col.label(text(body, Face::Regular, 12.5, MUTED, -0.1));
+                    }
+                });
 
-            ui.add_space(36.0);
-            ui.label(eyebrow("— Settings", MUTED));
-            ui.add_space(6.0);
-            let mut play = !self.settings.skip_intro;
-            if ui
-                .checkbox(
-                    &mut play,
-                    text("Play the intro on launch", Face::Medium, 14.0, TEXT, -0.2),
-                )
-                .changed()
-            {
-                self.settings.skip_intro = !play;
-                self.settings.save();
-            }
-            ui.add_space(4.0);
-            if ui.add(theme::secondary("Replay intro")).clicked() {
-                self.intro = Intro::new();
-            }
-            ui.add_space(10.0);
-            self.engine_setting(ui);
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                ui.label(text("Code editor", Face::Medium, 14.0, TEXT, -0.2));
-                let installed = ide::installed();
-                let current = ide::preferred().map(|i| i.name);
-                egui::ComboBox::from_id_salt("ide")
-                    .selected_text(current.unwrap_or("None found"))
-                    .show_ui(ui, |ui| {
-                        for choice in installed {
-                            if ui
-                                .selectable_label(current == Some(choice.name), choice.name)
-                                .clicked()
-                            {
-                                let prefs = ide::Preferences { ide: Some(choice.name.to_owned()) };
-                                if let Err(e) = prefs.save() {
-                                    log::error!("can't save the code editor choice: {e}");
+                ui.add_space(36.0);
+                ui.label(eyebrow("— Settings", MUTED));
+                ui.add_space(6.0);
+                let mut play = !self.settings.skip_intro;
+                if ui
+                    .checkbox(
+                        &mut play,
+                        text("Play the intro on launch", Face::Medium, 14.0, TEXT, -0.2),
+                    )
+                    .changed()
+                {
+                    self.settings.skip_intro = !play;
+                    self.settings.save();
+                }
+                ui.add_space(4.0);
+                if ui.add(theme::secondary("Replay intro")).clicked() {
+                    self.intro = Intro::new();
+                }
+                ui.add_space(10.0);
+                self.engine_setting(ui);
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.label(text("Code editor", Face::Medium, 14.0, TEXT, -0.2));
+                    let installed = ide::installed();
+                    let current = ide::preferred().map(|i| i.name);
+                    egui::ComboBox::from_id_salt("ide")
+                        .selected_text(current.unwrap_or("None found"))
+                        .show_ui(ui, |ui| {
+                            for choice in installed {
+                                if ui
+                                    .selectable_label(current == Some(choice.name), choice.name)
+                                    .clicked()
+                                {
+                                    let prefs =
+                                        ide::Preferences { ide: Some(choice.name.to_owned()) };
+                                    if let Err(e) = prefs.save() {
+                                        log::error!("can't save the code editor choice: {e}");
+                                    }
                                 }
                             }
-                        }
-                    });
-            });
-            let rust = if self.cargo {
-                "Rust is installed"
-            } else {
-                "Rust isn't installed: get it from rustup.rs to write components"
-            };
-            ui.label(text(
-                rust,
-                Face::Regular,
-                12.5,
-                if self.cargo { MUTED } else { RED_HOT },
-                -0.1,
-            ));
-
-            ui.add_space(28.0);
-            ui.label(eyebrow("— Paths", MUTED));
-            ui.add_space(4.0);
-            let editor = editor_path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "not found".into());
-            for (k, v) in
-                [("Editor", editor), ("Project list", settings_path().display().to_string())]
-            {
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [110.0, 18.0],
-                        egui::Label::new(text(k, Face::Medium, 12.5, MUTED, -0.1)),
-                    );
-                    ui.label(text(v, Face::Regular, 12.5, FAINT, -0.1));
+                        });
                 });
-            }
+                let rust = if self.cargo {
+                    "Rust is installed"
+                } else {
+                    "Rust isn't installed: get it from rustup.rs to write components"
+                };
+                ui.label(text(
+                    rust,
+                    Face::Regular,
+                    12.5,
+                    if self.cargo { MUTED } else { RED_HOT },
+                    -0.1,
+                ));
+
+                ui.add_space(28.0);
+                ui.label(eyebrow("— Paths", MUTED));
+                ui.add_space(4.0);
+                let editor = editor_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "not found".into());
+                for (k, v) in
+                    [("Editor", editor), ("Project list", settings_path().display().to_string())]
+                {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [110.0, 18.0],
+                            egui::Label::new(text(k, Face::Medium, 12.5, MUTED, -0.1)),
+                        );
+                        ui.label(text(v, Face::Regular, 12.5, FAINT, -0.1));
+                    });
+                }
+            });
         });
     }
 

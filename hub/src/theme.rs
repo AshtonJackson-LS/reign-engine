@@ -78,6 +78,13 @@ pub fn install(ctx: &egui::Context) {
         s.spacing.item_spacing = Vec2::new(8.0, 6.0);
         s.spacing.button_padding = Vec2::new(14.0, 7.0);
         s.spacing.interact_size.y = 30.0;
+        // A scrollbar that stays in view when a page is taller than the
+        // window, rather than egui's thin one that only shows on hover.
+        s.spacing.scroll = egui::style::ScrollStyle {
+            // The handle in the text colour, so it shows on the dark page.
+            foreground_color: true,
+            ..egui::style::ScrollStyle::solid()
+        };
         s.text_styles.insert(egui::TextStyle::Body, Face::Regular.id(14.0));
         s.text_styles.insert(egui::TextStyle::Button, Face::SemiBold.id(13.0));
         s.text_styles.insert(egui::TextStyle::Small, Face::Regular.id(11.5));
