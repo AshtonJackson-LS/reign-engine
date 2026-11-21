@@ -159,6 +159,10 @@ pub struct Renderer {
 pub struct Offscreen {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+    /// The same pixels read as plain (non-sRGB) bytes, for UI libraries such
+    /// as egui that expect a texture to hold gamma-encoded values and do
+    /// the conversion themselves. Draw into `view`; show `raw_view`.
+    pub raw_view: wgpu::TextureView,
     /// Width and height in pixels.
     pub size: (u32, u32),
 }
@@ -826,6 +830,9 @@ impl Renderer {
     /// It can also be sampled, to show the frame inside another UI.
     pub fn create_offscreen(&self, width: u32, height: u32) -> Offscreen {
         let size = (width.max(1), height.max(1));
+        let raw_format = self.config.format.remove_srgb_suffix();
+        let view_formats: &[wgpu::TextureFormat] =
+            if raw_format == self.config.format { &[] } else { &[raw_format] };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen frame"),
             size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
@@ -836,10 +843,14 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats,
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Offscreen { texture, view, size }
+        let raw_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(raw_format),
+            ..Default::default()
+        });
+        Offscreen { texture, view, raw_view, size }
     }
 
     /// Sends [`Renderer::present`] into `offscreen` instead of the window,
@@ -1294,6 +1305,28 @@ fn create_texture_binding(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// egui wants a texture of plain bytes, so the editor must be able to
+    /// view the sRGB frame as non-sRGB without a validation error.
+    #[cfg(feature = "hooks")]
+    #[test]
+    fn offscreen_has_a_non_srgb_view_of_the_srgb_frame() {
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let renderer = match pollster::block_on(Renderer::headless((16, 16), format)) {
+            Ok(renderer) => renderer,
+            Err(e) => {
+                eprintln!("No GPU adapter available ({e}): skipping the offscreen view test");
+                return;
+            }
+        };
+        let scope = renderer.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let offscreen = renderer.create_offscreen(16, 16);
+        assert!(pollster::block_on(scope.pop()).is_none(), "a validation error");
+        assert_eq!(offscreen.texture.format(), format);
+        // Both views are of the one texture, so drawing into `view` shows in
+        // `raw_view`.
+        assert_eq!(offscreen.view.texture().format(), offscreen.raw_view.texture().format());
+    }
 
     #[test]
     fn crimson_sprite_shader_validates_for_world_and_overlay_pipelines() {
