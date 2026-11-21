@@ -3457,7 +3457,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reign"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "reign_app",
  "reign_assets",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "reign_app"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "gilrs",
  "log",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "reign_assets"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "log",
  "notify",
@@ -3503,7 +3503,7 @@ dependencies = [
 
 [[package]]
 name = "reign_audio"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "log",
@@ -3511,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "reign_behaviour"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "reign_assets",
  "reign_core",
@@ -3521,11 +3521,11 @@ dependencies = [
 
 [[package]]
 name = "reign_build"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "reign_combat"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "reign_core",
  "reign_physics",
@@ -3536,14 +3536,14 @@ dependencies = [
 
 [[package]]
 name = "reign_core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "reign_derive"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "reign_editor"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "reign_engine"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "env_logger",
  "log",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "reign_hub"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ed25519-dalek",
  "eframe",
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "reign_net"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ggrs",
  "reign_core",
@@ -3615,7 +3615,7 @@ dependencies = [
 
 [[package]]
 name = "reign_particles"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "log",
  "reign_assets",
@@ -3624,7 +3624,7 @@ dependencies = [
 
 [[package]]
 name = "reign_physics"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "reign_core",
  "reign_scene",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "reign_render"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "log",
@@ -3644,7 +3644,7 @@ dependencies = [
 
 [[package]]
 name = "reign_scene"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "erased-serde",
  "reign_core",
@@ -3655,7 +3655,7 @@ dependencies = [
 
 [[package]]
 name = "reign_setup"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "reign_build",
  "rfd",

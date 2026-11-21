@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.0 (2026-11-21)
+
+### Features
+
+- Gizmos for colliders, lights and particle shapes, with a Gizmos menu (#16)
+- Hub: Engine dropdown with a local engine folder, and an About page scrollbar (#15)
+
+### Fixes
+
+- Fix the editor's Game view rendering too dark (#14)
+
 ## v0.2.2 (2026-11-19)
 
 ### Other changes
