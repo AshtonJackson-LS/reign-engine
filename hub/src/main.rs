@@ -57,6 +57,11 @@ struct Settings {
     manual_updates: bool,
     /// Take beta releases, built from every change to `main`.
     beta_updates: bool,
+    /// Use the engine in `local_engine` (a checkout on this computer, with
+    /// whatever branch is checked out) instead of a downloaded release.
+    use_local_engine: bool,
+    /// The engine checkout to use when `use_local_engine` is on.
+    local_engine: Option<PathBuf>,
 }
 
 /// What `ReignProject.ron` holds.
@@ -93,6 +98,18 @@ impl Settings {
         if let Err(e) = result {
             log::error!("{}: {e}", path.display());
         }
+    }
+
+    /// The engine folder to use instead of a release: only when it's switched
+    /// on and still looks like an engine checkout.
+    fn local_engine_dir(&self) -> Option<PathBuf> {
+        let dir = self.local_engine.as_ref().filter(|_| self.use_local_engine)?;
+        project::is_engine_checkout(dir).then(|| dir.clone())
+    }
+
+    /// Tells the build tools which engine checkout "local" means.
+    fn apply_local_engine(&self) {
+        project::set_engine_root(self.local_engine_dir());
     }
 
     fn location(&self) -> PathBuf {
@@ -242,6 +259,9 @@ struct HubBuild {
     cancelled: bool,
     /// How far cargo says it has got; `None` until it says.
     progress: Option<reign_build::progress::BuildProgress>,
+    /// The editor to open when it's done, if it isn't the project's own
+    /// (a project without code, opened in an editor built from the engine).
+    exe: Option<PathBuf>,
 }
 
 enum BuildEvent {
@@ -320,6 +340,7 @@ impl Hub {
     fn new(cc: &eframe::CreationContext) -> Self {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
+        settings.apply_local_engine();
         let intro = if settings.skip_intro { Intro::finished() } else { Intro::new() };
         let updater = update::Updater::new(!settings.manual_updates, settings.beta_updates);
         Hub {
@@ -382,6 +403,11 @@ impl Hub {
         if project::has_code(path) {
             return self.build(path);
         }
+        // With "use my own engine folder" on, the editor is built from that
+        // folder, not the installed release.
+        if let Some(engine) = self.settings.local_engine_dir() {
+            return self.build_local_editor(path, &engine);
+        }
         let mut command = if let Some(version) = project_version(path).filter(|v| v != VERSION) {
             if self.versions.installing.as_deref() == Some(version.as_str()) {
                 return self.info(format!("Engine {version} is still downloading…"));
@@ -411,6 +437,21 @@ impl Hub {
         }
     }
 
+    /// Builds the editor from the engine checkout `engine`, then opens the
+    /// project (which has no code of its own) in it.
+    fn build_local_editor(&mut self, path: &Path, engine: &Path) {
+        if self.building.contains_key(path) {
+            return;
+        }
+        if !self.cargo {
+            return self.error(
+                "Using your own engine folder needs Rust to build it: get it from rustup.rs",
+            );
+        }
+        let command = project::engine_editor_command(engine);
+        self.start_build(path, command, Some(project::engine_editor_path(engine)));
+    }
+
     /// Builds a project's own editor, then opens it (see [`Self::poll_builds`]).
     fn build(&mut self, path: &Path) {
         if self.building.contains_key(path) {
@@ -423,7 +464,23 @@ impl Hub {
         let Some(name) = project::read_crate_name(path) else {
             return self.error(format!("{}/Cargo.toml has no package name", path.display()));
         };
-        let mut command = project::build_command(path, &name);
+        // With "use my own engine folder" on, the project builds against
+        // that folder: point its Cargo.toml there if it doesn't already.
+        if let Some(engine) = self.settings.local_engine_dir()
+            && !project::project_uses_checkout(path, &engine)
+        {
+            let source = project::EngineSource::Local(engine);
+            if let Err(e) = project::set_project_engine(path, &source) {
+                return self.error(format!("Can't point {} at your engine folder: {e}", name));
+            }
+        }
+        let command = project::build_command(path, &name);
+        self.start_build(path, command, None);
+    }
+
+    /// Runs `command` to build for the project at `path`, then opens it with
+    /// `exe` (the project's own editor when `None`).
+    fn start_build(&mut self, path: &Path, mut command: Command, exe: Option<PathBuf>) {
         command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
         launch::own_process_group(&mut command);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -454,6 +511,7 @@ impl Hub {
                         pid,
                         cancelled: false,
                         progress: None,
+                        exe,
                     },
                 );
                 self.info(format!("Compiling {}…", project_name(path)));
@@ -490,8 +548,13 @@ impl Hub {
                 self.info(format!("Build of {} cancelled", project_name(&path)));
                 continue;
             }
-            let Some(name) = project::read_crate_name(&path) else { continue };
-            let exe = project::editor_path(&path, &name);
+            let exe = match build.exe.clone() {
+                Some(exe) => exe,
+                None => {
+                    let Some(name) = project::read_crate_name(&path) else { continue };
+                    project::editor_path(&path, &name)
+                }
+            };
             let failure =
                 (!ok).then(|| build.first_error.unwrap_or_else(|| "cargo build failed".to_owned()));
             if let Some(first) = &failure {
@@ -1010,6 +1073,58 @@ impl Hub {
         action
     }
 
+    /// "Use my own engine folder": opens projects with an engine built from a
+    /// checkout on this computer (whatever branch it's on) instead of the
+    /// installed release. Changes there show up the next time a project opens.
+    fn local_engine_setting(&mut self, ui: &mut egui::Ui) {
+        let label = text(
+            "Use my own engine folder (a local copy of the engine, on any branch)",
+            Face::Medium,
+            14.0,
+            TEXT,
+            -0.2,
+        );
+        let mut changed = ui.checkbox(&mut self.settings.use_local_engine, label).changed();
+        if self.settings.use_local_engine {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let shown = self
+                    .settings
+                    .local_engine
+                    .as_ref()
+                    .map_or_else(|| "No folder chosen".to_owned(), |p| p.display().to_string());
+                ui.label(text(shown, Face::Regular, 12.5, FAINT, -0.1));
+                if ui.add(theme::secondary("Browse…")).clicked() {
+                    let mut dialog = rfd::FileDialog::new().set_title("Your Reign engine folder");
+                    if let Some(dir) = &self.settings.local_engine {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(dir) = dialog.pick_folder() {
+                        self.settings.local_engine = Some(dir);
+                        changed = true;
+                    }
+                }
+            });
+            let (note, color) = match &self.settings.local_engine {
+                None => ("Pick the folder you cloned the engine into.".to_owned(), RED_HOT),
+                Some(dir) if !project::is_engine_checkout(dir) => {
+                    ("That folder isn't a Reign engine checkout.".to_owned(), RED_HOT)
+                }
+                Some(_) => (
+                    "Projects open with the editor built from this folder, rebuilt when it \
+                     changes. Rust is needed."
+                        .to_owned(),
+                    MUTED,
+                ),
+            };
+            ui.label(text(note, Face::Regular, 12.5, color, -0.1));
+        }
+        if changed {
+            self.settings.apply_local_engine();
+            self.settings.save();
+        }
+    }
+
     fn about_page(&mut self, ui: &mut egui::Ui) {
         let facts = vec![
             "Deterministic 2D simulation".to_owned(),
@@ -1081,6 +1196,8 @@ impl Hub {
                 self.updater.set_beta(self.settings.beta_updates);
                 self.settings.save();
             }
+            ui.add_space(14.0);
+            self.local_engine_setting(ui);
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 ui.label(text("Code editor", Face::Medium, 14.0, TEXT, -0.2));
