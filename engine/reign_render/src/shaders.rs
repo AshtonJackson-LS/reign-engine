@@ -419,6 +419,7 @@ struct Fog {
     @location(3) shape: vec4<f32>,
     @location(4) motion: vec4<f32>,
     @location(5) style: vec4<f32>,
+    @location(6) extent: vec4<f32>,
 };
 
 struct VsOut {
@@ -430,6 +431,7 @@ struct VsOut {
     @location(4) size: vec2<f32>,
     @location(5) style: vec4<f32>,
     @location(6) origin: vec2<f32>,
+    @location(7) extent: vec4<f32>,
 };
 
 @vertex
@@ -439,7 +441,9 @@ fn vs_main(@builtin(vertex_index) i: u32, f: Fog) -> VsOut {
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
     );
     let c = corners[i];
-    let ndc = (f.pos + c * f.size) / VIEW * 2.0 - 1.0;
+    // Slanted: the whole volume is sheared down by `slope` per pixel right.
+    let sheared = c * f.size + vec2(0.0, c.x * f.size.x * f.style.z);
+    let ndc = (f.pos + sheared) / VIEW * 2.0 - 1.0;
     var out: VsOut;
     out.clip = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     out.local = c * f.size;
@@ -449,6 +453,7 @@ fn vs_main(@builtin(vertex_index) i: u32, f: Fog) -> VsOut {
     out.size = f.size;
     out.style = f.style;
     out.origin = f.pos;
+    out.extent = f.extent;
     return out;
 }
 
@@ -504,7 +509,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if !volumetric {
         px = floor(in.local) + 0.5;
     }
-    let world = in.origin + px;
+    let world = in.origin + px + vec2(0.0, px.x * in.style.z);
 
     // Stirs bend the field the noise is read from, and thin it out.
     var bend = vec2(0.0);
@@ -532,7 +537,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let drift = in.shape.zw;
     let time = in.motion.x;
     let seed = in.motion.y;
-    let p = (px - bend) / scale + vec2(seed * 7.3, seed * 3.1);
+    let p = (px + in.extent.zw - bend) / scale + vec2(seed * 7.3, seed * 3.1);
     let moved = drift * time / scale;
     let octaves = select(4, 5, volumetric);
     // Two layers sliding at different speeds churn the wisps as they go.
@@ -549,7 +554,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let top = select(1.0, smoothstep(0.0, in.motion.z, v), in.motion.z > 0.0);
     let bottom = select(1.0, smoothstep(0.0, in.motion.w, 1.0 - v), in.motion.w > 0.0);
     let h = px.x / in.size.x;
-    let sides = smoothstep(0.0, 0.08, h) * smoothstep(0.0, 0.08, 1.0 - h);
+    let left = select(1.0, smoothstep(0.0, in.extent.x, h), in.extent.x > 0.0);
+    let right = select(1.0, smoothstep(0.0, in.extent.y, 1.0 - h), in.extent.y > 0.0);
+    let sides = left * right;
     let a = density * wisps * top * bottom * sides * (1.0 - parted);
 
     if volumetric {
@@ -567,5 +574,195 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     return vec4(in.color.rgb, level * in.color.a);
+}
+"#;
+
+/// A body of water: the world behind it bent by ripples and tinted with
+/// depth, the world above it mirrored near the surface, drifting caustics
+/// and a bright line along the surface. Reads the frame drawn so far by
+/// texel, so it must be drawn from a copy of the target.
+pub const WATER: &str = r#"
+const VIEW: vec2<f32> = vec2<f32>(640.0, 360.0);
+
+@group(0) @binding(0) var grab: texture_2d<f32>;
+@group(0) @binding(1) var heights: texture_2d<f32>;
+
+struct Water {
+    @location(0) pos: vec2<f32>,
+    @location(1) size: vec2<f32>,
+    @location(2) info: vec4<f32>,
+    @location(3) shallow: vec4<f32>,
+    @location(4) deep: vec4<f32>,
+    @location(5) highlight: vec4<f32>,
+    @location(6) optics: vec4<f32>,
+    @location(7) motion: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    // From the resting surface's left end, in view units; y down.
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) origin: vec2<f32>,
+    @location(2) @interpolate(flat) size: vec2<f32>,
+    @location(3) @interpolate(flat) info: vec4<f32>,
+    @location(4) @interpolate(flat) shallow: vec4<f32>,
+    @location(5) @interpolate(flat) deep: vec4<f32>,
+    @location(6) @interpolate(flat) highlight: vec4<f32>,
+    @location(7) @interpolate(flat) optics: vec4<f32>,
+    @location(8) @interpolate(flat) motion: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32, w: Water) -> VsOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0),
+        vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+    );
+    let c = corners[i];
+    let margin = w.info.w;
+    let local = vec2(c.x * w.size.x, -margin + c.y * (w.size.y + margin));
+    let ndc = (w.pos + local) / VIEW * 2.0 - 1.0;
+    var out: VsOut;
+    out.clip = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    out.local = local;
+    out.origin = w.pos;
+    out.size = w.size;
+    out.info = w.info;
+    out.shallow = w.shallow;
+    out.deep = w.deep;
+    out.highlight = w.highlight;
+    out.optics = w.optics;
+    out.motion = w.motion;
+    return out;
+}
+
+// The simulated surface at `x` view units along a body `w` wide.
+fn height(row: i32, count: i32, x: f32, w: f32) -> f32 {
+    if count <= 1 {
+        return textureLoad(heights, vec2<i32>(0, row), 0).r;
+    }
+    let f = clamp(x / max(w, 0.001), 0.0, 1.0) * f32(count - 1);
+    let i0 = i32(floor(f));
+    let i1 = min(i0 + 1, count - 1);
+    let a = textureLoad(heights, vec2<i32>(i0, row), 0).r;
+    let b = textureLoad(heights, vec2<i32>(i1, row), 0).r;
+    return mix(a, b, fract(f));
+}
+
+// The ambient swell at world pixel `x` along the body, -1..1.
+fn swell(x: f32, t: f32) -> f32 {
+    return sin(x * 0.045 + t * 1.3) * 0.55 + sin(x * 0.11 - t * 2.1) * 0.3
+        + sin(x * 0.23 + t * 3.3) * 0.15;
+}
+
+// The world drawn so far at a point in view units, clamped to the frame.
+fn fetch(p: vec2<f32>) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(grab));
+    let t = clamp(p * dims / VIEW, vec2(0.0), dims - 1.0);
+    return textureLoad(grab, vec2<i32>(t), 0).rgb;
+}
+
+fn hash(p: vec2<f32>) -> f32 {
+    let q = fract(p * vec2(123.34, 456.21));
+    let r = q + dot(q, q + 45.32);
+    return fract(r.x * r.y);
+}
+
+fn noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash(i);
+    let b = hash(i + vec2(1.0, 0.0));
+    let c = hash(i + vec2(0.0, 1.0));
+    let d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 4x4 ordered dither, 0..1.
+fn bayer(p: vec2<f32>) -> f32 {
+    let x = u32(abs(p.x)) % 4u;
+    let y = u32(abs(p.y)) % 4u;
+    var m = array<f32, 16>(
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0,
+    );
+    return (m[y * 4u + x] + 0.5) / 16.0;
+}
+
+// `v` (0..1) in `steps` dithered levels when pixel snapping.
+fn levels(v: f32, steps: f32, cell: vec2<f32>, pixel: bool) -> f32 {
+    if !pixel {
+        return v;
+    }
+    return clamp(floor(v * steps + bayer(cell)) / steps, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let s = in.info.z;
+    let row = i32(in.info.x);
+    let count = i32(in.info.y);
+    let pixel = in.motion.w > 0.5;
+    let t = in.motion.z;
+    var p = in.local;
+    if pixel {
+        p = (floor(p / s) + 0.5) * s;
+    }
+    let cell = floor(p / s);
+    // World pixels along the body, and the surface over this column.
+    let wx = p.x / s;
+    let surf = height(row, count, p.x, in.size.x) + swell(wx, t) * in.motion.y * s;
+    if p.y < surf {
+        discard;
+    }
+    // World pixels under the surface.
+    let d = (p.y - surf) / s;
+    let screen = in.origin + p;
+
+    // What's behind the water, bent sideways by the ripples.
+    let wob = sin(wx * 0.19 + d * 0.42 - t * 2.6) * 0.65 + sin(wx * 0.071 + t * 1.9 + d * 0.13) * 0.35;
+    let bend = in.optics.w * smoothstep(0.0, 4.0, d) * wob;
+    let behind = fetch(screen + vec2(bend * s, 0.0));
+    var col = behind * mix(vec3(1.0), in.shallow.rgb, in.shallow.a);
+    let deepness = levels(clamp(d / in.optics.x, 0.0, 1.0), 6.0, cell, pixel);
+    col = mix(col, in.deep.rgb, in.deep.a * deepness);
+
+    // Caustics: bright ridges where two drifting noise fields cross.
+    // Strongest just under the surface, where the light comes in.
+    let cp = vec2(wx * 0.05, d * 0.08);
+    let c1 = noise(cp + vec2(t * 0.3, t * 0.17));
+    let c2 = noise(cp * 1.6 + vec2(7.3 - t * 0.23, 3.1 + t * 0.27));
+    let ridge = pow(1.0 - abs(c1 - c2), 24.0);
+    let light_in = smoothstep(1.0, 4.0, d) * exp(-d / (in.optics.x * 0.3));
+    let caustic = levels(ridge * light_in, 3.0, cell, pixel);
+    col += in.highlight.rgb * caustic * in.motion.x * 0.3;
+
+    // The world above, mirrored about the moving surface and rippled.
+    let rip = sin(d * 0.9 - t * 3.4 + wx * 0.06) * min(d * 0.09, 2.0) + wob * in.optics.w * 0.5;
+    let mirror = vec2(screen.x + rip * s, in.origin.y + 2.0 * surf - p.y);
+    var shine = in.optics.y * (1.0 - smoothstep(0.0, in.optics.z, d));
+    // Nothing to mirror past the top of the frame.
+    shine *= smoothstep(0.0, 6.0 * s, mirror.y);
+    shine = levels(shine, 5.0, cell, pixel);
+    let above = fetch(mirror) * mix(vec3(1.0), in.shallow.rgb, in.shallow.a * 0.5);
+    col = mix(col, above, shine);
+
+    // A bright lip along the surface, and glints where it's steep.
+    let slope = (height(row, count, p.x + s, in.size.x) - height(row, count, p.x - s, in.size.x)) / (2.0 * s);
+    var lip = 1.0 - step(1.0, d);
+    if !pixel {
+        lip = 1.0 - smoothstep(0.6, 1.6, d);
+    }
+    let glint = (1.0 - step(2.0, d)) * clamp(abs(slope) * 1.5, 0.0, 1.0);
+    col = mix(col, in.highlight.rgb, in.highlight.a * max(lip, glint * 0.6));
+    // Sparse twinkles just under the surface.
+    let twinkle = hash(vec2(cell.x, floor(d)) + floor(t * 5.0));
+    if twinkle > 0.996 && d < 7.0 && d >= 1.0 {
+        col += in.highlight.rgb * 0.5;
+    }
+    return vec4(col, 1.0);
 }
 "#;

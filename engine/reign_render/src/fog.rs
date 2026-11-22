@@ -50,6 +50,23 @@ pub struct Fog {
     /// How much [`Stir`]s move this volume, 0..1: far haze barely notices
     /// the player, mist at their feet curls round them.
     pub stir: f32,
+    /// How far the top and bottom drop per pixel to the right, so mist can
+    /// lie along a ramp: 1 sinks a pixel per pixel, -1 climbs. The
+    /// feathering follows the slant.
+    pub slope: f32,
+    /// How much of the width fades in at the left and at the right, 0..1.
+    /// 0 leaves that side hard, to butt against a neighbouring volume.
+    pub edges: (f32, f32),
+    /// Where in the wisp pattern the volume's left edge is, in pixels.
+    /// Volumes with the same seed, scale and drift whose `pattern.0` differ
+    /// by the distance between them continue one another's wisps, so a long
+    /// bank of mist can be made of pieces without seams.
+    pub pattern: (f32, f32),
+}
+
+impl Fog {
+    /// The side fade volumes had before it could be set.
+    pub const EDGES: (f32, f32) = (0.08, 0.08);
 }
 
 /// A disturbance in the fog, in world pixels, shifted by the renderer's
@@ -81,8 +98,10 @@ pub(crate) struct FogInstance {
     shape: [f32; 4],
     /// Time, seed, feather top, feather bottom.
     motion: [f32; 4],
-    /// Style (0 pixel, 1 volumetric), stir response, unused, unused.
+    /// Style (0 pixel, 1 volumetric), stir response, slope, unused.
     style: [f32; 4],
+    /// Left fade, right fade, pattern offset x and y.
+    extent: [f32; 4],
 }
 
 impl FogInstance {
@@ -97,7 +116,13 @@ impl FogInstance {
             color: fog.color.to_linear(),
             shape: [fog.density, fog.scale.max(1.0), fog.drift.0, fog.drift.1],
             motion: [fog.time, fog.seed, fog.feather.0, fog.feather.1],
-            style: [style, fog.stir, 0.0, 0.0],
+            style: [style, fog.stir, fog.slope, 0.0],
+            extent: [
+                fog.edges.0.clamp(0.0, 1.0),
+                fog.edges.1.clamp(0.0, 1.0),
+                fog.pattern.0,
+                fog.pattern.1,
+            ],
         }
     }
 }
@@ -223,9 +248,9 @@ fn create_pipeline(
         bind_group_layouts: &[Some(stirs)],
         ..Default::default()
     });
-    const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
         0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4,
-        5 => Float32x4
+        5 => Float32x4, 6 => Float32x4
     ];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("fog pipeline"),
@@ -256,4 +281,55 @@ fn create_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Color, Fog, FogStyle, Lighting, Renderer};
+
+    fn bank(x: f32, w: f32, y: f32, slope: f32, edges: (f32, f32)) -> Fog {
+        Fog {
+            x,
+            y,
+            w,
+            h: 40.0,
+            color: Color::WHITE,
+            density: 1.0,
+            scale: 1000.0,
+            drift: (0.0, 0.0),
+            time: 0.0,
+            seed: 0.0,
+            feather: (0.0, 0.0),
+            style: FogStyle::Volumetric,
+            stir: 0.0,
+            slope,
+            edges,
+            pattern: (x, 0.0),
+        }
+    }
+
+    /// Mist on a ramp follows it down, and two pieces of a bank meeting
+    /// with hard edges and matching patterns show no seam.
+    #[cfg(feature = "hooks")]
+    #[test]
+    fn slanted_fog_follows_its_slope_and_pieces_join_without_a_seam() {
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let Ok(mut r) = pollster::block_on(Renderer::headless((640, 360), format)) else {
+            eprintln!("No GPU adapter available: skipping the fog slope test");
+            return;
+        };
+        r.set_lighting(Lighting { vignette: 0.0, ..Lighting::default() });
+        // A flat piece, then a ramp sinking 1 px per px from where it ends.
+        r.fog(bank(100.0, 100.0, 100.0, 0.0, (0.0, 0.0)));
+        r.fog(bank(200.0, 100.0, 100.0, 1.0, (0.0, 0.0)));
+        r.present(Color::BLACK);
+        let px = r.read_offscreen().unwrap();
+        let lum = |x: usize, y: usize| px[(y * 640 + x) * 4] as i32;
+        // At the ramp's far end the mist has sunk 90 px: lit at 210, not 120.
+        assert!(lum(290, 210) > 30, "mist along the ramp: {}", lum(290, 210));
+        assert!(lum(290, 120) < 10, "not in the unslanted box: {}", lum(290, 120));
+        // Across the join the mist is the same, with no faded seam.
+        let (a, b) = (lum(198, 120), lum(201, 121));
+        assert!((a - b).abs() < 12, "seam: {a} vs {b}");
+    }
 }

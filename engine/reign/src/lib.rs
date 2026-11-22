@@ -12,6 +12,7 @@
 //! | [`combat`] | `reign_combat` | Frame data, hitboxes, hitstop and screen shake. |
 //! | [`render`] | `reign_render` | The wgpu renderer and its post-effect chain. |
 //! | [`particles`] | `reign_particles` | Particle systems: plays and draws particle effect assets. |
+//! | [`water`] | `reign_water` | Reactive water: rippling, splashing, reflective surfaces. |
 //! | [`audio`] | `reign_audio` | PCM playback, spatial mixing and buses. |
 //! | [`net`] | `reign_net` | Rollback netcode over the deterministic simulation. |
 //! | [`assets`] | `reign_assets` | Asset decoding (PNG). |
@@ -33,3 +34,4 @@ pub use reign_particles as particles;
 pub use reign_physics as physics;
 pub use reign_render as render;
 pub use reign_scene as scene;
+pub use reign_water as water;
