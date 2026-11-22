@@ -1,0 +1,10 @@
+[package]
+name = "reign_water"
+description = "Reactive water: a rippling surface simulation, splashes and droplets, drawn reflective"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reign_render.workspace = true

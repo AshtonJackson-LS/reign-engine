@@ -13,6 +13,7 @@ reign_physics.workspace = true
 reign_combat.workspace = true
 reign_render.workspace = true
 reign_particles.workspace = true
+reign_water.workspace = true
 reign_audio.workspace = true
 reign_net.workspace = true
 reign_assets.workspace = true

@@ -3471,6 +3471,7 @@ dependencies = [
  "reign_physics",
  "reign_render",
  "reign_scene",
+ "reign_water",
 ]
 
 [[package]]
@@ -3660,6 +3661,13 @@ dependencies = [
  "reign_build",
  "rfd",
  "winresource",
+]
+
+[[package]]
+name = "reign_water"
+version = "0.2.2"
+dependencies = [
+ "reign_render",
 ]
 
 [[package]]

@@ -24,12 +24,14 @@ mod fog;
 mod post;
 mod shaders;
 mod texture_cache;
+mod water;
 
 pub use color::Color;
 pub use fog::{Fog, FogStyle, MAX_STIRS, Stir};
 use post::{HDR_FORMAT, Post};
 pub use post::{Light, Lighting, Shafts};
 pub use texture_cache::TextureCache;
+pub use water::{MAX_WATER_BODIES, MAX_WATER_COLUMNS, WaterStyle, WaterSurface};
 #[cfg(feature = "hooks")]
 pub use wgpu;
 
@@ -105,9 +107,26 @@ pub enum Layer {
 /// sprites and rectangles layer the way they were queued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Batch {
-    Rects { blend: Blend, start: u32, end: u32 },
-    Sprites { blend: Blend, texture: usize, start: u32, end: u32 },
-    Fog { start: u32, end: u32 },
+    Rects {
+        blend: Blend,
+        start: u32,
+        end: u32,
+    },
+    Sprites {
+        blend: Blend,
+        texture: usize,
+        start: u32,
+        end: u32,
+    },
+    Fog {
+        start: u32,
+        end: u32,
+    },
+    /// Drawn from a copy of the world so far: the world pass stops here.
+    Water {
+        start: u32,
+        end: u32,
+    },
 }
 
 pub struct Renderer {
@@ -136,6 +155,7 @@ pub struct Renderer {
     sprite_capacity: usize,
     sprites: Vec<SpriteInstance>,
     fog: fog::FogPass,
+    water: water::WaterPass,
     textures: Vec<Texture>,
     batches: Vec<Batch>,
     overlay: Vec<Batch>,
@@ -172,6 +192,8 @@ pub struct Offscreen {
 /// normal maps (see [`Renderer::set_material`]).
 struct Target {
     scale: u32,
+    /// The world target itself, copied for water to read.
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     material: wgpu::TextureView,
 }
@@ -289,6 +311,7 @@ impl Renderer {
         let sprite_buffer =
             create_instance_buffer::<SpriteInstance>(&device, INITIAL_SPRITE_CAPACITY);
         let fog = fog::FogPass::new(&device, HDR_FORMAT);
+        let water = water::WaterPass::new(&device, HDR_FORMAT);
         let target = create_target(&device, view_scale(config.width, config.height));
         let post = Post::new(
             &device,
@@ -320,6 +343,7 @@ impl Renderer {
             sprite_capacity: INITIAL_SPRITE_CAPACITY,
             sprites: Vec::with_capacity(INITIAL_SPRITE_CAPACITY),
             fog,
+            water,
             textures: Vec::new(),
             batches: Vec::new(),
             overlay: Vec::new(),
@@ -583,6 +607,7 @@ impl Renderer {
             h: fog.h * s,
             scale: fog.scale * s,
             drift: (fog.drift.0 * s, fog.drift.1 * s),
+            pattern: (fog.pattern.0 * s, fog.pattern.1 * s),
             ..fog
         };
         let end = self.fog.push(fog, self.offset.map(|v| v * s));
@@ -605,6 +630,21 @@ impl Renderer {
             ..stir
         };
         self.fog.stir(stir, self.offset.map(|v| v * s));
+    }
+
+    /// Queues a body of water, shifted by the current offset. It reflects
+    /// and refracts everything queued before it and is covered by
+    /// everything queued after. World layer only; up to
+    /// [`MAX_WATER_BODIES`] a frame.
+    pub fn water(&mut self, water: &WaterSurface) {
+        if self.layer == Layer::Overlay {
+            return;
+        }
+        let Some(end) = self.water.push(water, self.offset, self.draw_scale) else { return };
+        match self.batches.last_mut() {
+            Some(Batch::Water { end: last, .. }) => *last = end,
+            _ => self.batches.push(Batch::Water { start: end - 1, end }),
+        }
     }
 
     /// Which pass everything queued after this call lands in. Back to
@@ -721,13 +761,30 @@ impl Renderer {
         }
         self.queue.write_buffer(&self.sprite_buffer, 0, bytemuck::cast_slice(&self.sprites));
         self.fog.upload(&self.device, &self.queue);
+        self.water.upload(&self.device, &self.queue);
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        {
-            let mut pass = begin_pass(&mut encoder, &self.target.view, Some(clear), "world pass");
-            self.draw_batches(&mut pass, &self.batches, false);
+        // The world, in runs between water: each run of water is drawn from
+        // a copy of everything before it.
+        let mut rest = &self.batches[..];
+        let mut clear = Some(clear);
+        loop {
+            let split = rest.iter().position(|b| matches!(b, Batch::Water { .. }));
+            let run = &rest[..split.unwrap_or(rest.len())];
+            if !run.is_empty() || clear.is_some() {
+                let mut pass = begin_pass(&mut encoder, &self.target.view, clear, "world pass");
+                self.draw_batches(&mut pass, run, false);
+            }
+            clear = None;
+            let Some(i) = split else { break };
+            if let Batch::Water { start, end } = rest[i] {
+                self.water.grab(&self.device, &mut encoder, &self.target.texture);
+                let mut pass = begin_pass(&mut encoder, &self.target.view, None, "water pass");
+                self.water.draw(&mut pass, start, end);
+            }
+            rest = &rest[i + 1..];
         }
         {
             // What each pixel of the world is made of, for the lights: cleared
@@ -771,6 +828,8 @@ impl Renderer {
                     pass.draw(0..6, start..end);
                 }
                 Batch::Fog { start, end } => self.fog.draw(pass, start, end),
+                // Water needs the world copied first: see `render_frame`.
+                Batch::Water { .. } => {}
             }
         }
     }
@@ -801,6 +860,7 @@ impl Renderer {
         self.rects.clear();
         self.sprites.clear();
         self.fog.clear();
+        self.water.clear();
         self.batches.clear();
     }
 }
@@ -921,9 +981,22 @@ pub fn integer_viewport(width: u32, height: u32) -> (u32, u32, u32, u32) {
 
 fn create_target(device: &wgpu::Device, scale: u32) -> Target {
     let size = (VIEW_WIDTH * scale, VIEW_HEIGHT * scale);
-    let view = post::hdr_target(device, "world target", size);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("world target"),
+        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        // Copied from when water is drawn.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let material = material_target(device, size);
-    Target { scale, view, material }
+    Target { scale, texture, view, material }
 }
 
 /// Where the material pass draws: normals, masks and a has-maps flag.
